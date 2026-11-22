@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -28,13 +27,9 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -43,10 +38,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -61,9 +53,7 @@ import com.example.R
 import com.example.data.BrandChannel
 import com.example.ui.StudioUiState
 import com.example.ui.components.AircheckBrandMark
-import com.example.ui.components.HardwareKeyButton
 import com.example.ui.components.HazardCutOverlay
-import com.example.ui.components.LoopingBrandVideoPlayer
 import com.example.ui.components.StudioCard
 import com.example.ui.components.TelemetryWaveform
 import com.example.ui.theme.AcidVoltLime
@@ -86,19 +76,22 @@ import com.example.ui.theme.TelemetryTimecodeStyle
 private data class BrandAssetItem(val title: String, val resId: Int)
 private data class ColorSwatchItem(val name: String, val hex: String, val color: Color)
 
+/**
+ * Real-state-only System Deck Inspector:
+ * Every control is persisted in Proto DataStore or Room (zero unbacked local toggles).
+ */
 @Composable
 fun SystemDeckSheet(
     uiState: StudioUiState,
     onSelectChannel: (BrandChannel) -> Unit,
-    onSynthesizeAudioTest: () -> Unit,
+    onClearCasCache: () -> Unit,
+    onPreviewAudio: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
     val activeChannel = uiState.settings.brandChannel
-    var activeLoopRes by remember { mutableStateOf(R.raw.brand_loop_torus) }
-    var activeTestLed by remember { mutableStateOf(0) }
-    var shimmerTestActive by remember { mutableStateOf(false) }
+    val persona = uiState.settings.persona
 
     val brandAssets = remember(activeChannel) {
         if (activeChannel == BrandChannel.VOLT_LIME) {
@@ -146,7 +139,6 @@ fun SystemDeckSheet(
             .windowInsetsPadding(WindowInsets.navigationBars),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Uniform 52.dp Sheet Top Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -190,7 +182,7 @@ fun SystemDeckSheet(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 1. Live Broadcast Channel Switcher (Persisted via DataStore)
+            // 1. Live Broadcast Channel Switcher (Persisted via Proto DataStore)
             item(key = "channel_switcher") {
                 StudioCard(modifier = Modifier.fillMaxWidth()) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -248,8 +240,9 @@ fun SystemDeckSheet(
                 }
             }
 
-            // 2. Live 3D Conglomerate Motion Vault (Bundled MP4 loops)
-            item(key = "motion_vault") {
+            // 2. Real SHA-256 CAS Disk Cache & Pipeline Telemetry
+            item(key = "cas_telemetry") {
+                val mbUsed = uiState.casTotalBytes / (1024.0 * 1024.0)
                 StudioCard(modifier = Modifier.fillMaxWidth()) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Row(
@@ -258,51 +251,44 @@ fun SystemDeckSheet(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Motion vault",
+                                text = "Content-addressed media cache",
                                 style = MaterialTheme.typography.titleSmall,
                                 color = StudioCrisp
                             )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf(
-                                    "Torus" to R.raw.brand_loop_torus,
-                                    "Clock" to R.raw.brand_loop_clock
-                                ).forEach { (label, resId) ->
-                                    val chosen = activeLoopRes == resId
-                                    Surface(
-                                        color = if (chosen) tokens.channelAccentContainer else ConsoleElevated,
-                                        shape = RoundedCornerShape(6.dp),
-                                        border = BorderStroke(
-                                            1.dp,
-                                            if (chosen) tokens.channelAccent else tokens.hairline
-                                        ),
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .clickable { activeLoopRes = resId }
-                                    ) {
-                                        Text(
-                                            text = label,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = if (chosen) tokens.channelAccent else TelemetryMuted,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                        )
-                                    }
-                                }
-                            }
+                            Text(
+                                text = "${"%.1f".format(mbUsed)} / 1500 MB",
+                                style = TelemetryTimecodeStyle,
+                                color = tokens.channelAccent,
+                                modifier = Modifier.testTag("cas_cache_size_label")
+                            )
                         }
-
-                        Box(
+                        Text(
+                            text = "Head: ${persona.headModelId.ifBlank { "Unenrolled" }} · Voice: ${persona.voiceId.ifBlank { "Unenrolled" }}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TelemetryMuted
+                        )
+                        Text(
+                            text = "Script LLM: ${uiState.activeModels.textModelId} (${uiState.activeModels.health.name})",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TelemetryMuted
+                        )
+                        OutlinedButton(
+                            onClick = onClearCasCache,
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, tokens.hairline),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .aspectRatio(16f / 9f)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(OledVoid)
-                                .border(1.dp, tokens.hairline, RoundedCornerShape(6.dp))
+                                .height(48.dp)
+                                .testTag("clear_cas_cache_button")
                         ) {
-                            LoopingBrandVideoPlayer(
-                                rawResId = activeLoopRes,
-                                contentDescription = "Aircheck conglomerate motion loop",
-                                modifier = Modifier.fillMaxSize()
+                            Icon(
+                                imageVector = Icons.Filled.DeleteSweep,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
                             )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Clear local CAS cache")
                         }
                     }
                 }
@@ -347,62 +333,7 @@ fun SystemDeckSheet(
                 }
             }
 
-            // 4. Tactile Hardware Key Playground + LED Tally
-            item(key = "hardware_playground") {
-                StudioCard(
-                    shimmering = shimmerTestActive,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(
-                            text = "Hardware keys & shimmer",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = StudioCrisp
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            HardwareKeyButton(
-                                icon = Icons.Filled.PlayArrow,
-                                contentDescription = "Live tally key",
-                                onClick = { activeTestLed = 0 },
-                                active = activeTestLed == 0,
-                                ledColor = LiveTallyGreen,
-                                label = "Live"
-                            )
-                            HardwareKeyButton(
-                                icon = Icons.Filled.FiberManualRecord,
-                                contentDescription = "Record tally key",
-                                onClick = { activeTestLed = 1 },
-                                active = activeTestLed == 1,
-                                iconTint = OnAirCrimson,
-                                ledColor = OnAirCrimson,
-                                label = "Rec"
-                            )
-                            HardwareKeyButton(
-                                icon = Icons.Filled.Mic,
-                                contentDescription = "Standby key",
-                                onClick = { activeTestLed = 2 },
-                                active = activeTestLed == 2,
-                                ledColor = BroadcastCobalt,
-                                label = "Mic"
-                            )
-                            HardwareKeyButton(
-                                icon = if (shimmerTestActive) Icons.Filled.Stop else Icons.Filled.AutoAwesome,
-                                contentDescription = "Toggle card shimmer",
-                                onClick = { shimmerTestActive = !shimmerTestActive },
-                                active = shimmerTestActive,
-                                ledColor = tokens.channelAccent,
-                                label = "Shimmer",
-                                modifier = Modifier.testTag("system_deck_shimmer_toggle")
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 5. Color Tokens Grid
+            // 4. Color Tokens Grid
             item(key = "color_tokens") {
                 StudioCard(modifier = Modifier.fillMaxWidth()) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -448,7 +379,7 @@ fun SystemDeckSheet(
                 }
             }
 
-            // 6. Typography Specimen (Space Grotesk + JetBrains Mono) + Hazard Cut Specimen
+            // 5. Typography Specimen & Hazard Cut
             item(key = "type_and_hazard") {
                 StudioCard(modifier = Modifier.fillMaxWidth()) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -467,11 +398,6 @@ fun SystemDeckSheet(
                             style = MaterialTheme.typography.bodyLarge,
                             color = TelemetryMuted
                         )
-                        Text(
-                            text = "00:30 · 24 FPS · 16-BIT PCM · 118 HZ",
-                            style = TelemetryTimecodeStyle,
-                            color = tokens.channelAccent
-                        )
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -483,7 +409,7 @@ fun SystemDeckSheet(
                         ) {
                             HazardCutOverlay(modifier = Modifier.matchParentSize())
                             Text(
-                                text = "Cut beat preview",
+                                text = "Cut beat specimen",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = tokens.hazardCut,
                                 modifier = Modifier.padding(horizontal = 12.dp)
@@ -493,59 +419,42 @@ fun SystemDeckSheet(
                 }
             }
 
-            // 7. Live Real-WAV Telemetry Waveform Inspector
+            // 6. Real Decoded WAV Waveform Telemetry
             item(key = "live_waveform") {
                 StudioCard(modifier = Modifier.fillMaxWidth()) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Live audio telemetry",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = StudioCrisp
-                            )
-                            uiState.lastMeasuredPitchHz?.let { hz ->
-                                Text(
-                                    text = "${hz.toInt()} Hz",
-                                    style = TelemetryTimecodeStyle,
-                                    color = tokens.channelAccent
-                                )
-                            }
-                        }
-
+                        Text(
+                            text = "Live audio telemetry",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = StudioCrisp
+                        )
                         TelemetryWaveform(
                             peaks = uiState.waveformPeaks,
                             progress = uiState.playbackProgress,
                             isRecording = uiState.isRecordingMic,
                             height = 56.dp
                         )
-
-                        OutlinedButton(
-                            onClick = onSynthesizeAudioTest,
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, tokens.channelAccent),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = tokens.channelAccent),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.GraphicEq,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (uiState.waveformPeaks.isEmpty()) {
-                                    "Synthesize script WAV to inspect"
-                                } else {
-                                    "Replay decoded WAV track"
-                                },
-                                fontWeight = FontWeight.SemiBold
-                            )
+                        if (uiState.waveformPeaks.isNotEmpty()) {
+                            OutlinedButton(
+                                onClick = onPreviewAudio,
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, tokens.channelAccent),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = tokens.channelAccent),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.GraphicEq,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (uiState.isPlayingAudio) "Stop playback" else "Replay cached WAV",
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                     }
                 }

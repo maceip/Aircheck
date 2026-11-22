@@ -6,6 +6,7 @@ import com.example.R
 import com.example.data.NewsroomStageConfig
 import com.example.data.ScriptBeat
 import com.example.data.ScriptProject
+import com.example.data.Stage4Mode
 import com.example.data.VoiceSource
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
@@ -112,10 +113,6 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
         )
     }
 
-    /**
-     * Upserts a script project cleanly: uses update() when doc exists (preserving immutable createdAt)
-     * and create/set() when new, matching firestore.rules 1:1.
-     */
     suspend fun syncProject(project: ScriptProject): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in."))
@@ -137,6 +134,7 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
                     "cut" to beat.cut,
                     "mentionTag" to beat.mentionTag.take(64),
                     "depthTextTag" to beat.depthTextTag.take(64),
+                    "anchorWord" to beat.anchorWord.take(48),
                     "evidenceSource" to beat.evidenceSource.take(120),
                     "sfxTag" to beat.sfxTag.take(64),
                     "phoneticOverride" to beat.phoneticOverride.take(64),
@@ -146,6 +144,9 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
             val stageMap = mapOf(
                 "backdropPresetId" to project.stageConfig.backdropPresetId.take(64),
                 "customBackdropPrompt" to project.stageConfig.customBackdropPrompt.take(240),
+                "photoSha" to project.stageConfig.photoSha.orEmpty().take(64),
+                "normalizedPhotoSha" to project.stageConfig.normalizedPhotoSha.orEmpty().take(64),
+                "stage4Mode" to project.stageConfig.stage4Mode.id,
                 "chyronHeadline" to project.stageConfig.chyronHeadline.take(80),
                 "chyronSubline" to project.stageConfig.chyronSubline.take(100),
                 "cornerBugText" to project.stageConfig.cornerBugText.take(32),
@@ -157,12 +158,13 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
                 val updatePayload = buildMap<String, Any?> {
                     put("title", project.title.take(180))
                     put("ideaSpark", project.ideaSpark.take(1000))
+                    put("sourceUrl", project.sourceUrl.take(500))
                     put("targetDurationSec", safeTarget)
                     put("beats", beatsList)
                     put("stageConfig", stageMap)
                     put("voiceSource", project.voiceSource.name)
-                    if (project.voiceSelectionId.isNotBlank()) {
-                        put("voiceSelectionId", project.voiceSelectionId.take(128))
+                    if (project.voiceIdOverride.isNotBlank()) {
+                        put("voiceSelectionId", project.voiceIdOverride.take(128))
                     }
                     put("updatedAt", FieldValue.serverTimestamp())
                 }.filterValues { it != null }
@@ -172,12 +174,13 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
                     put("userId", uid)
                     put("title", project.title.take(180))
                     put("ideaSpark", project.ideaSpark.take(1000))
+                    put("sourceUrl", project.sourceUrl.take(500))
                     put("targetDurationSec", safeTarget)
                     put("beats", beatsList)
                     put("stageConfig", stageMap)
                     put("voiceSource", project.voiceSource.name)
-                    if (project.voiceSelectionId.isNotBlank()) {
-                        put("voiceSelectionId", project.voiceSelectionId.take(128))
+                    if (project.voiceIdOverride.isNotBlank()) {
+                        put("voiceSelectionId", project.voiceIdOverride.take(128))
                     }
                     put("createdAt", FieldValue.serverTimestamp())
                     put("updatedAt", FieldValue.serverTimestamp())
@@ -223,6 +226,7 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
                 cut = (map["cut"] as? Boolean) ?: false,
                 mentionTag = (map["mentionTag"] as? String).orEmpty(),
                 depthTextTag = (map["depthTextTag"] as? String).orEmpty(),
+                anchorWord = (map["anchorWord"] as? String).orEmpty(),
                 evidenceSource = (map["evidenceSource"] as? String).orEmpty(),
                 sfxTag = (map["sfxTag"] as? String).orEmpty(),
                 phoneticOverride = (map["phoneticOverride"] as? String).orEmpty(),
@@ -233,6 +237,9 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
         val stage = NewsroomStageConfig(
             backdropPresetId = (rawStage["backdropPresetId"] as? String).orEmpty().ifBlank { "volt_truss_globe" },
             customBackdropPrompt = (rawStage["customBackdropPrompt"] as? String).orEmpty(),
+            photoSha = (rawStage["photoSha"] as? String).orEmpty().ifBlank { null },
+            normalizedPhotoSha = (rawStage["normalizedPhotoSha"] as? String).orEmpty().ifBlank { null },
+            stage4Mode = Stage4Mode.fromRaw(rawStage["stage4Mode"] as? String),
             chyronHeadline = (rawStage["chyronHeadline"] as? String).orEmpty(),
             chyronSubline = (rawStage["chyronSubline"] as? String).orEmpty(),
             cornerBugText = (rawStage["cornerBugText"] as? String).orEmpty().ifBlank { "AIRCHECK" },
@@ -246,11 +253,12 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
             userId = (data["userId"] as? String).orEmpty().ifBlank { uid },
             title = (data["title"] as? String).orEmpty(),
             ideaSpark = (data["ideaSpark"] as? String).orEmpty(),
+            sourceUrl = (data["sourceUrl"] as? String).orEmpty(),
             targetDurationSec = (data["targetDurationSec"] as? Number)?.toInt() ?: 30,
             beats = if (beats.isEmpty()) listOf(ScriptBeat(index = 0)) else beats,
             stageConfig = stage,
             voiceSource = VoiceSource.fromRaw(data["voiceSource"] as? String),
-            voiceSelectionId = (data["voiceSelectionId"] as? String).orEmpty(),
+            voiceIdOverride = (data["voiceSelectionId"] as? String).orEmpty(),
             createdAtMillis = createdAtTs?.toDate()?.time ?: System.currentTimeMillis(),
             updatedAtMillis = updatedAtTs?.toDate()?.time ?: System.currentTimeMillis()
         )

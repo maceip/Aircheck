@@ -62,12 +62,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.example.R
 import com.example.data.BackdropPreset
 import com.example.data.NewsroomStageConfig
+import com.example.data.Stage4Mode
 import com.example.data.VoiceSource
-import com.example.data.local.MediaStorageManager
+import com.example.data.local.CasMediaStore
 import com.example.ui.StudioUiState
 import com.example.ui.components.StudioCard
 import com.example.ui.components.StudioErrorBanner
@@ -78,36 +79,42 @@ import com.example.ui.theme.OledVoid
 import com.example.ui.theme.StudioCrisp
 import com.example.ui.theme.TelemetryMuted
 
+/**
+ * Daily On-Phone Common Path: Pick 1 photo -> Cloud Pose Gate + optional 1-tap `head_model_id`
+ * eye-level normalizer -> Stage 4 contract selector -> Enqueue Cloud Render.
+ */
 @Composable
-fun StageScreen(
+fun PhotoStageScreen(
     uiState: StudioUiState,
-    mediaStorage: MediaStorageManager,
-    onImportSelfie: (Uri) -> Unit,
+    casStore: CasMediaStore,
+    onImportPhoto: (Uri) -> Unit,
+    onNormalizePose: () -> Unit,
     onUpdateStageConfig: ((NewsroomStageConfig) -> NewsroomStageConfig) -> Unit,
-    onComposeAnchor: () -> Unit,
+    onSetStage4Mode: (Stage4Mode) -> Unit,
     onSetVoiceSource: (VoiceSource) -> Unit,
-    onSetVoiceSelectionId: (String) -> Unit,
     onGenerateBeatBRoll: (String) -> Unit,
-    onRenderVideo: () -> Unit,
+    onEnqueueRender: () -> Unit,
     onDismissError: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
     val project = uiState.activeProject
     val stage = project.stageConfig
+    val persona = uiState.settings.persona
 
+    var showBackdropSection by remember { mutableStateOf(false) }
     var showChyronSection by remember { mutableStateOf(false) }
     var showBRollSection by remember { mutableStateOf(false) }
 
     val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
-        if (uri != null) onImportSelfie(uri)
+        if (uri != null) onImportPhoto(uri)
     }
 
-    val previewFile = remember(stage.compositedAnchorKey, stage.selfieImageKey) {
-        mediaStorage.fileForKey(stage.compositedAnchorKey)
-            ?: mediaStorage.fileForKey(stage.selfieImageKey)
+    val activeSha = stage.activePhotoSha ?: persona.defaultPhotoSha.ifBlank { null }
+    val previewFile = remember(activeSha) {
+        casStore.fileForSha(activeSha, "jpg")
     }
     val selectedPreset = remember(stage.backdropPresetId) {
         BackdropPreset.fromId(stage.backdropPresetId)
@@ -125,26 +132,41 @@ fun StageScreen(
                 .fillMaxWidth()
                 .widthIn(max = 640.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             if (!uiState.errorMessage.isNullOrBlank()) {
-                item(key = "stage_error") {
+                item(key = "photo_error") {
                     StudioErrorBanner(message = uiState.errorMessage, onDismiss = onDismissError)
                 }
             }
 
-            // 1. Presenter Likeness & Studio Anchor Frame
-            item(key = "anchor_card") {
+            // 1. Single Daily Phone Photo + Cloud Pose Gate
+            item(key = "photo_card") {
                 StudioCard(
-                    shimmering = uiState.isComposingAnchor,
+                    shimmering = uiState.isCheckingPose || uiState.isNormalizingPose,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(
-                            text = "Anchor portrait",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = StudioCrisp
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Presenter photo",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = StudioCrisp
+                            )
+                            if (persona.headModelId.isNotBlank()) {
+                                Text(
+                                    text = persona.headModelId,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = tokens.channelAccent,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
 
                         Box(
                             modifier = Modifier
@@ -159,7 +181,7 @@ fun StageScreen(
                                 previewFile != null -> {
                                     AsyncImage(
                                         model = previewFile,
-                                        contentDescription = "Anchor studio frame",
+                                        contentDescription = "Selected presenter photo",
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier.fillMaxSize()
                                     )
@@ -182,7 +204,7 @@ fun StageScreen(
                                         )
                                         Spacer(modifier = Modifier.height(6.dp))
                                         Text(
-                                            text = "Import a frontal selfie to build your anchor",
+                                            text = "Pick 1 photo from your phone",
                                             style = MaterialTheme.typography.bodyMedium,
                                             color = TelemetryMuted
                                         )
@@ -191,21 +213,21 @@ fun StageScreen(
                             }
                         }
 
-                        if (stage.faceValidationNote.isNotBlank()) {
+                        if (stage.poseGate.note.isNotBlank()) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Icon(
-                                    imageVector = if (stage.faceValidated) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+                                    imageVector = if (stage.poseGate.valid) Icons.Filled.CheckCircle else Icons.Filled.Warning,
                                     contentDescription = null,
-                                    tint = if (stage.faceValidated) tokens.statusLive else tokens.evidenceAmber,
+                                    tint = if (stage.poseGate.valid) tokens.statusLive else tokens.evidenceAmber,
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Text(
-                                    text = stage.faceValidationNote,
+                                    text = stage.poseGate.note,
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = if (stage.faceValidated) StudioCrisp else tokens.evidenceAmber
+                                    color = if (stage.poseGate.valid) StudioCrisp else tokens.evidenceAmber
                                 )
                             }
                         }
@@ -226,7 +248,7 @@ fun StageScreen(
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(48.dp)
-                                    .testTag("import_selfie_button")
+                                    .testTag("pick_photo_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.AddPhotoAlternate,
@@ -235,14 +257,14 @@ fun StageScreen(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = if (stage.selfieImageKey == null) "Import selfie" else "Change selfie",
+                                    text = if (activeSha == null) "Pick photo" else "Change photo",
                                     maxLines = 1
                                 )
                             }
 
                             Button(
-                                onClick = onComposeAnchor,
-                                enabled = !uiState.isComposingAnchor && !stage.selfieImageKey.isNullOrBlank(),
+                                onClick = onNormalizePose,
+                                enabled = !uiState.isNormalizingPose && activeSha != null,
                                 shape = RoundedCornerShape(8.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = tokens.channelAccentContainer,
@@ -251,7 +273,7 @@ fun StageScreen(
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(48.dp)
-                                    .testTag("compose_anchor_button")
+                                    .testTag("normalize_pose_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.AutoAwesome,
@@ -260,7 +282,7 @@ fun StageScreen(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = if (uiState.isComposingAnchor) "Compositing…" else "AI Compose",
+                                    text = if (uiState.isNormalizingPose) "Normalizing…" else "Pose fix",
                                     maxLines = 1
                                 )
                             }
@@ -269,102 +291,82 @@ fun StageScreen(
                 }
             }
 
-            // 2. Newsroom Backdrop Presets (includes bundled Volt & Cobalt Truss Globe + Neon Triangle)
-            item(key = "backdrop_section") {
+            // 2. Stage 4 Render Contract (Photo + Head LoRA / Saved Loop / LibreClip 9:16)
+            item(key = "stage4_mode_card") {
                 StudioCard(modifier = Modifier.fillMaxWidth()) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(
-                            text = "Studio backdrop",
+                            text = "Head renderer",
                             style = MaterialTheme.typography.titleSmall,
                             color = StudioCrisp
                         )
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(BackdropPreset.entries, key = { it.id }) { preset ->
-                                val selected = preset.id == stage.backdropPresetId
+                        Stage4Mode.entries.forEach { mode ->
+                            val selected = stage.stage4Mode == mode
+                            Surface(
+                                color = if (selected) tokens.channelAccentContainer else ConsoleElevated,
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (selected) tokens.channelAccent else tokens.hairline
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onSetStage4Mode(mode) }
+                                    .testTag("stage4_mode_${mode.id}")
+                            ) {
                                 Column(
-                                    modifier = Modifier
-                                        .width(124.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (selected) tokens.channelAccentContainer else ConsoleElevated)
-                                        .border(
-                                            width = 1.dp,
-                                            color = if (selected) tokens.channelAccent else tokens.hairline,
-                                            shape = RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable {
-                                            onUpdateStageConfig { it.copy(backdropPresetId = preset.id) }
-                                        }
-                                        .testTag("backdrop_${preset.id}")
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
                                 ) {
-                                    if (preset.bundledDrawable != null) {
-                                        Image(
-                                            painter = painterResource(preset.bundledDrawable),
-                                            contentDescription = preset.label,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(64.dp)
-                                        )
-                                    } else {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(64.dp)
-                                                .background(OledVoid),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Filled.Image,
-                                                contentDescription = null,
-                                                tint = if (selected) tokens.channelAccent else TelemetryMuted,
-                                                modifier = Modifier.size(22.dp)
-                                            )
-                                        }
-                                    }
                                     Text(
-                                        text = preset.label,
+                                        text = mode.label,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = if (selected) tokens.channelAccent else StudioCrisp
+                                    )
+                                    Text(
+                                        text = mode.subtitle,
                                         style = MaterialTheme.typography.labelMedium,
-                                        color = if (selected) tokens.channelAccent else StudioCrisp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+                                        color = TelemetryMuted
                                     )
                                 }
                             }
                         }
-
-                        OutlinedTextField(
-                            value = stage.customBackdropPrompt,
-                            onValueChange = { v -> onUpdateStageConfig { it.copy(customBackdropPrompt = v) } },
-                            placeholder = { Text("Optional custom studio set description", color = TelemetryMuted) },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
-                            colors = studioFieldColors(),
-                            modifier = Modifier.fillMaxWidth()
-                        )
                     }
                 }
             }
 
-            // 3. Voice Source (Adult-Male Dry TTS / Mic Voiceover / Voice Clone)
-            item(key = "voice_source_section") {
+            // 3. Voice Source (Enrolled Voice ID or Live Mic WAV — zero silent fallback)
+            item(key = "voice_source_card") {
                 StudioCard(modifier = Modifier.fillMaxWidth()) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Filled.GraphicEq,
-                                contentDescription = null,
-                                tint = tokens.channelAccent,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Text(
-                                text = "Voice track",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = StudioCrisp
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.GraphicEq,
+                                    contentDescription = null,
+                                    tint = tokens.channelAccent,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = "Voice",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = StudioCrisp
+                                )
+                            }
+                            if (persona.voiceId.isNotBlank()) {
+                                Text(
+                                    text = persona.voiceId,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = tokens.channelAccent
+                                )
+                            }
                         }
 
                         VoiceSource.entries.forEach { source ->
@@ -398,38 +400,110 @@ fun StageScreen(
                                 }
                             }
                         }
+                    }
+                }
+            }
 
-                        if (project.voiceSource == VoiceSource.MALE_TTS_DRY_RUN && uiState.availableMaleVoices.isNotEmpty()) {
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                items(uiState.availableMaleVoices.take(4), key = { it.name }) { voice ->
-                                    val chosen = project.voiceSelectionId == voice.name
-                                    val shortLabel = voice.name.substringAfterLast("-").uppercase()
-                                    Surface(
-                                        color = if (chosen) tokens.channelAccentContainer else OledVoid,
-                                        shape = RoundedCornerShape(6.dp),
-                                        border = BorderStroke(
-                                            1.dp,
-                                            if (chosen) tokens.channelAccent else tokens.hairline
-                                        ),
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .clickable { onSetVoiceSelectionId(voice.name) }
-                                    ) {
-                                        Text(
-                                            text = "Voice $shortLabel",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = if (chosen) tokens.channelAccent else TelemetryMuted,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
-                                        )
+            // 4. Collapsible Studio Backdrop (for pose normalization / Flux Kontext scene dress)
+            item(key = "backdrop_section") {
+                StudioCard(modifier = Modifier.fillMaxWidth()) {
+                    Column {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showBackdropSection = !showBackdropSection }
+                                .padding(vertical = 4.dp)
+                                .testTag("backdrop_expand_row"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Studio backdrop",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = StudioCrisp
+                            )
+                            Icon(
+                                imageVector = if (showBackdropSection) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                contentDescription = null,
+                                tint = TelemetryMuted
+                            )
+                        }
+                        AnimatedVisibility(visible = showBackdropSection) {
+                            Column(
+                                modifier = Modifier.padding(top = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    items(BackdropPreset.entries, key = { it.id }) { preset ->
+                                        val selected = preset.id == stage.backdropPresetId
+                                        Column(
+                                            modifier = Modifier
+                                                .width(124.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(if (selected) tokens.channelAccentContainer else ConsoleElevated)
+                                                .border(
+                                                    1.dp,
+                                                    if (selected) tokens.channelAccent else tokens.hairline,
+                                                    RoundedCornerShape(8.dp)
+                                                )
+                                                .clickable {
+                                                    onUpdateStageConfig { it.copy(backdropPresetId = preset.id) }
+                                                }
+                                                .testTag("backdrop_${preset.id}")
+                                        ) {
+                                            if (preset.bundledDrawable != null) {
+                                                Image(
+                                                    painter = painterResource(preset.bundledDrawable),
+                                                    contentDescription = preset.label,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(64.dp)
+                                                )
+                                            } else {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(64.dp)
+                                                        .background(OledVoid),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Filled.Image,
+                                                        contentDescription = null,
+                                                        tint = if (selected) tokens.channelAccent else TelemetryMuted,
+                                                        modifier = Modifier.size(22.dp)
+                                                    )
+                                                }
+                                            }
+                                            Text(
+                                                text = preset.label,
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = if (selected) tokens.channelAccent else StudioCrisp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+                                            )
+                                        }
                                     }
                                 }
+
+                                OutlinedTextField(
+                                    value = stage.customBackdropPrompt,
+                                    onValueChange = { v -> onUpdateStageConfig { it.copy(customBackdropPrompt = v) } },
+                                    placeholder = { Text("Optional custom scene prompt", color = TelemetryMuted) },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
+                                    colors = studioFieldColors(),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
                         }
                     }
                 }
             }
 
-            // 4. Collapsible Lower-Third Chyron & Corner Bug
+            // 5. Collapsible Lower-Third Graphic
             item(key = "chyron_section") {
                 StudioCard(modifier = Modifier.fillMaxWidth()) {
                     Column {
@@ -503,80 +577,82 @@ fun StageScreen(
                 }
             }
 
-            // 5. Collapsible B-Roll Plates per Beat
-            item(key = "broll_section") {
-                StudioCard(modifier = Modifier.fillMaxWidth()) {
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { showBRollSection = !showBRollSection }
-                                .padding(vertical = 4.dp)
-                                .testTag("broll_expand_row"),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "Beat B-roll cutaways",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = StudioCrisp
-                            )
-                            Icon(
-                                imageVector = if (showBRollSection) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                                contentDescription = null,
-                                tint = TelemetryMuted
-                            )
-                        }
-                        AnimatedVisibility(visible = showBRollSection) {
-                            Column(
-                                modifier = Modifier.padding(top = 10.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
+            // 6. Collapsible Beat B-Roll Cutaways
+            if (project.activeBeats.isNotEmpty()) {
+                item(key = "broll_section") {
+                    StudioCard(modifier = Modifier.fillMaxWidth()) {
+                        Column {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { showBRollSection = !showBRollSection }
+                                    .padding(vertical = 4.dp)
+                                    .testTag("broll_expand_row"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                project.activeBeats.forEachIndexed { idx, beat ->
-                                    val brollFile = mediaStorage.fileForKey(beat.bRollImageKey)
-                                    val generating = uiState.generatingBRollBeatId == beat.id
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(ConsoleElevated)
-                                            .padding(10.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        if (brollFile != null) {
-                                            AsyncImage(
-                                                model = brollFile,
-                                                contentDescription = "B-roll plate",
-                                                contentScale = ContentScale.Crop,
-                                                modifier = Modifier
-                                                    .size(44.dp)
-                                                    .clip(RoundedCornerShape(6.dp))
-                                            )
-                                        }
-                                        Text(
-                                            text = beat.bRollPrompt.ifBlank { beat.spokenText },
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = StudioCrisp,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        OutlinedButton(
-                                            onClick = { onGenerateBeatBRoll(beat.id) },
-                                            enabled = !generating,
-                                            shape = RoundedCornerShape(6.dp),
-                                            border = BorderStroke(1.dp, tokens.channelAccent),
-                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                Text(
+                                    text = "Beat B-roll cutaways",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = StudioCrisp
+                                )
+                                Icon(
+                                    imageVector = if (showBRollSection) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                    contentDescription = null,
+                                    tint = TelemetryMuted
+                                )
+                            }
+                            AnimatedVisibility(visible = showBRollSection) {
+                                Column(
+                                    modifier = Modifier.padding(top = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    project.activeBeats.forEachIndexed { idx, beat ->
+                                        val brollFile = casStore.fileForSha(beat.bRollSha, "jpg")
+                                        val generating = uiState.generatingBRollBeatId == beat.id
+                                        Row(
                                             modifier = Modifier
-                                                .height(40.dp)
-                                                .testTag("generate_broll_$idx")
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(ConsoleElevated)
+                                                .padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
+                                            if (brollFile != null) {
+                                                AsyncImage(
+                                                    model = brollFile,
+                                                    contentDescription = "B-roll plate",
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .size(44.dp)
+                                                        .clip(RoundedCornerShape(6.dp))
+                                                )
+                                            }
                                             Text(
-                                                text = if (generating) "…" else "Generate",
-                                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                                color = tokens.channelAccent
+                                                text = beat.bRollPrompt.ifBlank { beat.spokenText },
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = StudioCrisp,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
                                             )
+                                            OutlinedButton(
+                                                onClick = { onGenerateBeatBRoll(beat.id) },
+                                                enabled = !generating,
+                                                shape = RoundedCornerShape(6.dp),
+                                                border = BorderStroke(1.dp, tokens.channelAccent),
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                                modifier = Modifier
+                                                    .height(40.dp)
+                                                    .testTag("generate_broll_$idx")
+                                            ) {
+                                                Text(
+                                                    text = if (generating) "…" else "Generate",
+                                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                                    color = tokens.channelAccent
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -595,10 +671,10 @@ fun StageScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
             StudioPrimaryCta(
-                text = stringResource(R.string.cta_render_aircheck),
-                onClick = onRenderVideo,
-                enabled = !uiState.renderProgress.active,
-                modifier = Modifier.testTag("stage_render_cta")
+                text = if (uiState.isEnqueuingRender) "Queueing…" else stringResource(R.string.cta_render_aircheck),
+                onClick = onEnqueueRender,
+                enabled = !uiState.isEnqueuingRender,
+                modifier = Modifier.testTag("photo_render_cta")
             )
         }
     }

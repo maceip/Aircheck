@@ -1,18 +1,11 @@
 package com.example.engine
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaPlayer
 import android.media.MediaRecorder
-import android.os.Bundle
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
-import android.speech.tts.Voice
 import android.util.Log
-import com.example.data.VoiceSource
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,17 +15,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.Locale
-import java.util.UUID
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -54,23 +42,12 @@ data class WavMetadata(
         }
 }
 
-data class SynthesizedAudioResult(
-    val file: File,
-    val durationSec: Float,
-    val medianPitchHz: Float,
-    val voiceIdUsed: String,
-    val peaks: List<Float>
-)
-
 /**
- * Handles 16-bit RIFF PCM WAV microphone recording, verified adult-male on-device TTS synthesis
- * (< 165 Hz median F0 verification), strict voice-clone validation (zero silent fallback),
- * real PCM peak & RMS envelope decoding, and live audio playback.
+ * Pure 16-bit RIFF PCM WAV recorder, decoder, 64-bin waveform peak extractor,
+ * and WAV preview player. Zero on-device TTS silent fallback or stubbed voice endpoints.
  */
-class AudioEngine(private val context: Context) {
+class AudioEngine {
 
-    private val ttsReady = CompletableDeferred<Boolean>()
-    private var tts: TextToSpeech? = null
     private var mediaPlayer: MediaPlayer? = null
     private var playbackMonitorJob: Job? = null
     private var recordJob: Job? = null
@@ -88,159 +65,6 @@ class AudioEngine(private val context: Context) {
     private val _liveMicPeaks = MutableStateFlow<List<Float>>(emptyList())
     val liveMicPeaks: StateFlow<List<Float>> = _liveMicPeaks.asStateFlow()
 
-    init {
-        tts = TextToSpeech(context.applicationContext) { status ->
-            if (!ttsReady.isCompleted) {
-                ttsReady.complete(status == TextToSpeech.SUCCESS)
-            }
-        }
-    }
-
-    /**
-     * Returns available adult-male English TTS voices on device for explicit user selection.
-     */
-    suspend fun getAdultMaleVoices(): List<Voice> {
-        val ok = runCatching { withTimeout(5_000L) { ttsReady.await() } }.getOrDefault(false)
-        if (!ok) return emptyList()
-        val voices = tts?.voices.orEmpty().filter { v ->
-            v.locale.language.equals("en", ignoreCase = true) && !v.isNetworkConnectionRequired
-        }
-        val maleKeywords = listOf("male", "-iom-", "-iog-", "-tpd-", "-iol-", "rjs", "gba", "sfg", "en-us-x-tpd", "en-us-x-iom")
-        val femaleExclude = listOf("female", "-tpf-", "-sfg-f", "-iob-", "-tpc-")
-        val prioritized = voices.filter { v ->
-            val n = v.name.lowercase(Locale.US)
-            maleKeywords.any { n.contains(it) } && femaleExclude.none { n.contains(it) }
-        }
-        return if (prioritized.isNotEmpty()) prioritized else voices.sortedBy { it.name }
-    }
-
-    /**
-     * Synthesizes spoken prose to a real 16-bit RIFF PCM WAV file.
-     * Enforces zero silent fallback when VOICE_CLONE is selected without configured credentials.
-     */
-    suspend fun synthesizeToWav(
-        text: String,
-        outputFile: File,
-        voiceSource: VoiceSource,
-        preferredVoiceId: String,
-        voiceCloneEndpoint: String,
-        voiceCloneApiKey: String
-    ): Result<SynthesizedAudioResult> = withContext(Dispatchers.IO) {
-        val cleanText = text.trim()
-        if (cleanText.isBlank()) {
-            return@withContext Result.failure(IllegalArgumentException("Write script text before generating audio."))
-        }
-
-        if (voiceSource == VoiceSource.VOICE_CLONE) {
-            if (voiceCloneEndpoint.isBlank() || voiceCloneApiKey.isBlank()) {
-                return@withContext Result.failure(
-                    IllegalStateException(
-                        "Voice Clone credentials are missing. Add your endpoint and key in Account Settings or switch voice mode."
-                    )
-                )
-            }
-            return@withContext Result.failure(
-                IllegalStateException(
-                    "Voice Clone endpoint could not be reached from this device. Verify credentials or switch to Mic Voiceover / Male Dry TTS."
-                )
-            )
-        }
-
-        val ready = runCatching { withTimeout(8_000L) { ttsReady.await() } }.getOrDefault(false)
-        val engine = tts
-        if (!ready || engine == null) {
-            return@withContext Result.failure(
-                IllegalStateException("On-device TextToSpeech engine is unavailable on this device.")
-            )
-        }
-
-        val maleVoices = getAdultMaleVoices()
-        val chosenVoice = maleVoices.firstOrNull { it.name == preferredVoiceId }
-            ?: maleVoices.firstOrNull()
-
-        if (chosenVoice != null) {
-            engine.voice = chosenVoice
-        } else {
-            engine.language = Locale.US
-        }
-
-        // Pin pitch to adult-male fundamental register (< 165 Hz), adjusting cleanly if needed.
-        val voiceNameLower = chosenVoice?.name?.lowercase(Locale.US).orEmpty()
-        val looksExplicitMale = listOf("male", "iom", "tpd", "iol", "rjs").any { voiceNameLower.contains(it) }
-        val basePitch = if (looksExplicitMale) 0.90f else 0.74f
-        engine.setSpeechRate(1.02f)
-        engine.setPitch(basePitch)
-
-        val firstPass = runTtsSynthesis(engine, cleanText, outputFile)
-        if (firstPass.isFailure) return@withContext Result.failure(firstPass.exceptionOrNull()!!)
-
-        var medianPitch = estimateMedianPitchHz(outputFile)
-        // If measured F0 exceeds 165 Hz, re-synthesize one pass at deeper pitch to guarantee adult-male register.
-        if (medianPitch > 165f) {
-            engine.setPitch((basePitch * 0.78f).coerceAtLeast(0.58f))
-            val retryPass = runTtsSynthesis(engine, cleanText, outputFile)
-            if (retryPass.isSuccess) {
-                medianPitch = estimateMedianPitchHz(outputFile)
-            }
-        }
-
-        val meta = parseWavHeader(outputFile)
-        val peaks = decodeWavPeaks(outputFile, 72)
-        Result.success(
-            SynthesizedAudioResult(
-                file = outputFile,
-                durationSec = meta?.durationSec ?: 3f,
-                medianPitchHz = medianPitch,
-                voiceIdUsed = chosenVoice?.name ?: "en-US-male-default",
-                peaks = peaks
-            )
-        )
-    }
-
-    private suspend fun runTtsSynthesis(
-        engine: TextToSpeech,
-        text: String,
-        outputFile: File
-    ): Result<Unit> {
-        val utteranceId = "aircheck_${UUID.randomUUID()}"
-        val done = CompletableDeferred<Result<Unit>>()
-        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(id: String?) {}
-            override fun onDone(id: String?) {
-                if (id == utteranceId && !done.isCompleted) {
-                    done.complete(Result.success(Unit))
-                }
-            }
-
-            @Deprecated("Deprecated in Java")
-            override fun onError(id: String?) {
-                if (id == utteranceId && !done.isCompleted) {
-                    done.complete(Result.failure(IllegalStateException("TTS synthesis failed.")))
-                }
-            }
-
-            override fun onError(id: String?, errorCode: Int) {
-                if (id == utteranceId && !done.isCompleted) {
-                    done.complete(Result.failure(IllegalStateException("TTS synthesis error ($errorCode).")))
-                }
-            }
-        })
-
-        outputFile.parentFile?.mkdirs()
-        if (outputFile.exists()) outputFile.delete()
-        val params = Bundle().apply {
-            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
-        }
-        val queued = engine.synthesizeToFile(text, params, outputFile, utteranceId)
-        if (queued != TextToSpeech.SUCCESS) {
-            return Result.failure(IllegalStateException("TTS failed to queue WAV synthesis."))
-        }
-        return withTimeout(30_000L) { done.await() }
-    }
-
-    /**
-     * Starts live 16 kHz 16-bit mono RIFF PCM recording from the device microphone.
-     */
     @SuppressLint("MissingPermission")
     fun startMicRecording(
         scope: CoroutineScope,
@@ -300,7 +124,7 @@ class AudioEngine(private val context: Context) {
                         pcmStream.write(byteBuf.array())
                         val rms = sqrt(sumSq / read).toFloat().coerceIn(0.03f, 1f)
                         livePeaks.add((rms * 2.6f).coerceIn(0.06f, 1f))
-                        if (livePeaks.size > 72) livePeaks.removeAt(0)
+                        if (livePeaks.size > 64) livePeaks.removeAt(0)
                         _liveMicPeaks.value = livePeaks.toList()
                     }
                 }
@@ -323,7 +147,7 @@ class AudioEngine(private val context: Context) {
         recordJob?.join()
         recordJob = null
         val meta = parseWavHeader(outputFile)
-        val peaks = decodeWavPeaks(outputFile, 72)
+        val peaks = decodeWavPeaks(outputFile, 64)
         return (meta?.durationSec ?: 0f) to peaks
     }
 
@@ -372,8 +196,6 @@ class AudioEngine(private val context: Context) {
         _isRecording.value = false
         recordJob?.cancel()
         runCatching { audioRecord?.release() }
-        runCatching { tts?.stop() }
-        runCatching { tts?.shutdown() }
     }
 
     companion object {
@@ -393,7 +215,7 @@ class AudioEngine(private val context: Context) {
                 put("WAVE".toByteArray(Charsets.US_ASCII))
                 put("fmt ".toByteArray(Charsets.US_ASCII))
                 putInt(16)
-                putShort(1.toShort()) // PCM
+                putShort(1.toShort())
                 putShort(channels.toShort())
                 putInt(sampleRate)
                 putInt(byteRate)
@@ -435,11 +257,11 @@ class AudioEngine(private val context: Context) {
                                 val fmt = ByteArray(chunkSize.coerceAtLeast(16))
                                 raf.readFully(fmt)
                                 val bb = ByteBuffer.wrap(fmt).order(ByteOrder.LITTLE_ENDIAN)
-                                bb.short // audioFormat
+                                bb.short
                                 channels = bb.short.toInt().coerceAtLeast(1)
                                 sampleRate = bb.int.coerceAtLeast(8000)
-                                bb.int // byteRate
-                                bb.short // blockAlign
+                                bb.int
+                                bb.short
                                 bitsPerSample = bb.short.toInt().coerceAtLeast(8)
                             }
                             "data" -> {
@@ -458,10 +280,7 @@ class AudioEngine(private val context: Context) {
             }.getOrNull()
         }
 
-        /**
-         * Decodes genuine normalized peak buckets [0.05..1.0] directly from a 16-bit RIFF PCM WAV file.
-         */
-        fun decodeWavPeaks(file: File, bucketCount: Int = 72): List<Float> {
+        fun decodeWavPeaks(file: File, bucketCount: Int = 64): List<Float> {
             val meta = parseWavHeader(file) ?: return emptyList()
             if (meta.dataSize <= 0 || bucketCount <= 0) return emptyList()
             return runCatching {
@@ -498,24 +317,9 @@ class AudioEngine(private val context: Context) {
             }.getOrDefault(emptyList())
         }
 
-        /**
-         * Decodes frame-accurate RMS speech envelope at target FPS for lip-sync articulation.
-         */
-        fun decodeFrameRmsEnvelope(file: File, fps: Int = 24): FloatArray {
-            val meta = parseWavHeader(file) ?: return FloatArray(fps * 3) { 0f }
-            val frameCount = max(fps, (meta.durationSec * fps).toInt())
-            val peaks = decodeWavPeaks(file, frameCount)
-            if (peaks.isEmpty()) return FloatArray(frameCount) { 0f }
-            return FloatArray(peaks.size) { i -> peaks[i] }
-        }
-
-        /**
-         * Estimates median fundamental frequency (F0 in Hz) of voiced frames in a 16-bit PCM WAV
-         * via normalized autocorrelation across 65..280 Hz to verify adult-male vocal register (<165 Hz).
-         */
         fun estimateMedianPitchHz(file: File): Float {
-            val meta = parseWavHeader(file) ?: return 120f
-            if (meta.dataSize < meta.sampleRate) return 120f
+            val meta = parseWavHeader(file) ?: return 0f
+            if (meta.dataSize < meta.sampleRate) return 0f
             return runCatching {
                 val bytes = file.readBytes()
                 val step = meta.bytesPerSample * meta.channels
@@ -562,11 +366,11 @@ class AudioEngine(private val context: Context) {
                     }
                     start += frameLen
                 }
-                if (pitches.isEmpty()) 122f else {
+                if (pitches.isEmpty()) 0f else {
                     pitches.sort()
                     pitches[pitches.size / 2]
                 }
-            }.getOrDefault(122f)
+            }.getOrDefault(0f)
         }
     }
 }

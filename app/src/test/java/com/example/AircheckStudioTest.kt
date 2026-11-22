@@ -1,34 +1,38 @@
 package com.example
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Color
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.BrandChannel
+import com.example.data.ClipRecord
+import com.example.data.RenderJobStatus
 import com.example.data.ScriptBeat
 import com.example.data.ScriptProject
-import com.example.data.estimateDurationSeconds
-import com.example.data.formatDurationBadge
-import com.example.engine.AudioEngine
+import com.example.data.local.AircheckDatabase
+import com.example.data.local.AircheckLocalRepository
+import com.example.data.local.CasMediaStore
+import com.example.engine.ThumbHashCodec
 import com.example.ui.StudioUiState
 import com.example.ui.screens.ScriptScreen
 import com.example.ui.theme.AircheckTheme
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import kotlin.math.PI
-import kotlin.math.sin
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -44,53 +48,83 @@ class AircheckStudioTest {
     }
 
     @Test
-    fun wavRiffHeaderPeakDecodingAndAdultMalePitchEstimatorWorkAccurately() {
-        val sampleRate = 16_000
-        val seconds = 2
-        val totalSamples = sampleRate * seconds
-        val targetFreqHz = 118.0 // Adult-male fundamental frequency (< 165 Hz)
-        val pcmBuffer = ByteBuffer.allocate(totalSamples * 2).order(ByteOrder.LITTLE_ENDIAN)
-        for (i in 0 until totalSamples) {
-            val sample = (sin(2.0 * PI * targetFreqHz * i / sampleRate) * 16_000.0).toInt().toShort()
-            pcmBuffer.putShort(sample)
-        }
-
-        val tmpFile = File.createTempFile("aircheck_test_vo", ".wav")
+    fun roomNormalizedTablesAndCasStoreDeduplicateBySha256() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AircheckDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
         try {
-            AudioEngine.writeRiffWav(
-                file = tmpFile,
-                pcmData = pcmBuffer.array(),
-                sampleRate = sampleRate,
-                channels = 1,
-                bitsPerSample = 16
+            val repo = AircheckLocalRepository(db)
+            val cas = CasMediaStore(context, db.casDao(), maxBudgetBytes = 1024L * 1024L)
+
+            val script = ScriptProject(
+                id = "s_test_1",
+                title = "Blue Ocean Pipeline",
+                ideaSpark = "Cloud-first talking head",
+                beats = listOf(
+                    ScriptBeat(id = "b1", index = 0, spokenText = "First beat line.", anchorWord = "First"),
+                    ScriptBeat(id = "b2", index = 1, spokenText = "Second beat line.", anchorWord = "Second")
+                )
             )
+            repo.saveScript(script)
+            val restoredScript = repo.getScriptById("s_test_1")
+            assertNotNull(restoredScript)
+            assertEquals(2, restoredScript!!.beats.size)
+            assertEquals("First", restoredScript.beats[0].anchorWord)
 
-            val meta = AudioEngine.parseWavHeader(tmpFile)
-            assertTrue("WAV header must parse cleanly", meta != null)
-            assertEquals(sampleRate, meta!!.sampleRate)
-            assertEquals(1, meta.channels)
-            assertEquals(16, meta.bitsPerSample)
-            assertTrue("Duration must be ~2.0s", meta.durationSec in 1.9f..2.1f)
+            // Verify CAS deduplication by SHA-256
+            val a1 = cas.putBytes("photo-payload-bytes".toByteArray(), "jpg")
+            val a2 = cas.putBytes("photo-payload-bytes".toByteArray(), "jpg")
+            assertEquals(a1.sha256, a2.sha256)
+            assertEquals(a1.file.absolutePath, a2.file.absolutePath)
+            assertTrue(a1.file.exists())
 
-            val peaks = AudioEngine.decodeWavPeaks(tmpFile, 48)
-            assertEquals(48, peaks.size)
-            assertTrue("Decoded peaks must have real signal amplitude", peaks.maxOrNull()!! > 0.8f)
-
-            val pitchHz = AudioEngine.estimateMedianPitchHz(tmpFile)
-            assertTrue(
-                "Estimated adult-male pitch ($pitchHz Hz) must be under 165 Hz and near 118 Hz",
-                pitchHz in 105f..135f
+            // Verify ClipCardRow projection and waveform blob persistence
+            val clip = ClipRecord(
+                id = "clip_1",
+                scriptId = script.id,
+                jobId = "job_1",
+                title = script.title,
+                photoSha = a1.sha256,
+                voiceSha = "voice1234",
+                alignSha = "align1234",
+                lipsyncSha = "lip1234",
+                finalSha = "final1234",
+                status = RenderJobStatus.READY,
+                progressFraction = 1f,
+                stageDetail = "Ready",
+                errorMessage = null,
+                durationMs = 30_000L,
+                waveformPeaks = List(64) { (it + 1) / 64f },
+                thumbHash = null,
+                alignedWords = emptyList(),
+                chyronHeadline = "Headline",
+                chyronSubline = "Desk",
+                remoteLipsyncUrl = null,
+                remoteFinalUrl = "https://storage.googleapis.com/example/final.mp4",
+                exportedUri = null,
+                createdAtMillis = 100L,
+                updatedAtMillis = 200L
             )
+            repo.upsertClip(clip)
+            val cards = repo.clipCards.first()
+            assertEquals(1, cards.size)
+            assertEquals("clip_1", cards.first().id)
+            assertEquals(64, repo.getClipById("clip_1")!!.waveformPeaks.size)
+
+            // Verify ThumbHash 16-byte round-trip
+            val bmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888).apply {
+                eraseColor(Color.rgb(184, 255, 0))
+            }
+            val hash = ThumbHashCodec.encode(bmp)
+            val decoded = ThumbHashCodec.decode(hash)
+            assertNotNull(decoded)
+            assertTrue(decoded!!.width > 0 && decoded.height > 0)
+            bmp.recycle()
+            decoded.recycle()
         } finally {
-            tmpFile.delete()
+            db.close()
         }
-    }
-
-    @Test
-    fun durationEstimationAndFormattingRespectMinimumBeatLength() {
-        assertEquals(3, estimateDurationSeconds("Quick hook.", 3))
-        assertEquals("05s", formatDurationBadge(5))
-        assertEquals("30s", formatDurationBadge(30))
     }
 
     @Test
@@ -115,7 +149,7 @@ class AircheckStudioTest {
                     onSetTargetDuration = {},
                     onToggleHoneSpark = { sparkAiTriggered = true },
                     onUpdateBeatText = { _, _ -> },
-                    onUpdateBeatMetadata = { _, _, _, _, _, _ -> },
+                    onUpdateBeatMetadata = { _, _, _, _, _, _, _ -> },
                     onToggleExpandBeat = {},
                     onFactCheckBeat = {},
                     onShorten20Percent = {},
@@ -132,13 +166,11 @@ class AircheckStudioTest {
         }
         composeTestRule.waitForIdle()
 
-        // Clean wide-open inputs & inline ✨ trigger exist immediately
         composeTestRule.onNodeWithTag("spark_input").assertIsDisplayed()
         composeTestRule.onNodeWithTag("spark_ai_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("beat_input_b1").assertIsDisplayed()
         composeTestRule.onNodeWithTag("script_primary_cta").assertIsDisplayed()
 
-        // Banned jargon/prefixes must never appear
         composeTestRule.onNodeWithText("01 //", substring = true).assertDoesNotExist()
         composeTestRule.onNodeWithText("TITLE //", substring = true).assertDoesNotExist()
 

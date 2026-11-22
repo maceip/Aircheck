@@ -2,6 +2,7 @@ package com.example.data
 
 import androidx.annotation.DrawableRes
 import com.example.R
+import kotlinx.serialization.Serializable
 import java.util.UUID
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -18,18 +19,60 @@ enum class BrandChannel(val label: String, val accentHex: String) {
 
 enum class StudioTab(val label: String) {
     SCRIPT("Script"),
-    STAGE("Stage"),
-    REVIEW("Review")
+    PHOTO("Photo"),
+    CLIPS("Clips")
 }
 
 enum class VoiceSource(val label: String, val subtitle: String) {
-    MALE_TTS_DRY_RUN("Male Dry TTS", "Verified adult-male on-device WAV"),
-    MIC_VOICEOVER("Mic Voiceover", "Record live 16-bit PCM studio take"),
-    VOICE_CLONE("Voice Clone", "Personal voice clone endpoint");
+    ENROLLED_VOICE_CLONE("Enrolled Voice ID", "Single-pass cloud TTS with your voice_id"),
+    MIC_VOICEOVER("Mic Voiceover", "Record live 16-bit PCM studio take");
 
     companion object {
-        fun fromRaw(raw: String?): VoiceSource =
-            entries.firstOrNull { it.name == raw } ?: MALE_TTS_DRY_RUN
+        fun fromRaw(raw: String?): VoiceSource = when (raw) {
+            "MIC_VOICEOVER" -> MIC_VOICEOVER
+            else -> ENROLLED_VOICE_CLONE
+        }
+    }
+}
+
+enum class Stage4Mode(val id: String, val label: String, val subtitle: String) {
+    PHOTO_HEAD_LORA(
+        id = "photo_head_lora",
+        label = "Photo + Head LoRA",
+        subtitle = "1 phone photo + personal head_model_id"
+    ),
+    SAVED_LOOP_LATENTSYNC(
+        id = "saved_loop_latentsync",
+        label = "Saved Desk Loop",
+        subtitle = "LatentSync over enrolled studio loop"
+    ),
+    LIBRECLIP_CROP(
+        id = "libreclip_crop",
+        label = "LibreClip 9:16",
+        subtitle = "Active-speaker crop from long-form footage"
+    );
+
+    companion object {
+        fun fromRaw(raw: String?): Stage4Mode =
+            entries.firstOrNull { it.name == raw || it.id == raw } ?: PHOTO_HEAD_LORA
+    }
+}
+
+enum class RenderJobStatus(val label: String) {
+    QUEUED("Queued"),
+    VOICE("Voice"),
+    ALIGN("Align"),
+    LIPSYNC("Head Render"),
+    PACKAGING("Packaging"),
+    READY("Ready"),
+    FAILED("Failed");
+
+    val isTerminal: Boolean get() = this == READY || this == FAILED
+    val isActive: Boolean get() = !isTerminal
+
+    companion object {
+        fun fromRaw(raw: String?): RenderJobStatus =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: QUEUED
     }
 }
 
@@ -84,6 +127,24 @@ enum class BackdropPreset(
     }
 }
 
+@Serializable
+data class AlignedWord(
+    val word: String,
+    val startMs: Long,
+    val endMs: Long
+)
+
+@Serializable
+data class PoseGateResult(
+    val checked: Boolean = false,
+    val valid: Boolean = false,
+    val pitchDeg: Float = 0f,
+    val yawDeg: Float = 0f,
+    val mouthOccluded: Boolean = false,
+    val canNormalize: Boolean = false,
+    val note: String = ""
+)
+
 data class ScriptBeat(
     val id: String = UUID.randomUUID().toString().replace("-", "").take(12),
     val index: Int = 0,
@@ -93,12 +154,13 @@ data class ScriptBeat(
     val cut: Boolean = false,
     val mentionTag: String = "",
     val depthTextTag: String = "",
+    val anchorWord: String = "",
     val evidenceSource: String = "",
     val sfxTag: String = "",
     val phoneticOverride: String = "",
     val bRollPrompt: String = "",
-    val bRollImageKey: String? = null,
-    val beatAudioKey: String? = null
+    val bRollSha: String? = null,
+    val beatAudioSha: String? = null
 ) {
     val wordCount: Int
         get() = spokenText.trim().split(Regex("\\s+")).count { it.isNotBlank() }
@@ -113,24 +175,25 @@ data class ScriptBeat(
 data class NewsroomStageConfig(
     val backdropPresetId: String = BackdropPreset.VOLT_TRUSS_GLOBE.id,
     val customBackdropPrompt: String = "",
-    val selfieImageKey: String? = null,
-    val compositedAnchorKey: String? = null,
-    val faceValidated: Boolean = false,
-    val faceValidationNote: String = "",
-    val mouthCenterX: Float = 0.5f,
-    val mouthCenterY: Float = 0.54f,
-    val mouthWidthNorm: Float = 0.14f,
+    val photoSha: String? = null,
+    val normalizedPhotoSha: String? = null,
+    val poseGate: PoseGateResult = PoseGateResult(),
+    val stage4Mode: Stage4Mode = Stage4Mode.PHOTO_HEAD_LORA,
     val chyronHeadline: String = "",
     val chyronSubline: String = "",
     val cornerBugText: String = "AIRCHECK",
     val showBrandBug: Boolean = true
-)
+) {
+    val activePhotoSha: String?
+        get() = normalizedPhotoSha ?: photoSha
+}
 
 data class ScriptProject(
     val id: String = "proj_" + UUID.randomUUID().toString().replace("-", "").take(12),
     val userId: String = "",
     val title: String = "",
     val ideaSpark: String = "",
+    val sourceUrl: String = "",
     val targetDurationSec: Int = 30,
     val beats: List<ScriptBeat> = listOf(
         ScriptBeat(
@@ -141,11 +204,9 @@ data class ScriptProject(
         )
     ),
     val stageConfig: NewsroomStageConfig = NewsroomStageConfig(),
-    val voiceSource: VoiceSource = VoiceSource.MALE_TTS_DRY_RUN,
-    val voiceSelectionId: String = "",
-    val renderedVideoKey: String? = null,
-    val masterAudioKey: String? = null,
-    val exportedUri: String? = null,
+    val voiceSource: VoiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
+    val voiceIdOverride: String = "",
+    val masterAudioSha: String? = null,
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
@@ -159,13 +220,71 @@ data class ScriptProject(
         get() = activeBeats.sumOf { it.wordCount }
 }
 
-data class StudioPreset(
-    val id: String = "preset_" + UUID.randomUUID().toString().replace("-", "").take(10),
-    val userId: String = "",
-    val name: String = "",
-    val backdropPresetId: String = BackdropPreset.VOLT_TRUSS_GLOBE.id,
-    val targetDurationSec: Int = 30,
-    val voiceSource: VoiceSource = VoiceSource.MALE_TTS_DRY_RUN
+data class ClipRecord(
+    val id: String,
+    val scriptId: String,
+    val jobId: String,
+    val title: String,
+    val photoSha: String?,
+    val voiceSha: String?,
+    val alignSha: String?,
+    val lipsyncSha: String?,
+    val finalSha: String?,
+    val status: RenderJobStatus,
+    val progressFraction: Float,
+    val stageDetail: String,
+    val errorMessage: String?,
+    val durationMs: Long,
+    val waveformPeaks: List<Float>,
+    val thumbHash: String?,
+    val alignedWords: List<AlignedWord>,
+    val chyronHeadline: String,
+    val chyronSubline: String,
+    val remoteLipsyncUrl: String?,
+    val remoteFinalUrl: String?,
+    val exportedUri: String?,
+    val createdAtMillis: Long,
+    val updatedAtMillis: Long
+)
+
+data class ClipCardRow(
+    val id: String,
+    val scriptId: String,
+    val jobId: String,
+    val title: String,
+    val photoSha: String?,
+    val finalSha: String?,
+    val status: RenderJobStatus,
+    val progressFraction: Float,
+    val stageDetail: String,
+    val errorMessage: String?,
+    val durationMs: Long,
+    val thumbHash: String?,
+    val remoteFinalUrl: String?,
+    val updatedAtMillis: Long
+)
+
+data class PersonaProfile(
+    val headModelId: String = "",
+    val voiceId: String = "",
+    val defaultPhotoSha: String = "",
+    val trainingJobId: String = "",
+    val trainingStatus: String = "",
+    val trainingError: String = ""
+) {
+    val isEnrolled: Boolean get() = headModelId.isNotBlank() && voiceId.isNotBlank()
+}
+
+data class StageProviderSettings(
+    val voiceProviderId: String = "elevenlabs_pvc",
+    val alignProviderId: String = "groq_whisper_v3_turbo",
+    val headProviderId: String = "wan22_s2v_lora",
+    val packageProviderId: String = "cloud_run_remotion",
+    val lanGatewayUrl: String = "",
+    val useLanVoice: Boolean = false,
+    val useLanAlign: Boolean = false,
+    val useLanHead: Boolean = false,
+    val useLanPackage: Boolean = false
 )
 
 enum class ExportState {
@@ -174,16 +293,9 @@ enum class ExportState {
     EXPORTED
 }
 
-data class RenderProgress(
-    val active: Boolean = false,
-    val fraction: Float = 0f,
-    val statusLabel: String = ""
-)
-
 fun estimateDurationSeconds(text: String, fallback: Int = 5): Int {
     val words = text.trim().split(Regex("\\s+")).count { it.isNotBlank() }
     if (words == 0) return max(3, fallback)
-    // Conversational newsroom cadence ~2.6 words/sec, minimum 3s
     return max(3, (words / 2.6f).roundToInt())
 }
 

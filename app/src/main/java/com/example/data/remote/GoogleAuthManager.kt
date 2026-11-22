@@ -24,6 +24,12 @@ import kotlinx.coroutines.withContext
 
 private const val AUTH_TAG = "Auth"
 
+private fun resolveWebClientId(context: Context): String? {
+    val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+    if (resId == 0) return null
+    return runCatching { context.getString(resId) }.getOrNull()?.takeIf { it.isNotBlank() }
+}
+
 /**
  * Silent startup check using GetGoogleIdOption (one credential option per request).
  */
@@ -38,9 +44,8 @@ fun attemptAutoSignIn(
         onAuthSuccess()
         return
     }
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
+    val clientId = resolveWebClientId(context)
+    if (clientId == null) {
         onUnauthenticated()
         return
     }
@@ -81,10 +86,9 @@ fun onGoogleSignInClicked(
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {}
 ) {
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
-        onAuthError("Google Sign-In configuration missing: default_web_client_id not found.")
+    val clientId = resolveWebClientId(context)
+    if (clientId == null) {
+        onAuthError("Google Sign-In configuration missing: add app/google-services.json with default_web_client_id.")
         return
     }
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()

@@ -24,14 +24,13 @@ data class ActiveModels(
     val lastProbeError: String? = null
 ) {
     companion object {
-        const val DEFAULT_TEXT_MODEL = "gemini-3.8-flash"
-        const val DEFAULT_IMAGE_MODEL = "gemini-nano-banana-2.1"
+        const val DEFAULT_TEXT_MODEL = "gemini-2.5-flash"
+        const val DEFAULT_IMAGE_MODEL = "gemini-2.5-flash-image"
     }
 }
 
 /**
- * Centralizes active Firebase AI Logic model IDs with runtime override and health probe
- * so upgrades never require hardcoded string surgery across screens.
+ * Centralizes active Firebase AI Logic model IDs with runtime override and startup health probe.
  */
 object ModelRegistry {
     private val _models = MutableStateFlow(ActiveModels())

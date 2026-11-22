@@ -96,6 +96,7 @@ fun ScriptScreen(
         beatId: String,
         mentionTag: String?,
         depthTextTag: String?,
+        anchorWord: String?,
         evidenceSource: String?,
         sfxTag: String?,
         bRollPrompt: String?
@@ -315,8 +316,8 @@ fun ScriptScreen(
                     onToggleCut = { onToggleCutBeat(beat.id) },
                     onToggleMic = { requestOrToggleMic(beat.id) },
                     onDelete = { onDeleteBeat(beat.id) },
-                    onMetadataChange = { mention, depth, source, sfx, broll ->
-                        onUpdateBeatMetadata(beat.id, mention, depth, source, sfx, broll)
+                    onMetadataChange = { mention, depth, anchor, source, sfx, broll ->
+                        onUpdateBeatMetadata(beat.id, mention, depth, anchor, source, sfx, broll)
                     }
                 )
             }
@@ -378,8 +379,8 @@ fun ScriptScreen(
         }
 
         // Uniform Pinned Primary CTA Slot directly above the dock
-        val hasStageReady = !project.stageConfig.compositedAnchorKey.isNullOrBlank() ||
-            !project.stageConfig.selfieImageKey.isNullOrBlank()
+        val hasPhotoReady = !project.stageConfig.activePhotoSha.isNullOrBlank() ||
+            uiState.settings.persona.defaultPhotoSha.isNotBlank()
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -387,12 +388,13 @@ fun ScriptScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
             StudioPrimaryCta(
-                text = if (hasStageReady && project.activeBeats.isNotEmpty()) {
-                    stringResource(R.string.cta_render_aircheck)
+                text = if (hasPhotoReady && project.activeBeats.isNotEmpty()) {
+                    if (uiState.isEnqueuingRender) "Queueing…" else stringResource(R.string.cta_render_aircheck)
                 } else {
-                    stringResource(R.string.cta_next_stage)
+                    stringResource(R.string.cta_next_photo)
                 },
                 onClick = onPrimaryAction,
+                enabled = !uiState.isEnqueuingRender,
                 modifier = Modifier.testTag("script_primary_cta")
             )
         }
@@ -418,6 +420,7 @@ private fun BeatEditorCard(
     onMetadataChange: (
         mentionTag: String?,
         depthTextTag: String?,
+        anchorWord: String?,
         evidenceSource: String?,
         sfxTag: String?,
         bRollPrompt: String?
@@ -613,7 +616,7 @@ private fun BeatEditorCard(
                             CompactBeatToolButton(
                                 icon = if (isRecordingMic) Icons.Filled.Stop else Icons.Filled.Mic,
                                 label = if (isRecordingMic) "Stop" else "Mic",
-                                active = isRecordingMic || !beat.beatAudioKey.isNullOrBlank(),
+                                active = isRecordingMic || !beat.beatAudioSha.isNullOrBlank(),
                                 onClick = onToggleMic,
                                 modifier = Modifier
                                     .weight(1f)
@@ -645,7 +648,7 @@ private fun BeatEditorCard(
 
                         OutlinedTextField(
                             value = beat.evidenceSource,
-                            onValueChange = { onMetadataChange(null, null, it, null, null) },
+                            onValueChange = { onMetadataChange(null, null, null, it, null, null) },
                             placeholder = { Text("Source or citation", color = TelemetryMuted) },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
@@ -659,7 +662,7 @@ private fun BeatEditorCard(
                         ) {
                             OutlinedTextField(
                                 value = beat.depthTextTag,
-                                onValueChange = { onMetadataChange(null, it, null, null, null) },
+                                onValueChange = { onMetadataChange(null, it, null, null, null, null) },
                                 placeholder = { Text("On-screen keyword", color = TelemetryMuted) },
                                 singleLine = true,
                                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
@@ -667,9 +670,9 @@ private fun BeatEditorCard(
                                 modifier = Modifier.weight(1f)
                             )
                             OutlinedTextField(
-                                value = beat.mentionTag,
-                                onValueChange = { onMetadataChange(it, null, null, null, null) },
-                                placeholder = { Text("@mention", color = TelemetryMuted) },
+                                value = beat.anchorWord,
+                                onValueChange = { onMetadataChange(null, null, it, null, null, null) },
+                                placeholder = { Text("Anchor word", color = TelemetryMuted) },
                                 singleLine = true,
                                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
                                 colors = studioFieldColors(),
@@ -679,7 +682,7 @@ private fun BeatEditorCard(
 
                         OutlinedTextField(
                             value = beat.bRollPrompt,
-                            onValueChange = { onMetadataChange(null, null, null, null, it) },
+                            onValueChange = { onMetadataChange(null, null, null, null, null, it) },
                             placeholder = { Text("B-roll cutaway visual cue", color = TelemetryMuted) },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),

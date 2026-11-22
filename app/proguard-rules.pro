@@ -1,21 +1,31 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Aircheck R8 Full Mode Rules
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Keep Kotlinx Serialization generated serializers & Nav3 NavKey routes
+-keepattributes *Annotation*, InnerClasses
+-dontnote kotlinx.serialization.AnnotationsKt
+-keepclassmembers class kotlinx.serialization.json.** {
+    *** Companion;
+}
+-keepclasseswithmembers class kotlinx.serialization.json.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+-keep,includedescriptorclasses class com.example.**$$serializer { *; }
+-keepclassmembers class com.example.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.example.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Keep Jetpack AppFunctions service entry point & serializable DTOs
+-keep class * extends androidx.appfunctions.AppFunctionService { *; }
+-keep @androidx.appfunctions.AppFunctionSerializable class * { *; }
+-keepclassmembers class * {
+    @androidx.appfunctions.AppFunctionDeclaration <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep Room database & entities
+-keep class * extends androidx.room.RoomDatabase { *; }
+
+# Keep Firebase Messaging service
+-keep class * extends com.google.firebase.messaging.FirebaseMessagingService { *; }

@@ -1,8 +1,6 @@
 package com.example.ui.components
 
-import android.net.Uri
 import android.view.HapticFeedbackConstants
-import androidx.annotation.RawRes
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -42,9 +40,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -53,7 +52,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -70,7 +68,6 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -82,12 +79,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.AspectRatioFrameLayout
-import androidx.media3.ui.PlayerView
 import com.example.R
 import com.example.data.StudioTab
 import com.example.ui.theme.ConsoleObsidian
@@ -510,13 +501,13 @@ fun StudioDockBar(
                 val isSelected = tab == selectedTab
                 val icon = when (tab) {
                     StudioTab.SCRIPT -> Icons.Filled.Edit
-                    StudioTab.STAGE -> Icons.Filled.Videocam
-                    StudioTab.REVIEW -> Icons.Filled.PlayArrow
+                    StudioTab.PHOTO -> Icons.Filled.PhotoCamera
+                    StudioTab.CLIPS -> Icons.Filled.VideoLibrary
                 }
                 val ledColor = when {
                     !isSelected -> Color(0xFF3A414E)
                     tab == StudioTab.SCRIPT -> tokens.channelAccent
-                    tab == StudioTab.STAGE -> tokens.statusStandby
+                    tab == StudioTab.PHOTO -> tokens.statusStandby
                     else -> tokens.statusLive
                 }
 
@@ -601,8 +592,8 @@ fun StudioNavigationRail(
         StudioTab.entries.forEach { tab ->
             val icon = when (tab) {
                 StudioTab.SCRIPT -> Icons.Filled.Edit
-                StudioTab.STAGE -> Icons.Filled.Videocam
-                StudioTab.REVIEW -> Icons.Filled.PlayArrow
+                StudioTab.PHOTO -> Icons.Filled.PhotoCamera
+                StudioTab.CLIPS -> Icons.Filled.VideoLibrary
             }
             val selected = tab == selectedTab
             HardwareKeyButton(
@@ -707,49 +698,6 @@ fun HazardCutOverlay(modifier: Modifier = Modifier) {
             x += stripeGap
         }
     }
-}
-
-/**
- * Seamlessly looping, muted Media3 ExoPlayer surface for bundled 3D conglomerate animations
- * (brand_loop_torus.mp4 & brand_loop_clock.mp4). Releases cleanly on dispose.
- */
-@Composable
-fun LoopingBrandVideoPlayer(
-    @RawRes rawResId: Int,
-    contentDescription: String,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    val player = remember(rawResId) {
-        ExoPlayer.Builder(context).build().apply {
-            val uri = Uri.parse("android.resource://${context.packageName}/$rawResId")
-            setMediaItem(MediaItem.fromUri(uri))
-            repeatMode = Player.REPEAT_MODE_ALL
-            volume = 0f
-            playWhenReady = true
-            prepare()
-        }
-    }
-
-    DisposableEffect(player) {
-        onDispose {
-            runCatching { player.release() }
-        }
-    }
-
-    AndroidView(
-        factory = { ctx ->
-            PlayerView(ctx).apply {
-                this.player = player
-                useController = false
-                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                setShutterBackgroundColor(android.graphics.Color.BLACK)
-                this.contentDescription = contentDescription
-            }
-        },
-        update = { it.player = player },
-        modifier = modifier
-    )
 }
 
 /**
