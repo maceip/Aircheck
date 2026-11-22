@@ -20,3 +20,4 @@ debug.keystore
 node_modules/
 backend/*/lib/
 backend/*/dist/
+__pycache__/
