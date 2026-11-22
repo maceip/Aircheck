@@ -245,7 +245,7 @@ class CloudRenderJobGateway(
         providers: StageProviderSettings,
         photoSha: String
     ): EnqueuedRenderResult = withContext(Dispatchers.IO) {
-        val uid = Firebase.auth.currentUser?.uid
+        val uid = runCatching { Firebase.auth.currentUser?.uid }.getOrNull()
             ?: throw IllegalStateException("Sign in with Google to enqueue a cloud render.")
         if (project.activeBeats.isEmpty()) {
             throw IllegalStateException("Add at least one spoken beat before rendering.")
@@ -357,7 +357,7 @@ class CloudRenderJobGateway(
     }
 
     override fun observeRenderJobs(): Flow<List<ClipRecord>> = flow {
-        val uid = Firebase.auth.currentUser?.uid
+        val uid = runCatching { Firebase.auth.currentUser?.uid }.getOrNull()
         if (uid.isNullOrBlank()) {
             emit(emptyList())
             return@flow
@@ -449,7 +449,7 @@ class CloudPersonaTrainingGateway(
     }
 
     override fun observePersonaProfile(): Flow<PersonaProfile?> = flow {
-        val uid = Firebase.auth.currentUser?.uid
+        val uid = runCatching { Firebase.auth.currentUser?.uid }.getOrNull()
         if (uid.isNullOrBlank()) {
             emit(null)
             return@flow

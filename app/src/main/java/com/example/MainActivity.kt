@@ -6,6 +6,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -310,6 +314,12 @@ fun AircheckApp(viewModel: StudioViewModel) {
                         NavDisplay(
                             entries = navigationState.toDecoratedEntries(entryProvider),
                             onBack = { navigator.goBack() },
+                            transitionSpec = {
+                                fadeIn(tween(90)) togetherWith fadeOut(tween(70))
+                            },
+                            popTransitionSpec = {
+                                fadeIn(tween(90)) togetherWith fadeOut(tween(70))
+                            },
                             modifier = Modifier.weight(1f)
                         )
                     }

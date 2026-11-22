@@ -1,11 +1,13 @@
 package com.example
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -41,8 +43,9 @@ class AircheckEndToEndTest {
         composeRule.onNodeWithTag("target_duration_button").performClick()
         composeRule.waitForIdle()
 
-        // Add a second beat and verify Room persistence
-        composeRule.onNodeWithTag("add_beat_button").performScrollTo().performClick()
+        // Scroll to Add Beat button and add a second beat
+        composeRule.onNodeWithTag("script_lazy_list").performScrollToNode(hasTestTag("add_beat_button"))
+        composeRule.onNodeWithTag("add_beat_button").performClick()
         composeRule.waitForIdle()
 
         val savedScripts = runBlocking {
@@ -58,37 +61,46 @@ class AircheckEndToEndTest {
         composeRule.onNodeWithTag("dock_tab_photo").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("pick_photo_button").assertIsDisplayed()
-        composeRule.onNodeWithTag("stage4_mode_saved_loop_latentsync").performScrollTo().performClick()
-        composeRule.onNodeWithTag("voice_source_mic_voiceover").performScrollTo().performClick()
-        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("photo_lazy_list").performScrollToNode(hasTestTag("stage4_mode_saved_loop_latentsync"))
+        composeRule.onNodeWithTag("stage4_mode_saved_loop_latentsync").performClick()
+        composeRule.onNodeWithTag("photo_lazy_list").performScrollToNode(hasTestTag("voice_source_mic_voiceover"))
+        composeRule.onNodeWithTag("voice_source_mic_voiceover").performClick()
+        composeRule.waitUntil(timeoutMillis = 3_000L) {
+            runBlocking {
+                val cur = app.container.profileStore.current()
+                cur.stage4Mode.name == "SAVED_LOOP_LATENTSYNC" && cur.voiceSource.name == "MIC_VOICEOVER"
+            }
+        }
 
         // Verify Proto DataStore persisted Stage 4 mode & Voice source
         val settingsAfterPhoto = runBlocking { app.container.profileStore.current() }
         assertEquals("SAVED_LOOP_LATENTSYNC", settingsAfterPhoto.stage4Mode.name)
         assertEquals("MIC_VOICEOVER", settingsAfterPhoto.voiceSource.name)
 
-        // Zero Silent Fallback Proof: tapping Render without active beats/auth surfaces explicit error banner
+        // Zero Silent Fallback Proof: tapping Render surfaces visible pinned error banner immediately
         composeRule.onNodeWithTag("photo_render_cta").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("studio_error_banner").assertIsDisplayed()
 
-        // Switch to Clips tab and back to Script tab -> verify state retained
+        // Switch to Clips tab and back to Script tab -> verify state & scroll retained cleanly
         composeRule.onNodeWithTag("dock_tab_clips").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("clips_render_cta").assertIsDisplayed()
 
         composeRule.onNodeWithTag("dock_tab_script").performClick()
         composeRule.waitForIdle()
+        composeRule.onNodeWithTag("script_lazy_list").performScrollToIndex(0)
         composeRule.onNodeWithText("Blue Ocean Launch").assertIsDisplayed()
 
         // 4. Account & Persona Sheet -> save real head_model_id & voice_id to Proto DataStore
         composeRule.onNodeWithTag("top_bar_account_button").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("head_model_id_input").performScrollTo().performTextClearance()
+        composeRule.onNodeWithTag("account_lazy_list").performScrollToNode(hasTestTag("save_persona_ids_button"))
+        composeRule.onNodeWithTag("head_model_id_input").performTextClearance()
         composeRule.onNodeWithTag("head_model_id_input").performTextInput("ryan_head_v1")
-        composeRule.onNodeWithTag("voice_id_input").performScrollTo().performTextClearance()
+        composeRule.onNodeWithTag("voice_id_input").performTextClearance()
         composeRule.onNodeWithTag("voice_id_input").performTextInput("ryan_voice_v1")
-        composeRule.onNodeWithTag("save_persona_ids_button").performScrollTo().performClick()
+        composeRule.onNodeWithTag("save_persona_ids_button").performClick()
         composeRule.waitForIdle()
 
         val enrolled = runBlocking { app.container.profileStore.current().persona }
@@ -111,6 +123,7 @@ class AircheckEndToEndTest {
 
         composeRule.onNodeWithTag("close_system_deck_button").performClick()
         composeRule.waitForIdle()
+        composeRule.onNodeWithTag("script_lazy_list").performScrollToIndex(0)
         composeRule.onNodeWithTag("spark_input").assertIsDisplayed()
     }
 }

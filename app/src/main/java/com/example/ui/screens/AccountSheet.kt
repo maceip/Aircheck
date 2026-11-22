@@ -139,7 +139,8 @@ fun AccountSheet(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .widthIn(max = 640.dp),
+                .widthIn(max = 640.dp)
+                .testTag("account_lazy_list"),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {

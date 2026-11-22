@@ -9,6 +9,7 @@ import com.example.data.ScriptProject
 import com.example.data.Stage4Mode
 import com.example.data.VoiceSource
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.DocumentSnapshot
@@ -71,30 +72,47 @@ fun handleFirestoreError(exception: Throwable, operationType: OperationType, pat
     return jsonString
 }
 
-class FirestoreSyncRepository(private val db: FirebaseFirestore) {
+class FirestoreSyncRepository(
+    private val dbProvider: () -> FirebaseFirestore?
+) {
 
     constructor(context: Context) : this(
-        FirebaseFirestore.getInstance(
-            context.applicationContext.getString(R.string.firestore_database_id)
-        )
+        dbProvider = {
+            if (FirebaseApp.getApps(context.applicationContext).isEmpty()) {
+                null
+            } else {
+                runCatching {
+                    FirebaseFirestore.getInstance(
+                        context.applicationContext.getString(R.string.firestore_database_id)
+                    )
+                }.getOrNull()
+            }
+        }
     )
 
-    private val auth = Firebase.auth
+    constructor(db: FirebaseFirestore) : this(dbProvider = { db })
+
+    private val db: FirebaseFirestore?
+        get() = dbProvider()
+
+    private val auth: FirebaseAuth?
+        get() = runCatching { Firebase.auth }.getOrNull()
 
     private fun requireUserId(): String {
-        return auth.currentUser?.uid
+        return auth?.currentUser?.uid
             ?: throw IllegalStateException("Sign in with Google to sync with Aircheck Cloud.")
     }
 
     fun observeUserScripts(): Flow<List<ScriptProject>> = flow {
-        val uid = auth.currentUser?.uid
-        if (uid.isNullOrBlank()) {
+        val firestore = db
+        val uid = auth?.currentUser?.uid
+        if (firestore == null || uid.isNullOrBlank()) {
             emit(emptyList())
             return@flow
         }
         val path = "users/$uid/scripts"
         emitAll(
-            db.collection("users").document(uid).collection("scripts")
+            firestore.collection("users").document(uid).collection("scripts")
                 .snapshots()
                 .map { snapshot ->
                     snapshot.documents.mapNotNull { doc -> doc.toScriptProjectOrNull(uid) }
@@ -105,7 +123,7 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
                         .firstOrNull()
                     if (firestoreError == null && error is CancellationException) throw error
                     val exceptionToLog = firestoreError ?: (error as? Exception)
-                    if (exceptionToLog != null && auth.currentUser?.uid == uid) {
+                    if (exceptionToLog != null && auth?.currentUser?.uid == uid) {
                         handleFirestoreError(exceptionToLog, OperationType.LIST, path)
                     }
                     throw error
@@ -114,10 +132,12 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
     }
 
     suspend fun syncProject(project: ScriptProject): Result<Unit> {
-        val uid = auth.currentUser?.uid
+        val firestore = db
+            ?: return Result.failure(IllegalStateException("Firebase is not configured (missing app/google-services.json)."))
+        val uid = auth?.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in."))
         val safeId = project.id.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(128)
-        val docRef = db.collection("users").document(uid).collection("scripts").document(safeId)
+        val docRef = firestore.collection("users").document(uid).collection("scripts").document(safeId)
         val path = docRef.path
 
         return try {
@@ -197,10 +217,12 @@ class FirestoreSyncRepository(private val db: FirebaseFirestore) {
     }
 
     suspend fun deleteProject(projectId: String): Result<Unit> {
-        val uid = auth.currentUser?.uid
+        val firestore = db
+            ?: return Result.failure(IllegalStateException("Firebase is not configured (missing app/google-services.json)."))
+        val uid = auth?.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in."))
         val safeId = projectId.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(128)
-        val docRef = db.collection("users").document(uid).collection("scripts").document(safeId)
+        val docRef = firestore.collection("users").document(uid).collection("scripts").document(safeId)
         return try {
             requireUserId()
             docRef.delete().await()

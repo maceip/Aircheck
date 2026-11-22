@@ -126,20 +126,26 @@ fun PhotoStageScreen(
             .background(OledVoid),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        if (!uiState.errorMessage.isNullOrBlank()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 640.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                StudioErrorBanner(message = uiState.errorMessage, onDismiss = onDismissError)
+            }
+        }
+
         LazyColumn(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .widthIn(max = 640.dp),
+                .widthIn(max = 640.dp)
+                .testTag("photo_lazy_list"),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (!uiState.errorMessage.isNullOrBlank()) {
-                item(key = "photo_error") {
-                    StudioErrorBanner(message = uiState.errorMessage, onDismiss = onDismissError)
-                }
-            }
-
             // 1. Single Daily Phone Photo + Cloud Pose Gate
             item(key = "photo_card") {
                 StudioCard(

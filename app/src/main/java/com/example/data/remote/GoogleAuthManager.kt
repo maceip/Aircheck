@@ -40,7 +40,7 @@ fun attemptAutoSignIn(
     onUnauthenticated: () -> Unit,
     scope: CoroutineScope
 ) {
-    if (Firebase.auth.currentUser != null) {
+    if (runCatching { Firebase.auth.currentUser }.getOrNull() != null) {
         onAuthSuccess()
         return
     }
