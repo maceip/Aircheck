@@ -1,0 +1,39 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Default deny
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // Content-addressed user uploads (`users/{uid}/cas/{prefix2}/{sha256}.{ext}`)
+    match /users/{userId}/cas/{prefix}/{fileName} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null
+                   && request.auth.uid == userId
+                   && prefix.size() == 2
+                   && request.resource != null
+                   && request.resource.size <= 50 * 1024 * 1024
+                   && (request.resource.contentType.matches('image/.*')
+                       || request.resource.contentType.matches('audio/.*'));
+    }
+
+    // Phase A upfront persona training videos (`users/{uid}/training/{fileName}`)
+    match /users/{userId}/training/{fileName} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null
+                   && request.auth.uid == userId
+                   && request.resource != null
+                   && request.resource.size <= 500 * 1024 * 1024
+                   && request.resource.contentType.matches('video/.*');
+    }
+
+    // Server-rendered artifacts (read-only for owner; Cloud Functions Admin SDK writes exclusively)
+    match /users/{userId}/cas/{stage}/{fileName} {
+      allow read: if request.auth != null
+                  && request.auth.uid == userId
+                  && (stage == 'voice' || stage == 'align' || stage == 'lipsync' || stage == 'final');
+      allow write: if false;
+    }
+  }
+}
