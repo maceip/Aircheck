@@ -1,0 +1,107 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidVoiceSource(val) {
+      return val is string && (val == 'MIC_VOICEOVER' || val == 'VOICE_CLONE' || val == 'MALE_TTS_DRY_RUN');
+    }
+
+    function isValidTargetDuration(val) {
+      return val is int && (val == 15 || val == 30 || val == 45 || val == 60);
+    }
+
+    function isValidScriptProject(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId.size() <= 128 &&
+             data.title is string && data.title.size() <= 180 &&
+             data.ideaSpark is string && data.ideaSpark.size() <= 1000 &&
+             isValidTargetDuration(data.targetDurationSec) &&
+             data.beats is list && data.beats.size() <= 40 &&
+             (data.beats.size() == 0 || data.beats[0] is map) &&
+             data.stageConfig is map &&
+             isValidVoiceSource(data.voiceSource) &&
+             (!('voiceSelectionId' in data) || data.voiceSelectionId == null || (data.voiceSelectionId is string && data.voiceSelectionId.size() <= 128)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidStudioPreset(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             data.backdropPresetId is string && data.backdropPresetId.size() >= 1 && data.backdropPresetId.size() <= 64 &&
+             isValidTargetDuration(data.targetDurationSec) &&
+             isValidVoiceSource(data.voiceSource) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId}/scripts/{scriptId} {
+      allow get: if isOwner(userId) && isValidId(scriptId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(scriptId) &&
+                       incoming().keys().hasAll(['userId', 'title', 'ideaSpark', 'targetDurationSec', 'beats', 'stageConfig', 'voiceSource', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'title', 'ideaSpark', 'targetDurationSec', 'beats', 'stageConfig', 'voiceSource', 'voiceSelectionId', 'createdAt', 'updatedAt']) &&
+                       isValidScriptProject(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(scriptId) &&
+                       isValidScriptProject(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'title', 'ideaSpark', 'targetDurationSec', 'beats',
+                         'stageConfig', 'voiceSource', 'voiceSelectionId', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(scriptId);
+    }
+
+    match /users/{userId}/presets/{presetId} {
+      allow get: if isOwner(userId) && isValidId(presetId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(presetId) &&
+                       incoming().keys().hasAll(['userId', 'name', 'backdropPresetId', 'targetDurationSec', 'voiceSource', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'name', 'backdropPresetId', 'targetDurationSec', 'voiceSource', 'createdAt', 'updatedAt']) &&
+                       isValidStudioPreset(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(presetId) &&
+                       isValidStudioPreset(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'name', 'backdropPresetId', 'targetDurationSec', 'voiceSource', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(presetId);
+    }
+  }
+}

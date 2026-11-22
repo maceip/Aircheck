@@ -1,0 +1,30 @@
+<resources>
+    <string name="app_name">Aircheck</string>
+    <string name="tab_script">Script</string>
+    <string name="tab_stage">Stage</string>
+    <string name="tab_review">Review</string>
+    <string name="cd_open_system_deck">Open System Deck</string>
+    <string name="cd_open_account">Open Account and Settings</string>
+    <string name="cd_ai_hone_spark">Hone spark with AI</string>
+    <string name="cd_ai_cancel">Cancel AI generation</string>
+    <string name="cd_ai_expand_beat">Expand beat with AI</string>
+    <string name="cd_play_pause">Play or pause</string>
+    <string name="cd_rewind">Rewind to start</string>
+    <string name="cd_record_mic">Record microphone voiceover</string>
+    <string name="cd_export_video">Export MP4 video</string>
+    <string name="cd_share_video">Share exported video</string>
+    <string name="cd_close_sheet">Close</string>
+    <string name="spark_placeholder">Drop a raw thought, headline, or angle…</string>
+    <string name="beat_placeholder">Write what you want to say…</string>
+    <string name="title_placeholder">Untitled segment</string>
+    <string name="cta_next_stage">Next: Stage</string>
+    <string name="cta_render_aircheck">Render Aircheck</string>
+    <string name="cta_add_beat">Add beat</string>
+    <string name="action_shorten_20">Shorten 20%</string>
+    <string name="action_fact_check">Fact check</string>
+    <string name="action_keep_original">Keep original</string>
+    <string name="action_use_shorter">Use shorter</string>
+    <string name="action_sign_in_google">Sign in with Google</string>
+    <string name="action_sign_out">Sign out</string>
+    <string name="action_sync_now">Sync now</string>
+</resources>

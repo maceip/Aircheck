@@ -1,0 +1,6 @@
+{
+  "name": "Aircheck",
+  "description": "Hybrid Studio Deck & AI Newsroom Studio for turning sparks into fact-backed talking-head broadcasts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
