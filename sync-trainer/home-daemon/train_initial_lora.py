@@ -732,6 +732,9 @@ def train_rank32_lora(
     accum_loss = 0.0
     step_history: list[dict[str, Any]] = []
     epoch_history: list[dict[str, Any]] = []
+    best_val_loss: float = initial_val_loss if initial_val_loss is not None else float("inf")
+    best_epoch: int = 0
+    best_lora_state: dict[str, torch.Tensor] | None = None
     t_start = time.perf_counter()
 
     for epoch in range(1, epochs + 1):
@@ -803,6 +806,14 @@ def train_rank32_lora(
                 "val_loss": round(val_loss_now, 6) if val_loss_now is not None else None,
             }
         )
+        if val_loss_now is not None and val_loss_now < best_val_loss:
+            best_val_loss = val_loss_now
+            best_epoch = epoch
+            best_lora_state = {
+                k: v.detach().cpu().clone()
+                for k, v in peft_model.named_parameters()
+                if v.requires_grad
+            }
         print(
             f"  [epoch {epoch}/{epochs}] mean_train_loss={epoch_mean:.4f}"
             + (f" val_loss={val_loss_now:.4f}" if val_loss_now is not None else ""),
@@ -810,6 +821,17 @@ def train_rank32_lora(
         )
         if opt_step >= total_opt_steps:
             break
+
+    if best_lora_state is not None and best_epoch != epoch_history[-1]["epoch"]:
+        print(
+            f"  [checkpoint] Restoring best-validation epoch {best_epoch} "
+            f"(val_loss={best_val_loss:.4f})",
+            flush=True,
+        )
+        with torch.no_grad():
+            for name, param in peft_model.named_parameters():
+                if name in best_lora_state:
+                    param.copy_(best_lora_state[name].to(device=param.device, dtype=param.dtype))
 
     if device == "mps" and torch.backends.mps.is_available():
         torch.mps.synchronize()
@@ -854,6 +876,7 @@ def train_rank32_lora(
         "total_params": n_total,
         "trainable_pct": round(100.0 * n_trainable / max(n_total, 1), 4),
         "epochs": epochs,
+        "selected_epoch": best_epoch if best_lora_state is not None else epochs,
         "optimizer_steps": opt_step,
         "grad_accum_steps": eff_accum,
         "learning_rate": learning_rate,
