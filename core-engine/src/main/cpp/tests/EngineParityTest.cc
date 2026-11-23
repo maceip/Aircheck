@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+
 namespace {
 
 using namespace voicestudio::engine;
@@ -498,6 +502,235 @@ void TestTenCycleLoraLifecycleAndMadviseEviction(const fs::path& tmp_dir) {
               << ", final_live_bytes=" << final_stats.live_adapter_bytes << ")\n";
 }
 
+double CurrentProcessRssMb() {
+#if defined(__APPLE__)
+    mach_task_basic_info info{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(
+            mach_task_self(),
+            MACH_TASK_BASIC_INFO,
+            reinterpret_cast<task_info_t>(&info),
+            &count) == KERN_SUCCESS) {
+        return static_cast<double>(info.resident_size) / (1024.0 * 1024.0);
+    }
+#endif
+    return 0.0;
+}
+
+void TestOtaAndNativeDirLlamaDiscovery(const fs::path& tmp_dir) {
+    const fs::path probe_src(VOICESTUDIO_LLAMA_PROBE_PATH);
+#if defined(__APPLE__)
+    const std::string lib_name = "libllama.dylib";
+#else
+    const std::string lib_name = "libllama.so";
+#endif
+
+    // 1. Verify OTA bundle directory auto-discovery (noBackupFilesDir/bundles/v001/android-libs/libllama.*).
+    const fs::path bundle_dir = tmp_dir / "noBackupFilesDir" / "bundles" / "v001";
+    const fs::path ota_libs_dir = bundle_dir / "android-libs";
+    fs::create_directories(ota_libs_dir);
+    const fs::path ota_lib = ota_libs_dir / lib_name;
+    fs::copy_file(probe_src, ota_lib, fs::copy_options::overwrite_existing);
+
+    const fs::path base_gguf = bundle_dir / "s2_pro_4b_q4_k_m.gguf";
+    const fs::path lora_gguf = bundle_dir / "voice_lora_v001.gguf";
+    const fs::path tflite = bundle_dir / "codec_decoder_fp16.tflite";
+    WriteDummyGgufHeader(base_gguf, 3, 16384);
+    WriteDummyGgufHeader(lora_gguf, 3, 16384);
+    WriteDummyTfliteHeader(tflite);
+
+    {
+        VoiceEngine engine;
+        EngineConfig cfg;
+        cfg.base_gguf_path = base_gguf.string();
+        cfg.lora_gguf_path = lora_gguf.string();
+        cfg.vocoder_tflite_path = tflite.string();
+        // Deliberately leave llama_library_path empty to verify OTA android-libs discovery.
+        const auto candidates = BuildLlamaLibraryCandidates(cfg);
+        bool has_ota_candidate = false;
+        for (const auto& c : candidates) {
+            if (c == ota_lib.string()) {
+                has_ota_candidate = true;
+                break;
+            }
+        }
+        Check(has_ota_candidate, "BuildLlamaLibraryCandidates must include OTA android-libs path");
+
+        const auto st = engine.Init(cfg);
+        Check(st.ok, "VoiceEngine::Init must auto-discover OTA android-libs libllama: " + st.error_message);
+        Check(
+            engine.ResolvedLlamaLibraryPath() == ota_lib.string(),
+            "Resolved llama path must match OTA android-libs library (got " +
+                engine.ResolvedLlamaLibraryPath() + ")");
+    }
+
+    // 2. Verify native_library_dir takes priority over OTA android-libs when both exist.
+    const fs::path native_dir = tmp_dir / "app_native_lib_dir";
+    fs::create_directories(native_dir);
+    const fs::path native_lib = native_dir / lib_name;
+    fs::copy_file(probe_src, native_lib, fs::copy_options::overwrite_existing);
+
+    {
+        VoiceEngine engine;
+        EngineConfig cfg;
+        cfg.base_gguf_path = base_gguf.string();
+        cfg.lora_gguf_path = lora_gguf.string();
+        cfg.vocoder_tflite_path = tflite.string();
+        cfg.native_library_dir = native_dir.string();
+
+        const auto st = engine.Init(cfg);
+        Check(st.ok, "VoiceEngine::Init with native_library_dir must succeed: " + st.error_message);
+        Check(
+            engine.ResolvedLlamaLibraryPath() == native_lib.string(),
+            "native_library_dir must resolve ahead of OTA android-libs");
+    }
+
+    // 3. Verify passing an OTA directory directly as llama_library_path resolves libllama inside it.
+    {
+        VoiceEngine engine;
+        EngineConfig cfg;
+        cfg.base_gguf_path = base_gguf.string();
+        cfg.lora_gguf_path = lora_gguf.string();
+        cfg.vocoder_tflite_path = tflite.string();
+        cfg.llama_library_path = ota_libs_dir.string();
+
+        const auto st = engine.Init(cfg);
+        Check(st.ok, "VoiceEngine::Init with OTA dir llama_library_path must succeed: " + st.error_message);
+        Check(
+            engine.ResolvedLlamaLibraryPath() == ota_lib.string(),
+            "Explicit OTA directory must resolve to contained libllama binary");
+    }
+
+    std::cout << "[PASS] TestOtaAndNativeDirLlamaDiscovery\n";
+}
+
+void TestRealS2ProGgufAndLoraSemanticRollout() {
+#if defined(__APPLE__)
+    const fs::path real_lib = "/Users/mac/Downloads/voicestudio-models/llama-build-host/bin/libllama.dylib";
+#else
+    const fs::path real_lib = "/Users/mac/Downloads/voicestudio-models/llama-build-host/bin/libllama.so";
+#endif
+    const fs::path real_base_gguf = "/Users/mac/Downloads/voicestudio-models/s2-pro/s2-pro.Q4_K_M.gguf";
+    const fs::path real_lora_gguf = "/Users/mac/Downloads/voicestudio-models/bundles/v001/voice_lora_v001.gguf";
+    const fs::path real_tflite = "/Users/mac/Downloads/voicestudio-models/bundles/v001/codec_decoder_fp16.tflite";
+
+    if (!fs::is_regular_file(real_lib) ||
+        !fs::is_regular_file(real_base_gguf) ||
+        !fs::is_regular_file(real_lora_gguf) ||
+        !fs::is_regular_file(real_tflite)) {
+        std::cout << "[SKIP] TestRealS2ProGgufAndLoraSemanticRollout (real host s2-pro GGUF/LoRA assets not present)\n";
+        return;
+    }
+
+    {
+        VoiceEngine engine;
+        EngineConfig cfg;
+        cfg.base_gguf_path = real_base_gguf.string();
+        cfg.lora_gguf_path = real_lora_gguf.string();
+        cfg.vocoder_tflite_path = real_tflite.string();
+        // Pass containing bin directory to test directory resolution + RTLD_GLOBAL companion preloading.
+        cfg.llama_library_path = real_lib.parent_path().string();
+        cfg.lora_scale = 1.0f;
+        cfg.n_threads = 6;
+        cfg.n_ctx = 1024;
+        cfg.max_audio_tokens = 64;
+        cfg.base_seed = 948101;
+        cfg.default_temperature = 0.72f;
+        cfg.top_p = 0.80f;
+        cfg.top_k = 30;
+
+        const auto init_st = engine.Init(cfg);
+        Check(init_st.ok, "Real s2-pro GGUF + LoRA VoiceEngine::Init must succeed: " + init_st.error_message);
+        if (!init_st.ok) {
+            return;
+        }
+        Check(
+            engine.ResolvedLlamaLibraryPath() == real_lib.string(),
+            "Resolved real libllama path mismatch: " + engine.ResolvedLlamaLibraryPath());
+
+        const std::string clause_text =
+            "We ripped out the cloud wrapper and ran the voice studio right on the Pixel.";
+
+        ClauseSamplingParams params;
+        params.seed = 948101;
+        params.temperature = 0.72f;
+        params.top_p = 0.80f;
+        params.top_k = 30;
+        params.max_audio_tokens = 64;
+
+        SynthesizedCandidate cand1;
+        const auto s1 = engine.SynthesizeClause(clause_text, "", params, cand1);
+        Check(s1.ok, "Real SynthesizeClause #1 must succeed: " + s1.error_message);
+        Check(!cand1.discrete_audio_tokens.empty(), "Real s2-pro rollout must emit non-empty semantic tokens");
+        Check(cand1.pcm_44k.empty(), "Without vocoder callback, pcm_44k must remain empty");
+        for (int32_t tok : cand1.discrete_audio_tokens) {
+            Check(
+                tok >= kS2ProSemanticStartTokenId && tok <= kS2ProSemanticEndTokenId,
+                "Every sampled token must lie in [151678..155773], got " + std::to_string(tok));
+        }
+
+        // Exact determinism verification for identical seed + sampling params.
+        SynthesizedCandidate cand1_repeat;
+        const auto s1_rep = engine.SynthesizeClause(clause_text, "", params, cand1_repeat);
+        Check(s1_rep.ok, "Deterministic repeat SynthesizeClause must succeed: " + s1_rep.error_message);
+        Check(
+            cand1.discrete_audio_tokens == cand1_repeat.discrete_audio_tokens,
+            "Same seed/temp/top_p/top_k must reproduce identical semantic token sequence");
+
+        // Second candidate with different seed produces valid semantic tokens.
+        ClauseSamplingParams params2 = params;
+        params2.seed = 948102;
+        params2.max_audio_tokens = 32;
+        SynthesizedCandidate cand2;
+        const auto s2 = engine.SynthesizeClause(clause_text, "", params2, cand2);
+        Check(s2.ok, "Real SynthesizeClause #2 must succeed: " + s2.error_message);
+        Check(!cand2.discrete_audio_tokens.empty(), "Second candidate must emit non-empty semantic tokens");
+        for (int32_t tok : cand2.discrete_audio_tokens) {
+            Check(
+                tok >= kS2ProSemanticStartTokenId && tok <= kS2ProSemanticEndTokenId,
+                "Candidate #2 token must lie in [151678..155773]");
+        }
+
+        // Real HotSwapLora() leak & post-swap rollout verification (3 consecutive swaps).
+        const double rss_before_mb = CurrentProcessRssMb();
+        for (int swap_i = 0; swap_i < 3; ++swap_i) {
+            const auto swap_st = engine.HotSwapLora(real_lora_gguf.string());
+            Check(swap_st.ok, "Real HotSwapLora cycle " + std::to_string(swap_i + 1) + " must succeed: " + swap_st.error_message);
+        }
+        const double rss_after_mb = CurrentProcessRssMb();
+        Check(engine.LoraSwapCount() == 3, "Real LoraSwapCount must equal 3");
+
+        ClauseSamplingParams post_swap_params = params;
+        post_swap_params.max_audio_tokens = 24;
+        SynthesizedCandidate post_swap_cand;
+        const auto s_post = engine.SynthesizeClause(clause_text, "", post_swap_params, post_swap_cand);
+        Check(s_post.ok, "Post-HotSwapLora SynthesizeClause must succeed: " + s_post.error_message);
+        Check(
+            !post_swap_cand.discrete_audio_tokens.empty(),
+            "Post-HotSwapLora rollout must emit non-empty semantic tokens");
+        for (int32_t tok : post_swap_cand.discrete_audio_tokens) {
+            Check(
+                tok >= kS2ProSemanticStartTokenId && tok <= kS2ProSemanticEndTokenId,
+                "Post-swap token must lie in [151678..155773]");
+        }
+
+        // Verify madvise page eviction covers real 2.51 GB base + 132 MB LoRA GGUFs.
+        const size_t evicted = engine.EvictWeightPages();
+        Check(evicted > 2500000000ULL, "EvictWeightPages must advise full base+LoRA GGUF pages");
+        Check(engine.LastEvictionSucceeded(), "Real madvise(MADV_DONTNEED) must succeed");
+
+        std::cout << "[PASS] TestRealS2ProGgufAndLoraSemanticRollout "
+                  << "(tokens=" << cand1.discrete_audio_tokens.size()
+                  << ", hit_eos=" << (cand1.hit_eos ? "true" : "false")
+                  << ", elapsed_ms=" << cand1.elapsed_ms
+                  << ", tok_per_sec=" << cand1.tokens_per_sec
+                  << ", first_tok=" << (cand1.discrete_audio_tokens.empty() ? -1 : cand1.discrete_audio_tokens[0])
+                  << ", lora_swaps=" << engine.LoraSwapCount()
+                  << ", rss_delta_mb=" << (rss_after_mb - rss_before_mb)
+                  << ")\n";
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -509,6 +742,8 @@ int main() {
     TestFindNearestZeroCrossingAndAlignedPcm(tmp_dir);
     TestMissingAndCorruptModelRejection(tmp_dir);
     TestTenCycleLoraLifecycleAndMadviseEviction(tmp_dir);
+    TestOtaAndNativeDirLlamaDiscovery(tmp_dir);
+    TestRealS2ProGgufAndLoraSemanticRollout();
     fs::remove_all(tmp_dir);
 
     if (g_failures > 0) {

@@ -11,13 +11,18 @@
 
 namespace voicestudio::engine {
 
+constexpr int32_t kS2ProSemanticStartTokenId = 151678;
+constexpr int32_t kS2ProSemanticEndTokenId = 155773;
+constexpr int32_t kS2ProImEndTokenId = 151645;
+
 struct EngineConfig {
     std::string base_gguf_path;
     std::string lora_gguf_path;
     std::string vocoder_tflite_path;
     std::string room_ir_pcm_path;
     std::string room_tone_pcm_path;
-    std::string llama_library_path;  // Optional explicit path to libllama.so / libllama.dylib
+    std::string llama_library_path;  // Optional explicit path or dir to libllama.so / libllama.dylib
+    std::string native_library_dir;  // Optional app nativeLibraryDir search path
     float lora_scale = 1.0f;
     int32_t n_threads = 4;
     int32_t n_ctx = 4096;
@@ -25,6 +30,15 @@ struct EngineConfig {
     int64_t base_seed = 1001;
     float default_temperature = 0.7f;
     float top_p = 0.9f;
+    int32_t top_k = 30;
+};
+
+struct ClauseSamplingParams {
+    int64_t seed = 1001;
+    float temperature = 0.72f;
+    float top_p = 0.80f;
+    int32_t top_k = 30;
+    int32_t max_audio_tokens = 2048;
 };
 
 struct SynthesizedCandidate {
@@ -32,6 +46,9 @@ struct SynthesizedCandidate {
     std::vector<float> pcm_44k;
     int64_t seed = 0;
     float temperature = 0.7f;
+    bool hit_eos = false;
+    double elapsed_ms = 0.0;
+    double tokens_per_sec = 0.0;
 };
 
 struct EngineStatus {
@@ -53,6 +70,13 @@ EngineStatus ValidateGgufFile(const std::string& path);
  */
 EngineStatus ValidateTfliteFile(const std::string& path);
 
+/**
+ * Builds the ordered list of candidate `libllama.so` / `libllama.dylib` paths searched by
+ * `VoiceEngine::Init()`, covering explicit OTA paths, `nativeLibraryDir`, and bundle-relative
+ * `android-libs/` directories.
+ */
+std::vector<std::string> BuildLlamaLibraryCandidates(const EngineConfig& config);
+
 class VoiceEngine {
 public:
     VoiceEngine();
@@ -70,7 +94,19 @@ public:
     EngineStatus HotSwapLora(const std::string& new_lora_gguf_path);
 
     /**
-     * Runs Stage A Dual-AR discrete codebook rollout via llama.cpp (+ active LoRA).
+     * Runs a single Stage A Dual-AR discrete semantic token rollout via llama.cpp (+ active LoRA)
+     * using `llama_decode` and `llama_sampler` (sampling real semantic tokens in 151678..155773
+     * with configurable seed/temperature/top_p/top_k and stopping cleanly on <|im_end|> 151645).
+     * Never fabricates fake tokens or speech PCM.
+     */
+    EngineStatus SynthesizeClause(
+        const std::string& normalized_text,
+        const std::string& prefix_pcm_path,
+        const ClauseSamplingParams& sampling,
+        SynthesizedCandidate& out_candidate);
+
+    /**
+     * Runs Stage A Dual-AR discrete codebook rollout via llama.cpp (+ active LoRA) for N candidates.
      * If a real vocoder callback is attached, also decodes to 44.1 kHz Float32 PCM and
      * runs Stage C NEON DSP mastering. Never fabricates fake speech PCM.
      */
@@ -96,12 +132,20 @@ public:
     size_t LastEvictedBytes() const;
     bool LastEvictionSucceeded() const;
     const std::string& ActiveLoraPath() const;
+    const std::string& ResolvedLlamaLibraryPath() const;
 
 private:
+    EngineStatus SynthesizeClauseLocked(
+        const std::string& normalized_text,
+        const std::vector<float>& prefix_tail,
+        const ClauseSamplingParams& sampling,
+        SynthesizedCandidate& out_candidate);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
     mutable std::mutex mutex_;
     EngineConfig config_;
+    std::string resolved_llama_lib_path_;
     std::atomic<bool> initialized_{false};
     std::atomic<uint64_t> lora_swap_count_{0};
     std::atomic<size_t> last_evicted_bytes_{0};
