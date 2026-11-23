@@ -25,3 +25,8 @@ dependencyResolutionManagement {
 rootProject.name = "Aircheck"
 
 include(":app")
+include(":audio-edl")
+include(":core-engine")
+include(":core-verifier")
+include(":ui-clipper")
+include(":sync-trainer:android-worker")
