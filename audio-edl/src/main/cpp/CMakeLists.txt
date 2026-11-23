@@ -9,6 +9,10 @@ add_library(voicestudio_edl_core STATIC
     edl_player.cc
 )
 
+set_target_properties(voicestudio_edl_core PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 target_include_directories(voicestudio_edl_core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -36,12 +40,17 @@ if(ANDROID)
     )
 
     add_library(voicestudio_edl SHARED
-        edl_player.cc
+        edl_jni.cc
     )
 
     target_include_directories(voicestudio_edl
         PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_compile_options(voicestudio_edl PRIVATE
+        -Wall
+        -Wextra
     )
 
     if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
@@ -52,6 +61,7 @@ if(ANDROID)
 
     target_link_libraries(voicestudio_edl
         PRIVATE
+            voicestudio_edl_core
             oboe::oboe
             ${log-lib}
     )
@@ -60,4 +70,27 @@ if(ANDROID)
     target_link_options(voicestudio_edl PRIVATE
         "-Wl,-z,max-page-size=16384"
     )
+else()
+    find_package(Threads REQUIRED)
+    target_link_libraries(voicestudio_edl_core
+        PUBLIC
+            Threads::Threads
+    )
+
+    include(CTest)
+    if(BUILD_TESTING)
+        add_executable(EdlGlitchTest
+            tests/EdlGlitchTest.cc
+        )
+        target_link_libraries(EdlGlitchTest
+            PRIVATE
+                voicestudio_edl_core
+                Threads::Threads
+        )
+        target_compile_options(EdlGlitchTest PRIVATE
+            -Wall
+            -Wextra
+        )
+        add_test(NAME EdlGlitchTest COMMAND EdlGlitchTest)
+    endif()
 endif()
