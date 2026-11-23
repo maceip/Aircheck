@@ -26,6 +26,3 @@
 
 # Keep Room database & entities
 -keep class * extends androidx.room.RoomDatabase { *; }
-
-# Keep Firebase Messaging service
--keep class * extends com.google.firebase.messaging.FirebaseMessagingService { *; }
