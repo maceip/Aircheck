@@ -13,7 +13,6 @@ import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
-import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.test.espresso.Espresso
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -22,6 +21,7 @@ import com.example.data.RenderJobStatus
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -33,8 +33,12 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Single comprehensive End-to-End test running directly against the REAL installed Aircheck APK
+ * Single real End-to-End test running directly against the REAL installed Aircheck APK
  * and the REAL running Mac Studio `:8443` server (zero mocks, zero fake servers, zero Firebase).
+ *
+ * Exercises EVERY user-facing text input's ✨ AI assist button, mic recording, live News Desk
+ * broadcast preview, Mac video gallery sync, and a real talking-head broadcast render with
+ * BREAKING NEWS chyron graphics burned in.
  */
 @RunWith(AndroidJUnit4::class)
 class AircheckRunningAppE2ETest {
@@ -52,7 +56,7 @@ class AircheckRunningAppE2ETest {
     }
 
     @Test
-    fun fullRunningAppEndToEndZeroFirebaseRealMacRigRender() {
+    fun fullCommonUserBroadcastFlowWithAiAssistAndLiveVideoRender() {
         // 0. Prove Firebase is physically absent from the shipped APK classpath.
         val firebasePresent = try {
             Class.forName("com.google.firebase.FirebaseApp")
@@ -67,170 +71,172 @@ class AircheckRunningAppE2ETest {
             mkdirs()
         }
 
-        // 1. Cold boot: verify Script screen loads cleanly with zero error banners.
+        // 1. Cold boot on Story tab: clean launch, zero error banners, zero OTA traps.
         composeRule.waitUntil(timeoutMillis = 10_000L) {
-            composeRule.onAllNodesWithTag("script_title_input").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithTag("story_idea_input").fetchSemanticsNodes().isNotEmpty()
         }
         assertNoErrorBanner("cold boot")
-        captureScreenshot(screenshotDir, "e2e_01_script_boot.png")
+        captureScreenshot(screenshotDir, "ux_01_story_empty.png")
 
-        // 2. Script screen controls: type title & spoken line, toggle duration, add/cut/delete beat.
-        composeRule.onNodeWithTag("script_title_input").performClick()
-        composeRule.onNodeWithTag("script_title_input").performTextClearance()
-        composeRule.onNodeWithTag("script_title_input").performTextInput("Live Aircheck E2E")
-
-        val initialProject = runBlocking { app.container.localRepo.scripts.first().first() }
-        val firstBeatId = initialProject.beats.first().id
-
-        scrollListTo("script_lazy_list", "beat_input_$firstBeatId")
-        composeRule.onNodeWithTag("beat_input_$firstBeatId").performClick()
-        composeRule.onNodeWithTag("beat_input_$firstBeatId").performTextClearance()
-        composeRule.onNodeWithTag("beat_input_$firstBeatId")
-            .performTextInput("Live Aircheck check straight to the Mac studio rig.")
+        // 2. Story Idea ✨ AI Assist: drop a rough idea -> tap ✨ -> real AI generates headline,
+        //    subline, and deadpan news segments!
+        composeRule.onNodeWithTag("story_idea_input").performClick()
+        composeRule.onNodeWithTag("story_idea_input")
+            .performTextInput("Two raccoons hijacked a Waymo in San Francisco and drove to Taco Bell")
         Espresso.closeSoftKeyboard()
 
-        scrollListTo("script_lazy_list", "target_duration_button")
-        composeRule.onNodeWithTag("target_duration_button").performClick()
-
-        scrollListTo("script_lazy_list", "add_beat_button")
-        composeRule.onNodeWithTag("add_beat_button").performClick()
-        composeRule.waitUntil(timeoutMillis = 5_000L) {
-            runBlocking { app.container.localRepo.scripts.first().first().beats.size >= 2 }
+        composeRule.onNodeWithTag("idea_ai_button").performClick()
+        composeRule.waitUntil(timeoutMillis = 45_000L) {
+            assertNoErrorBanner("story idea AI assist")
+            val proj = runBlocking { app.container.localRepo.scripts.first().first() }
+            proj.stageConfig.chyronHeadline.isNotBlank() &&
+                proj.beats.size >= 2 &&
+                proj.beats.all { it.spokenText.isNotBlank() }
         }
-        val secondBeatId = runBlocking { app.container.localRepo.scripts.first().first().beats.last().id }
-        scrollListTo("script_lazy_list", "beat_cut_$secondBeatId")
-        composeRule.onNodeWithTag("beat_cut_$secondBeatId").performClick()
-        scrollListTo("script_lazy_list", "beat_delete_$secondBeatId")
-        composeRule.onNodeWithTag("beat_delete_$secondBeatId").performClick()
-        composeRule.waitUntil(timeoutMillis = 5_000L) {
-            runBlocking { app.container.localRepo.scripts.first().first().beats.size == 1 }
+        assertNoErrorBanner("story idea fleshed out")
+
+        // 3. Segment ✨ AI Assist: tap ✨ on Segment 1 -> real AI polishes the segment!
+        val beforeSeg = runBlocking { app.container.localRepo.scripts.first().first().beats.first() }
+        scrollListTo("script_lazy_list", "segment_ai_button_${beforeSeg.id}")
+        composeRule.onNodeWithTag("segment_ai_button_${beforeSeg.id}").performClick()
+        composeRule.waitUntil(timeoutMillis = 45_000L) {
+            assertNoErrorBanner("segment AI assist")
+            val afterSeg = runBlocking {
+                app.container.localRepo.scripts.first().first().beats.first { it.id == beforeSeg.id }
+            }
+            afterSeg.spokenText.isNotBlank() && afterSeg.spokenText != beforeSeg.spokenText
         }
-        assertNoErrorBanner("script editing")
 
-        // 3. Real Android mic recording -> CAS WAV saved -> playback preview works cleanly.
-        scrollListTo("script_lazy_list", "record_mic_button")
-        composeRule.onNodeWithTag("record_mic_button").performClick()
-        Thread.sleep(1_800L)
-        composeRule.onNodeWithTag("record_mic_button").performClick()
-
+        // 4. Optional Mic Recording on Segment 1 -> WAV cached -> Play -> switch back to AI voice.
+        scrollListTo("script_lazy_list", "beat_mic_${beforeSeg.id}")
+        composeRule.onNodeWithTag("beat_mic_${beforeSeg.id}").performClick()
+        Thread.sleep(1_500L)
+        composeRule.onNodeWithTag("beat_mic_${beforeSeg.id}").performClick()
         composeRule.waitUntil(timeoutMillis = 8_000L) {
             composeRule.onAllNodesWithTag("preview_wav_button").fetchSemanticsNodes().isNotEmpty()
         }
         assertNoErrorBanner("mic recording")
-
-        val recordedProject = runBlocking { app.container.localRepo.scripts.first().first() }
-        assertNotNull("Recorded mic WAV SHA must persist in Room", recordedProject.masterAudioSha)
-        val recordedWav = app.container.casStore.fileForSha(recordedProject.masterAudioSha, "wav")
-        assertNotNull("Recorded mic WAV file must exist in CAS", recordedWav)
-        assertTrue(
-            "Recorded mic WAV must contain real PCM audio bytes (got ${recordedWav?.length()})",
-            (recordedWav?.length() ?: 0L) > 4096L
-        )
-
+        scrollListTo("script_lazy_list", "preview_wav_button")
         composeRule.onNodeWithTag("preview_wav_button").performClick()
-        Thread.sleep(500L)
+        Thread.sleep(400L)
         composeRule.onNodeWithTag("preview_wav_button").performClick()
-        assertNoErrorBanner("wav preview")
-        captureScreenshot(screenshotDir, "e2e_02_script_recorded.png")
+        captureScreenshot(screenshotDir, "ux_02_story_ai_and_mic.png")
 
-        // 4. Photo tab: default Mac Rig portrait, voice mode switching, chyron & brand bug switch.
+        // Switch cleanly back to AI voice and trim to 1 crisp segment for fast live render check.
+        composeRule.onNodeWithTag("clear_mic_take_button").performClick()
+        val beatsAfterAi = runBlocking { app.container.localRepo.scripts.first().first().beats }
+        if (beatsAfterAi.size > 1) {
+            val extraId = beatsAfterAi.last().id
+            scrollListTo("script_lazy_list", "beat_delete_$extraId")
+            composeRule.onNodeWithTag("beat_delete_$extraId").performClick()
+        }
+        assertNoErrorBanner("story tab complete")
+
+        // 5. Tab 2 — Desk: live anchor portrait + LIVE/BREAKING NEWS chyron preview +
+        //    ✨ AI Assist on BOTH Headline AND Subline!
         composeRule.onNodeWithTag("dock_tab_photo").performClick()
-        composeRule.onNodeWithTag("pick_photo_button").assertIsDisplayed()
-        scrollListTo("photo_lazy_list", "voice_source_enrolled_voice_clone")
-        composeRule.onNodeWithTag("voice_source_enrolled_voice_clone").performClick()
-        scrollListTo("photo_lazy_list", "voice_source_mic_voiceover")
-        composeRule.onNodeWithTag("voice_source_mic_voiceover").performClick()
-        scrollListTo("photo_lazy_list", "chyron_headline_input")
-        composeRule.onNodeWithTag("chyron_headline_input").performClick()
-        composeRule.onNodeWithTag("chyron_headline_input").performTextInput("LIVE E2E")
-        scrollListTo("photo_lazy_list", "chyron_subline_input")
-        composeRule.onNodeWithTag("chyron_subline_input").performClick()
-        composeRule.onNodeWithTag("chyron_subline_input").performTextInput("MAC STUDIO RIG")
-        Espresso.closeSoftKeyboard()
-        scrollListTo("photo_lazy_list", "show_brand_bug_switch")
-        composeRule.onNodeWithTag("show_brand_bug_switch").performClick()
-        composeRule.onNodeWithTag("show_brand_bug_switch").performClick()
-        assertNoErrorBanner("photo tab")
-        captureScreenshot(screenshotDir, "e2e_03_photo_tab.png")
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodesWithTag("anchor_preview_box").fetchSemanticsNodes().isNotEmpty()
+        }
+        Thread.sleep(800L) // allow real portrait image load from :8443/v1/default-avatar
 
-        // 5. System Deck: real HTTP /health probe against live Mac :8443 rig + accent switch.
+        val headlineBefore = runBlocking { app.container.localRepo.scripts.first().first().stageConfig.chyronHeadline }
+        scrollListTo("photo_lazy_list", "headline_ai_button")
+        composeRule.onNodeWithTag("headline_ai_button").performClick()
+        composeRule.waitUntil(timeoutMillis = 45_000L) {
+            assertNoErrorBanner("headline AI assist")
+            val cur = runBlocking { app.container.localRepo.scripts.first().first().stageConfig.chyronHeadline }
+            cur.isNotBlank() && cur != headlineBefore
+        }
+
+        val sublineBefore = runBlocking { app.container.localRepo.scripts.first().first().stageConfig.chyronSubline }
+        scrollListTo("photo_lazy_list", "subline_ai_button")
+        composeRule.onNodeWithTag("subline_ai_button").performClick()
+        composeRule.waitUntil(timeoutMillis = 45_000L) {
+            assertNoErrorBanner("subline AI assist")
+            val cur = runBlocking { app.container.localRepo.scripts.first().first().stageConfig.chyronSubline }
+            cur.isNotBlank() && cur != sublineBefore
+        }
+
+        scrollListTo("photo_lazy_list", "anchor_preview_box")
+        assertNoErrorBanner("desk tab")
+        captureScreenshot(screenshotDir, "ux_03_desk_live_preview.png")
+
+        // 6. Tab 3 — Clips: real videos synced from Mac :8443/v1/renders (zero bogus Render CTA).
+        composeRule.onNodeWithTag("dock_tab_clips").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000L) {
+            composeRule.onAllNodesWithTag("clips_grid").fetchSemanticsNodes().isNotEmpty()
+        }
+        Thread.sleep(1_000L) // let remote video thumbnails load from :8443/v1/render-thumbs/
+        assertNoErrorBanner("clips gallery")
+        captureScreenshot(screenshotDir, "ux_04_clips_gallery.png")
+
+        // 7. Studio Settings: verify live Mac connection status & zero OTA error walls.
         composeRule.onNodeWithTag("top_bar_system_deck_button").performClick()
-        scrollListTo("system_deck_lazy_list", "test_rig_connection_button")
         composeRule.onNodeWithTag("test_rig_connection_button").performClick()
         composeRule.waitUntil(timeoutMillis = 15_000L) {
-            val nodes = composeRule.onAllNodesWithTag("rig_connection_status_label").fetchSemanticsNodes()
-            val text = nodes.firstOrNull()
+            val text = composeRule.onAllNodesWithTag("rig_connection_status_label")
+                .fetchSemanticsNodes()
+                .firstOrNull()
                 ?.config
                 ?.getOrNull(SemanticsProperties.Text)
                 ?.joinToString("") { it.text }
                 .orEmpty()
-            text.startsWith("Online")
+            text == "Connected"
         }
-        scrollListTo("system_deck_lazy_list", "channel_toggle_broadcast_cobalt")
-        composeRule.onNodeWithTag("channel_toggle_broadcast_cobalt").performClick()
-        composeRule.onNodeWithTag("channel_toggle_volt_lime").performClick()
-        assertNoErrorBanner("system deck")
-        scrollListTo("system_deck_lazy_list", "rig_connection_status_label")
-        captureScreenshot(screenshotDir, "e2e_04_system_deck_online.png")
+        captureScreenshot(screenshotDir, "ux_05_settings.png")
         composeRule.onNodeWithTag("close_system_deck_button").performClick()
 
-        // 6. Verify Clipper dead-end is hidden when offline OTA bundle isn't preloaded.
-        composeRule.onNodeWithTag("dock_tab_script").performClick()
-        assertEquals(
-            "Clipper button must stay hidden when offline OTA bundle is not preloaded",
-            0,
-            composeRule.onAllNodesWithTag("open_clipper_button").fetchSemanticsNodes().size
-        )
-        assertNoErrorBanner("script clean state")
-
-        // 7. REAL talking-head video render from running Android app -> live Mac :8443 -> ExoPlayer!
-        // Switch to Local Voice Clone so a real spoken voice is synthesized on Mac :8443 even if
-        // running on a remote test device with a silent mic, then rendered through wan3.0-video.
-        scrollListTo("script_lazy_list", "script_voice_mode_enrolled_voice_clone")
-        composeRule.onNodeWithTag("script_voice_mode_enrolled_voice_clone").performClick()
-        composeRule.onNodeWithTag("script_primary_cta").performClick()
+        // 8. REAL end-to-end news clip generation from Desk -> Mac :8443 (with BREAKING NEWS
+        //    chyron burned in) -> downloaded into phone -> ExoPlayer playback!
+        val beforeClipIds = runBlocking { app.container.localRepo.clipCards.first().map { it.id }.toSet() }
+        composeRule.onNodeWithTag("dock_tab_photo").performClick()
+        composeRule.onNodeWithTag("photo_render_cta").performClick()
 
         composeRule.waitUntil(timeoutMillis = 20_000L) {
             assertNoErrorBanner("render enqueue")
             composeRule.onAllNodesWithTag("review_video_stage").fetchSemanticsNodes().isNotEmpty()
         }
-        captureScreenshot(screenshotDir, "e2e_05_clip_rendering.png")
 
-        // Wait for the real Mac :8443 pipeline to finish rendering and downloading the MP4 into CAS.
+        var renderedClipId: String? = null
         composeRule.waitUntil(timeoutMillis = 300_000L) {
-            assertNoErrorBanner("live Mac rig render")
-            val clips = runBlocking { app.container.localRepo.clipCards.first() }
-            val latest = clips.firstOrNull()
-            if (latest?.status == RenderJobStatus.FAILED) {
-                val full = runBlocking { app.container.localRepo.getClipById(latest.id) }
-                fail("Mac Rig render job FAILED: ${full?.errorMessage ?: latest.stageDetail}")
+            assertNoErrorBanner("live Mac broadcast render")
+            val cards = runBlocking { app.container.localRepo.clipCards.first() }
+            val newest = cards.firstOrNull { it.id !in beforeClipIds }
+            if (newest?.status == RenderJobStatus.FAILED) {
+                val full = runBlocking { app.container.localRepo.getClipById(newest.id) }
+                fail("News clip render FAILED: ${full?.errorMessage ?: newest.stageDetail}")
             }
-            latest?.status == RenderJobStatus.READY && !latest.finalSha.isNullOrBlank()
+            if (newest?.status == RenderJobStatus.READY && !newest.finalSha.isNullOrBlank()) {
+                renderedClipId = newest.id
+                true
+            } else {
+                false
+            }
         }
 
-        val readyCard = runBlocking { app.container.localRepo.clipCards.first().first() }
-        val mp4File = app.container.casStore.fileForSha(readyCard.finalSha, "mp4")
-        assertNotNull("Rendered MP4 must be cached locally in CAS", mp4File)
+        val readyId = renderedClipId ?: fail("Rendered clip ID missing")
+        val readyClip = runBlocking { app.container.localRepo.getClipById(readyId) }
+        assertNotNull("Rendered clip must exist in Room", readyClip)
+        val mp4File = app.container.casStore.fileForSha(readyClip?.finalSha, "mp4")
+        assertNotNull("Rendered MP4 must be cached locally", mp4File)
         assertTrue(
-            "Rendered MP4 must be a real non-empty video file (got ${mp4File?.length()} bytes)",
+            "Rendered MP4 must be a real non-empty video (got ${mp4File?.length()} bytes)",
             (mp4File?.length() ?: 0L) > 50_000L
         )
+        assertNotEquals("", readyClip?.chyronHeadline.orEmpty())
         assertNoErrorBanner("clip ready")
 
-        // Tap ExoPlayer stage to play the rendered talking-head video.
         composeRule.onNodeWithTag("review_video_stage").performClick()
         Thread.sleep(1_000L)
-        assertNoErrorBanner("clip playback")
-        captureScreenshot(screenshotDir, "e2e_06_clip_ready_playback.png")
+        captureScreenshot(screenshotDir, "ux_06_clip_ready.png")
 
-        // Navigate back to Clips tab and confirm the rendered clip tile appears.
         composeRule.onNodeWithTag("review_back_button").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             composeRule.onAllNodesWithTag("clips_grid").fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onAllNodesWithTag("clip_tile_${readyCard.id}").onFirst().assertIsDisplayed()
-        assertNoErrorBanner("clips grid")
-        captureScreenshot(screenshotDir, "e2e_07_clips_grid.png")
+        composeRule.onAllNodesWithTag("clip_tile_$readyId").onFirst().assertIsDisplayed()
+        assertNoErrorBanner("final clips grid")
     }
 
     private fun scrollListTo(listTag: String, itemTag: String) {

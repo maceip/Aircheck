@@ -13,6 +13,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.FileOutputStream
 import java.util.Base64
@@ -20,7 +21,9 @@ import java.util.concurrent.TimeUnit
 
 /**
  * 100% Local-First Mac Studio Rig Gateway (`ota_server.py` on `:8443`).
- * Zero Firebase, zero Google Sign-In, zero cloud proxy fallback.
+ * Powers AI writing assist (`/v1/ai-assist`), real portrait preview (`/v1/default-avatar`),
+ * finished video gallery (`/v1/renders`), and talking-head rendering (`/v1/render-video`).
+ * Zero Firebase, zero sign-in, zero silent mocks.
  */
 class DirectMacRigGateway(
     private val casStore: CasMediaStore,
@@ -34,11 +37,6 @@ class DirectMacRigGateway(
             .build()
     }
 
-    /**
-     * Probes candidate Mac Rig URLs in priority order (configured URL, USB `adb reverse` loopback,
-     * and Mac LAN IP) and returns the first real HTTP 200 `/health` response.
-     * Never fabricates an online status if none respond.
-     */
     override suspend fun resolveAndCheckHealth(configuredUrl: String): MacRigHealthResult =
         withContext(Dispatchers.IO) {
             val candidates = buildCandidateUrls(configuredUrl)
@@ -53,7 +51,7 @@ class DirectMacRigGateway(
                 }
             }
             throw IllegalStateException(
-                "Mac Studio rig unreachable. Checked: ${errors.joinToString("; ")}. " +
+                "Studio server unreachable. Checked: ${errors.joinToString("; ")}. " +
                     "Verify Wi-Fi or USB connection to your Mac."
             )
         }
@@ -64,7 +62,6 @@ class DirectMacRigGateway(
         if (trimmed.isNotBlank() && trimmed != DEFAULT_MAC_RIG_LAN_URL && trimmed != DEFAULT_MAC_RIG_USB_URL) {
             ordered += trimmed
         }
-        // Prefer USB adb-reverse loopback first (instant 1 ms), then Mac LAN IP.
         ordered += DEFAULT_MAC_RIG_USB_URL
         ordered += DEFAULT_MAC_RIG_LAN_URL
         if (trimmed.isNotBlank()) {
@@ -104,6 +101,128 @@ class DirectMacRigGateway(
         )
     }
 
+    override suspend fun aiFleshOutStory(
+        rigBaseUrl: String,
+        idea: String,
+        targetSegments: Int
+    ): AiStoryDraftResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val cleanIdea = idea.trim()
+        require(cleanIdea.isNotEmpty()) { "Type a story idea first before tapping AI assist." }
+
+        val payload = JSONObject()
+            .put("mode", "flesh_out_story")
+            .put("text", cleanIdea)
+            .put("target_segments", targetSegments.coerceIn(1, 4))
+
+        val req = Request.Builder()
+            .url("$baseUrl/v1/ai-assist")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = extractErrorDetail(bodyStr)
+                throw IllegalStateException(
+                    "AI assist failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                )
+            }
+            bodyStr
+        }
+        val json = JSONObject(rawBody)
+        val segArray: JSONArray = json.optJSONArray("segments") ?: JSONArray()
+        val segments = buildList {
+            for (i in 0 until segArray.length()) {
+                val seg = segArray.optString(i, "").trim()
+                if (seg.isNotEmpty()) add(seg)
+            }
+        }
+        if (segments.isEmpty()) {
+            throw IllegalStateException("AI assist returned no spoken segments.")
+        }
+        AiStoryDraftResult(
+            headline = json.optNullableString("headline") ?: cleanIdea.take(34).uppercase(),
+            subline = json.optNullableString("subline") ?: "DEVELOPING STORY · LIVE",
+            segments = segments
+        )
+    }
+
+    override suspend fun aiPolishField(
+        rigBaseUrl: String,
+        mode: String,
+        text: String,
+        context: String
+    ): String = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val cleanText = text.trim()
+        val cleanContext = context.trim()
+        require(cleanText.isNotEmpty() || cleanContext.isNotEmpty()) {
+            "Type an idea or draft first before tapping AI assist."
+        }
+
+        val payload = JSONObject()
+            .put("mode", mode)
+            .put("text", cleanText)
+            .put("context", cleanContext)
+
+        val req = Request.Builder()
+            .url("$baseUrl/v1/ai-assist")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = extractErrorDetail(bodyStr)
+                throw IllegalStateException(
+                    "AI assist failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                )
+            }
+            bodyStr
+        }
+        val json = JSONObject(rawBody)
+        json.optNullableString("text")
+            ?: throw IllegalStateException("AI assist returned empty text.")
+    }
+
+    override suspend fun listRemoteRenders(rigBaseUrl: String): List<RemoteRenderSummary> =
+        withContext(Dispatchers.IO) {
+            val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+            val req = Request.Builder()
+                .url("$baseUrl/v1/renders")
+                .get()
+                .build()
+            val rawBody = probeClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    throw IllegalStateException("Failed listing videos (HTTP ${resp.code}).")
+                }
+                resp.body?.string().orEmpty()
+            }
+            val root = JSONObject(rawBody)
+            val arr = root.optJSONArray("renders") ?: JSONArray()
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val id = obj.optNullableString("id") ?: continue
+                    val rawVideo = obj.optNullableString("video_url") ?: continue
+                    val rawThumb = obj.optNullableString("thumb_url").orEmpty()
+                    add(
+                        RemoteRenderSummary(
+                            id = id,
+                            filename = obj.optNullableString("filename") ?: "$id.mp4",
+                            title = obj.optNullableString("title") ?: id,
+                            durationMs = obj.optLong("duration_ms", 0L).coerceAtLeast(0L),
+                            sizeBytes = obj.optLong("size_bytes", 0L).coerceAtLeast(0L),
+                            updatedAtUtc = obj.optNullableString("updated_at_utc").orEmpty(),
+                            videoUrl = resolveAbsoluteUrl(baseUrl, rawVideo),
+                            thumbUrl = if (rawThumb.isNotBlank()) resolveAbsoluteUrl(baseUrl, rawThumb) else ""
+                        )
+                    )
+                }
+            }
+        }
+
     override suspend fun enqueueMacRigRender(
         rigBaseUrl: String,
         project: ScriptProject,
@@ -116,14 +235,14 @@ class DirectMacRigGateway(
         val spokenText = project.activeBeats.joinToString(" ") { it.spokenText.trim() }.trim()
 
         if (project.voiceSource == VoiceSource.ENROLLED_VOICE_CLONE && spokenText.isBlank()) {
-            throw IllegalStateException("Write at least one spoken line before rendering.")
+            throw IllegalStateException("Write at least one segment before generating a clip.")
         }
 
         val audioWavBase64: String? = if (project.voiceSource == VoiceSource.MIC_VOICEOVER) {
             val wavSha = project.masterAudioSha
-                ?: throw IllegalStateException("Tap the Mic button to record your voice before rendering.")
+                ?: throw IllegalStateException("Record your voice or switch to text before generating.")
             val wavFile = casStore.fileForSha(wavSha, "wav")
-                ?: throw IllegalStateException("Recorded WAV take is missing from local storage.")
+                ?: throw IllegalStateException("Recorded audio take is missing from local storage.")
             Base64.getEncoder().encodeToString(wavFile.readBytes())
         } else {
             null
@@ -134,11 +253,16 @@ class DirectMacRigGateway(
             ?.let { sha -> casStore.fileForSha(sha, "jpg") }
             ?.let { file -> Base64.getEncoder().encodeToString(file.readBytes()) }
 
+        val headline = project.stageConfig.chyronHeadline.ifBlank { project.title }.trim()
+        val subline = project.stageConfig.chyronSubline.trim()
+        val showBug = project.stageConfig.showBrandBug
+
         val clampedMaxDuration = maxDurationSec.coerceIn(2, 60)
         val canonicalInput = buildString {
             append(baseUrl).append('|')
             append(project.id).append('|')
-            append(project.title).append('|')
+            append(headline).append('|')
+            append(subline).append('|')
             append(spokenText).append('|')
             append(project.voiceSource.name).append('|')
             append(photoSha.orEmpty()).append('|')
@@ -151,12 +275,15 @@ class DirectMacRigGateway(
 
         val payload = JSONObject()
             .put("script_id", project.id)
-            .put("title", project.title.ifBlank { "Untitled Aircheck" })
+            .put("title", headline.ifBlank { project.title.ifBlank { "Breaking News" } })
             .put("spoken_text", spokenText)
             .put("voice_source", project.voiceSource.name)
             .put("resolution", resolution)
             .put("ratio", ratio)
             .put("max_duration", clampedMaxDuration)
+            .put("chyron_headline", headline)
+            .put("chyron_subline", subline)
+            .put("show_brand_bug", showBug)
         if (!audioWavBase64.isNullOrBlank()) {
             payload.put("audio_wav_base64", audioWavBase64)
         }
@@ -174,18 +301,18 @@ class DirectMacRigGateway(
             if (!resp.isSuccessful) {
                 val detail = extractErrorDetail(bodyStr)
                 throw IllegalStateException(
-                    "Mac Rig render rejected (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                    "Render request failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
                 )
             }
             if (bodyStr.isBlank()) {
-                throw IllegalStateException("Mac Rig /v1/render-video returned an empty response.")
+                throw IllegalStateException("Server /v1/render-video returned an empty response.")
             }
             bodyStr
         }
 
         val json = JSONObject(rawBody)
         val jobId = json.optNullableString("job_id")
-            ?: throw IllegalStateException("Mac Rig /v1/render-video did not return a job_id.")
+            ?: throw IllegalStateException("Server /v1/render-video did not return a job_id.")
         EnqueuedRenderResult(jobId = jobId, clipId = jobId, inputHash = inputHash)
     }
 
@@ -205,23 +332,18 @@ class DirectMacRigGateway(
                 if (!resp.isSuccessful) {
                     val detail = extractErrorDetail(bodyStr)
                     throw IllegalStateException(
-                        "Mac Rig job poll failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                        "Job status check failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
                     )
                 }
                 if (bodyStr.isBlank()) {
-                    throw IllegalStateException("Mac Rig job poll returned an empty response.")
+                    throw IllegalStateException("Job status returned an empty response.")
                 }
                 bodyStr
             }
 
             val json = JSONObject(rawBody)
             val rawVideoUrl = json.optNullableString("video_url")
-            val resolvedVideoUrl = when {
-                rawVideoUrl == null -> null
-                rawVideoUrl.startsWith("http://") || rawVideoUrl.startsWith("https://") -> rawVideoUrl
-                rawVideoUrl.startsWith("/") -> "$baseUrl$rawVideoUrl"
-                else -> "$baseUrl/$rawVideoUrl"
-            }
+            val resolvedVideoUrl = rawVideoUrl?.let { resolveAbsoluteUrl(baseUrl, it) }
             val metricsObj = if (!json.isNull("metrics")) json.optJSONObject("metrics") else null
 
             MacRigJobSnapshot(
@@ -242,7 +364,7 @@ class DirectMacRigGateway(
         withContext(Dispatchers.IO) {
             val cleanUrl = videoUrl.trim()
             require(cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")) {
-                "Invalid Mac Rig render video URL: $videoUrl"
+                "Invalid video URL: $videoUrl"
             }
             val tmpFile = casStore.createTempScratchFile("mac_render_", "mp4")
             try {
@@ -251,17 +373,17 @@ class DirectMacRigGateway(
                     if (!resp.isSuccessful) {
                         val detail = extractErrorDetail(resp.body?.string().orEmpty())
                         throw IllegalStateException(
-                            "Failed to download Mac Rig MP4 (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                            "Failed downloading video (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
                         )
                     }
                     val bodyStream = resp.body?.byteStream()
-                        ?: throw IllegalStateException("Mac Rig returned an empty MP4 body.")
+                        ?: throw IllegalStateException("Empty MP4 response.")
                     FileOutputStream(tmpFile).use { out ->
                         bodyStream.copyTo(out, bufferSize = 64 * 1024)
                     }
                 }
                 if (!tmpFile.exists() || tmpFile.length() == 0L) {
-                    throw IllegalStateException("Downloaded Mac Rig MP4 is empty.")
+                    throw IllegalStateException("Downloaded MP4 is empty.")
                 }
                 casStore.putFile(tmpFile, "mp4")
             } finally {
@@ -269,10 +391,16 @@ class DirectMacRigGateway(
             }
         }
 
+    private fun resolveAbsoluteUrl(baseUrl: String, path: String): String = when {
+        path.startsWith("http://") || path.startsWith("https://") -> path
+        path.startsWith("/") -> "$baseUrl$path"
+        else -> "$baseUrl/$path"
+    }
+
     private fun normalizeMacRigBaseUrl(rawUrl: String): String {
         val trimmed = rawUrl.trim().trimEnd('/')
         require(trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-            "Enter a valid Mac Rig URL starting with http:// or https:// (e.g. $DEFAULT_MAC_RIG_LAN_URL)."
+            "Enter a valid server URL starting with http:// or https:// (e.g. $DEFAULT_MAC_RIG_LAN_URL)."
         }
         return trimmed
     }

@@ -1,18 +1,22 @@
 <resources>
     <string name="app_name">Aircheck</string>
-    <string name="tab_script">Script</string>
-    <string name="tab_photo">Photo</string>
+    <string name="tab_script">Story</string>
+    <string name="tab_photo">Desk</string>
     <string name="tab_clips">Clips</string>
-    <string name="cd_open_system_deck">Open System Deck</string>
+    <string name="cd_open_system_deck">Open Studio Settings</string>
+    <string name="cd_ai_flesh_out_story">Flesh out story idea with AI</string>
+    <string name="cd_ai_polish_segment">Polish segment with AI</string>
+    <string name="cd_ai_polish_headline">Write headline with AI</string>
+    <string name="cd_ai_polish_subline">Write subline with AI</string>
     <string name="cd_play_pause">Play or pause</string>
     <string name="cd_rewind">Rewind to start</string>
-    <string name="cd_record_mic">Record microphone voiceover</string>
-    <string name="cd_export_video">Export MP4 video</string>
-    <string name="cd_share_video">Share exported video</string>
+    <string name="cd_record_mic">Record voice take</string>
+    <string name="cd_export_video">Save video to Photos</string>
+    <string name="cd_share_video">Share video</string>
     <string name="cd_close_sheet">Close</string>
-    <string name="beat_placeholder">Write what you want to say…</string>
-    <string name="title_placeholder">Untitled segment</string>
-    <string name="cta_render_aircheck">Render Aircheck</string>
-    <string name="cta_add_beat">Add beat</string>
-    <string name="appfunctions_display_description">Draft broadcast scripts, queue talking-head renders on your local Mac Rig, and list ready Aircheck clips.</string>
+    <string name="idea_placeholder">What’s the breaking news? Drop an idea and tap ✨…</string>
+    <string name="segment_placeholder">What should the anchor say? Type or tap ✨…</string>
+    <string name="cta_generate_clip">Generate News Clip</string>
+    <string name="cta_add_segment">Add segment</string>
+    <string name="appfunctions_display_description">Draft fake news segments with AI, generate anchor videos, and watch your Aircheck clips.</string>
 </resources>

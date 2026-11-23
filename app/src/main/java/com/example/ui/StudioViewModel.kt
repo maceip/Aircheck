@@ -18,29 +18,16 @@ import com.example.data.ScriptProject
 import com.example.data.VoiceSource
 import com.example.data.estimateDurationSeconds
 import com.example.data.gateway.MacRigJobSnapshot
+import com.example.data.gateway.RemoteRenderSummary
 import com.example.data.local.CasMediaStore
 import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.data.local.StudioSettings
 import com.example.engine.AircheckPlayerController
 import com.example.engine.AudioEngine
-import com.voicestudio.edl.ClauseSynthesisPhase
-import com.voicestudio.edl.ClauseSynthesisProgress
-import com.voicestudio.edl.EdlController
-import com.voicestudio.edl.EdlTimelineCalculator
-import com.voicestudio.edl.OtaArtifactRole
 import com.voicestudio.edl.OtaBundleState
-import com.voicestudio.edl.OtaBundleStatus
-import com.voicestudio.edl.PreferenceTelemetryRecord
-import com.voicestudio.edl.PreferenceUserAction
-import com.voicestudio.edl.VoiceProjectManifest
 import com.voicestudio.sync.OtaBundleSyncManager
 import com.voicestudio.sync.ProcessMemoryReader
 import com.voicestudio.sync.VoiceStudioSyncCoordinator
-import com.voicestudio.ui.ClipperUiState
-import com.voicestudio.ui.MAX_GLOBAL_GAP_SCALE
-import com.voicestudio.ui.MIN_GLOBAL_GAP_SCALE
-import com.voicestudio.ui.Media3BeatExporter
-import com.voicestudio.ui.PcmWaveformExtractor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,13 +36,11 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import java.io.File
 
 enum class RigConnectionStatus {
@@ -77,10 +62,12 @@ data class RigHealthUiState(
 
 data class StudioUiState(
     val projects: List<ScriptProject> = emptyList(),
-    val activeProject: ScriptProject = ScriptProject(voiceSource = VoiceSource.MIC_VOICEOVER),
+    val activeProject: ScriptProject = ScriptProject(voiceSource = VoiceSource.ENROLLED_VOICE_CLONE),
     val clipCards: List<ClipCardRow> = emptyList(),
+    val remoteThumbUrls: Map<String, String> = emptyMap(),
     val settings: StudioSettings = StudioSettings(),
     val casTotalBytes: Long = 0L,
+    val activeAiFieldKey: String? = null,
     val isEnqueuingRender: Boolean = false,
     val exportState: ExportState = ExportState.IDLE,
     val pendingShareIntent: Intent? = null,
@@ -94,11 +81,12 @@ data class StudioUiState(
     val statusNotice: String? = null,
     val otaBundleState: OtaBundleState = OtaBundleState(),
     val rigHealth: RigHealthUiState = RigHealthUiState(),
-    val synthesisProgress: ClauseSynthesisProgress = ClauseSynthesisProgress(),
     val unsyncedPreferenceCount: Int = 0,
-    val measuredVmRssMb: Int? = null,
-    val clipperState: ClipperUiState = ClipperUiState()
-)
+    val measuredVmRssMb: Int? = null
+) {
+    val defaultAvatarUrl: String
+        get() = "${rigHealth.resolvedUrl.trimEnd('/')}/v1/default-avatar"
+}
 
 class StudioViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -111,19 +99,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val clipExporter = container.clipExporter
     private val macRigGateway = container.macRigGateway
     private val otaBundleSyncManager: OtaBundleSyncManager = container.otaBundleSyncManager
-    private val edlController: EdlController = container.edlController
     private val voiceStudioCoordinator: VoiceStudioSyncCoordinator = container.voiceStudioCoordinator
 
     private val _uiState = MutableStateFlow(StudioUiState())
     val uiState: StateFlow<StudioUiState> = _uiState.asStateFlow()
 
-    private var voiceManifestObserverJob: Job? = null
+    private var activeAiJob: Job? = null
     private var rigHealthCheckJob: Job? = null
     private val macRigPollingJobs = mutableMapOf<String, Job>()
     private val scriptSaveMutex = Mutex()
-    private val clipperSaveMutex = Mutex()
-    private var activeClipperProjectId: String? = null
-    private var edlPlayerInitialized: Boolean = false
     private var activeRecordingFile: File? = null
     private var initializedProject = false
 
@@ -151,7 +135,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 if (!initializedProject) {
                     initializedProject = true
                     if (savedProjects.isEmpty()) {
-                        val initial = ScriptProject(voiceSource = VoiceSource.MIC_VOICEOVER)
+                        val initial = ScriptProject(voiceSource = VoiceSource.ENROLLED_VOICE_CLONE)
                         localRepo.saveScript(initial)
                         _uiState.update { it.copy(projects = listOf(initial), activeProject = initial) }
                     } else {
@@ -198,56 +182,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
         viewModelScope.launch {
             otaBundleSyncManager.bundleState.collect { otaState ->
-                _uiState.update { cur ->
-                    val statusLabel = formatOtaStatusSummary(otaState)
-                    cur.copy(
-                        otaBundleState = otaState,
-                        clipperState = cur.clipperState.copy(
-                            otaReady = otaState.status == OtaBundleStatus.READY,
-                            otaStatusText = statusLabel
-                        )
-                    )
-                }
-            }
-        }
-
-        viewModelScope.launch {
-            voiceStudioCoordinator.progress.collect { synthProgress ->
-                _uiState.update { cur ->
-                    cur.copy(
-                        synthesisProgress = synthProgress,
-                        measuredVmRssMb = synthProgress.measuredRssMb ?: cur.measuredVmRssMb,
-                        clipperState = cur.clipperState.copy(
-                            synthesisError = if (synthProgress.phase == ClauseSynthesisPhase.FAILED) {
-                                synthProgress.errorMessage
-                            } else {
-                                null
-                            }
-                        )
-                    )
-                }
+                _uiState.update { it.copy(otaBundleState = otaState) }
             }
         }
 
         viewModelScope.launch {
             localRepo.unsyncedPreferenceCount.collect { count ->
                 _uiState.update { it.copy(unsyncedPreferenceCount = count) }
-            }
-        }
-
-        viewModelScope.launch {
-            edlController.isPlaying.collect { playing ->
-                _uiState.update { cur ->
-                    cur.copy(clipperState = cur.clipperState.copy(isPlaying = playing))
-                }
-            }
-        }
-
-        viewModelScope.launch {
-            edlController.playheadSample.collect { sample ->
-                _uiState.update { cur ->
-                    cur.copy(clipperState = cur.clipperState.copy(playheadSample = sample))
-                }
             }
         }
 
@@ -303,32 +244,32 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(liveNavToClipId = null) }
     }
 
-    // --- Project & Script Editing (100% Local Room Storage) ---
+    // --- Story & Segment Editing ---
 
     fun createNewProject() {
+        activeAiJob?.cancel()
         val settings = _uiState.value.settings
         val fresh = ScriptProject(
-            voiceSource = settings.voiceSource,
+            voiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
             stageConfig = NewsroomStageConfig(
                 photoSha = settings.persona.defaultPhotoSha.ifBlank { null },
-                stage4Mode = settings.stage4Mode
+                showBrandBug = true
             )
         )
         persistProject(fresh)
         _uiState.update {
             it.copy(
+                activeAiFieldKey = null,
                 waveformPeaks = emptyList(),
-                exportState = ExportState.IDLE
+                exportState = ExportState.IDLE,
+                statusNotice = "Started a new broadcast."
             )
         }
     }
 
-    fun updateTitle(title: String) {
-        persistProject(_uiState.value.activeProject.copy(title = title))
-    }
-
-    fun setTargetDuration(seconds: Int) {
-        persistProject(_uiState.value.activeProject.copy(targetDurationSec = seconds))
+    fun updateStoryIdea(idea: String) {
+        val cur = _uiState.value.activeProject
+        persistProject(cur.copy(ideaSpark = idea, title = if (cur.title.isBlank()) idea.take(48) else cur.title))
     }
 
     fun updateBeatText(beatId: String, text: String) {
@@ -342,15 +283,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             } else beat
         }
         persistProject(current.copy(beats = updatedBeats))
-    }
-
-    fun toggleCutBeat(beatId: String) {
-        val current = _uiState.value.activeProject
-        persistProject(
-            current.copy(
-                beats = current.beats.map { if (it.id == beatId) it.copy(cut = !it.cut) else it }
-            )
-        )
     }
 
     fun addBeat() {
@@ -370,7 +302,227 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         persistProject(current.copy(beats = remaining))
     }
 
-    // --- Optional Custom Presenter Photo (100% Local CAS) ---
+    fun updateStageConfig(transform: (NewsroomStageConfig) -> NewsroomStageConfig) {
+        val current = _uiState.value.activeProject
+        val updatedStage = transform(current.stageConfig)
+        persistProject(
+            current.copy(
+                title = updatedStage.chyronHeadline.ifBlank { current.title },
+                stageConfig = updatedStage
+            )
+        )
+    }
+
+    // --- Real AI Writing Assist (Backed by Live Mac Rig `/v1/ai-assist`, Zero Firebase) ---
+
+    fun aiFleshOutStory() {
+        val key = "story_idea"
+        if (_uiState.value.activeAiFieldKey == key) {
+            activeAiJob?.cancel()
+            _uiState.update { it.copy(activeAiFieldKey = null) }
+            return
+        }
+        val current = _uiState.value.activeProject
+        val seed = current.ideaSpark.ifBlank {
+            current.activeBeats.joinToString(" ") { it.spokenText }.trim()
+        }.ifBlank { current.stageConfig.chyronHeadline }.trim()
+
+        if (seed.isEmpty()) {
+            _uiState.update { it.copy(errorMessage = "Type a quick news idea first, then tap ✨.") }
+            return
+        }
+
+        activeAiJob?.cancel()
+        _uiState.update { it.copy(activeAiFieldKey = key, errorMessage = null) }
+        activeAiJob = viewModelScope.launch {
+            try {
+                val resolvedUrl = resolveRigUrlOrThrow()
+                val draft = macRigGateway.aiFleshOutStory(
+                    rigBaseUrl = resolvedUrl,
+                    idea = seed,
+                    targetSegments = 2
+                )
+                val latest = _uiState.value.activeProject
+                val newBeats = draft.segments.mapIndexed { idx, line ->
+                    ScriptBeat(
+                        index = idx,
+                        spokenText = line,
+                        durationSec = estimateDurationSeconds(line, 5)
+                    )
+                }
+                persistProject(
+                    latest.copy(
+                        title = draft.headline,
+                        beats = newBeats,
+                        voiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
+                        stageConfig = latest.stageConfig.copy(
+                            chyronHeadline = draft.headline,
+                            chyronSubline = draft.subline
+                        )
+                    )
+                )
+                _uiState.update {
+                    it.copy(
+                        activeAiFieldKey = null,
+                        statusNotice = "AI drafted headline & ${newBeats.size} segments."
+                    )
+                }
+            } catch (_: CancellationException) {
+                _uiState.update { it.copy(activeAiFieldKey = null) }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        activeAiFieldKey = null,
+                        errorMessage = e.localizedMessage ?: "AI assist failed."
+                    )
+                }
+            }
+        }
+    }
+
+    fun aiPolishSegment(beatId: String) {
+        val key = "segment_$beatId"
+        if (_uiState.value.activeAiFieldKey == key) {
+            activeAiJob?.cancel()
+            _uiState.update { it.copy(activeAiFieldKey = null) }
+            return
+        }
+        val current = _uiState.value.activeProject
+        val beat = current.beats.firstOrNull { it.id == beatId } ?: return
+        val storyContext = buildStoryContext(current)
+        if (beat.spokenText.isBlank() && storyContext.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Type an idea or rough line first, then tap ✨.") }
+            return
+        }
+
+        activeAiJob?.cancel()
+        _uiState.update { it.copy(activeAiFieldKey = key, errorMessage = null) }
+        activeAiJob = viewModelScope.launch {
+            try {
+                val resolvedUrl = resolveRigUrlOrThrow()
+                val polished = macRigGateway.aiPolishField(
+                    rigBaseUrl = resolvedUrl,
+                    mode = "polish_segment",
+                    text = beat.spokenText,
+                    context = storyContext
+                )
+                val latest = _uiState.value.activeProject
+                persistProject(
+                    latest.copy(
+                        beats = latest.beats.map { b ->
+                            if (b.id == beatId) {
+                                b.copy(
+                                    spokenText = polished,
+                                    durationSec = estimateDurationSeconds(polished, b.durationSec)
+                                )
+                            } else b
+                        }
+                    )
+                )
+                _uiState.update { it.copy(activeAiFieldKey = null) }
+            } catch (_: CancellationException) {
+                _uiState.update { it.copy(activeAiFieldKey = null) }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        activeAiFieldKey = null,
+                        errorMessage = e.localizedMessage ?: "AI assist failed."
+                    )
+                }
+            }
+        }
+    }
+
+    fun aiPolishHeadline() {
+        val key = "chyron_headline"
+        if (_uiState.value.activeAiFieldKey == key) {
+            activeAiJob?.cancel()
+            _uiState.update { it.copy(activeAiFieldKey = null) }
+            return
+        }
+        val current = _uiState.value.activeProject
+        val draftText = current.stageConfig.chyronHeadline
+        val storyContext = buildStoryContext(current)
+        if (draftText.isBlank() && storyContext.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Type a headline or story idea first, then tap ✨.") }
+            return
+        }
+
+        activeAiJob?.cancel()
+        _uiState.update { it.copy(activeAiFieldKey = key, errorMessage = null) }
+        activeAiJob = viewModelScope.launch {
+            try {
+                val resolvedUrl = resolveRigUrlOrThrow()
+                val polished = macRigGateway.aiPolishField(
+                    rigBaseUrl = resolvedUrl,
+                    mode = "polish_headline",
+                    text = draftText,
+                    context = storyContext
+                )
+                updateStageConfig { it.copy(chyronHeadline = polished) }
+                _uiState.update { it.copy(activeAiFieldKey = null) }
+            } catch (_: CancellationException) {
+                _uiState.update { it.copy(activeAiFieldKey = null) }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        activeAiFieldKey = null,
+                        errorMessage = e.localizedMessage ?: "AI assist failed."
+                    )
+                }
+            }
+        }
+    }
+
+    fun aiPolishSubline() {
+        val key = "chyron_subline"
+        if (_uiState.value.activeAiFieldKey == key) {
+            activeAiJob?.cancel()
+            _uiState.update { it.copy(activeAiFieldKey = null) }
+            return
+        }
+        val current = _uiState.value.activeProject
+        val draftText = current.stageConfig.chyronSubline
+        val storyContext = buildStoryContext(current)
+        if (draftText.isBlank() && storyContext.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Type a subline or story idea first, then tap ✨.") }
+            return
+        }
+
+        activeAiJob?.cancel()
+        _uiState.update { it.copy(activeAiFieldKey = key, errorMessage = null) }
+        activeAiJob = viewModelScope.launch {
+            try {
+                val resolvedUrl = resolveRigUrlOrThrow()
+                val polished = macRigGateway.aiPolishField(
+                    rigBaseUrl = resolvedUrl,
+                    mode = "polish_subline",
+                    text = draftText,
+                    context = storyContext
+                )
+                updateStageConfig { it.copy(chyronSubline = polished) }
+                _uiState.update { it.copy(activeAiFieldKey = null) }
+            } catch (_: CancellationException) {
+                _uiState.update { it.copy(activeAiFieldKey = null) }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        activeAiFieldKey = null,
+                        errorMessage = e.localizedMessage ?: "AI assist failed."
+                    )
+                }
+            }
+        }
+    }
+
+    private fun buildStoryContext(project: ScriptProject): String = buildList {
+        if (project.ideaSpark.isNotBlank()) add("Idea: ${project.ideaSpark.trim()}")
+        if (project.stageConfig.chyronHeadline.isNotBlank()) add("Headline: ${project.stageConfig.chyronHeadline.trim()}")
+        val spoken = project.activeBeats.joinToString(" ") { it.spokenText.trim() }.trim()
+        if (spoken.isNotBlank()) add("Script: $spoken")
+    }.joinToString("\n")
+
+    // --- Presenter Photo (Local CAS, Default Avatar Served Live from Mac Rig) ---
 
     fun importPhoto(uri: Uri) {
         viewModelScope.launch {
@@ -382,35 +534,19 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 val baseStage = current.stageConfig.copy(
                     photoSha = stored.sha256,
                     normalizedPhotoSha = null,
-                    poseGate = PoseGateResult(
-                        checked = true,
-                        valid = true,
-                        note = "Local photo ready (${stored.sha256.take(8)})."
-                    )
+                    poseGate = PoseGateResult(checked = true, valid = true, note = "Anchor photo updated.")
                 )
                 persistProject(current.copy(stageConfig = baseStage))
-                _uiState.update {
-                    it.copy(statusNotice = "Presenter photo cached locally (${stored.sha256.take(8)}).")
-                }
+                _uiState.update { it.copy(statusNotice = "Anchor photo updated.") }
             } catch (e: Exception) {
                 _uiState.update {
-                    it.copy(errorMessage = e.localizedMessage ?: "Could not import photo.")
+                    it.copy(errorMessage = e.localizedMessage ?: "Could not load photo.")
                 }
             }
         }
     }
 
-    fun updateStageConfig(transform: (NewsroomStageConfig) -> NewsroomStageConfig) {
-        val current = _uiState.value.activeProject
-        persistProject(current.copy(stageConfig = transform(current.stageConfig)))
-    }
-
-    fun setVoiceSource(source: VoiceSource) {
-        viewModelScope.launch { profileStore.setVoiceSource(source) }
-        persistProject(_uiState.value.activeProject.copy(voiceSource = source))
-    }
-
-    // --- Local Mic Recording & WAV Preview ---
+    // --- Local Mic Recording & WAV Preview (Single Optional Mic Per Segment) ---
 
     fun toggleMicRecording(beatId: String? = null) {
         if (_uiState.value.isRecordingMic) {
@@ -441,7 +577,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         it.copy(
                             waveformPeaks = peaks,
                             recordingTargetBeatId = null,
-                            statusNotice = "Recorded ${"%.1f".format(durSec)}s WAV locally."
+                            statusNotice = "Recorded ${"%.1f".format(durSec)}s voice take."
                         )
                     }
                 }
@@ -464,6 +600,19 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun clearRecordedMicTake() {
+        audioEngine.stopPlayback()
+        val current = _uiState.value.activeProject
+        persistProject(
+            current.copy(
+                masterAudioSha = null,
+                voiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
+                beats = current.beats.map { it.copy(beatAudioSha = null) }
+            )
+        )
+        _uiState.update { it.copy(waveformPeaks = emptyList(), statusNotice = "Switched back to AI voice.") }
+    }
+
     fun togglePreviewMasterWav() {
         if (_uiState.value.isPlayingAudio) {
             audioEngine.stopPlayback()
@@ -471,13 +620,64 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
         val wavFile = casStore.fileForSha(_uiState.value.activeProject.masterAudioSha, "wav")
         if (wavFile == null) {
-            _uiState.update { it.copy(errorMessage = "Record your voice first to preview audio.") }
+            _uiState.update { it.copy(errorMessage = "Record a voice take first to preview.") }
             return
         }
         audioEngine.playWavFile(viewModelScope, wavFile)
     }
 
-    // --- Direct Mac Studio Rig Render Bridge (Zero Firebase, Zero Sign-In) ---
+    // --- Direct Video Generation & Live Gallery Sync ---
+
+    fun refreshRemoteClips() {
+        viewModelScope.launch {
+            val baseUrl = _uiState.value.rigHealth.resolvedUrl.trim()
+            if (baseUrl.isEmpty()) return@launch
+            val renders = runCatching { macRigGateway.listRemoteRenders(baseUrl) }.getOrNull() ?: return@launch
+            mergeRemoteRendersIntoRoom(renders)
+        }
+    }
+
+    private suspend fun mergeRemoteRendersIntoRoom(renders: List<RemoteRenderSummary>) {
+        if (renders.isEmpty()) return
+        val thumbMap = renders.associate { it.id to it.thumbUrl }
+        _uiState.update { it.copy(remoteThumbUrls = it.remoteThumbUrls + thumbMap) }
+        val now = System.currentTimeMillis()
+        renders.forEachIndexed { idx, item ->
+            val existing = localRepo.getClipById(item.id)
+            if (existing == null) {
+                localRepo.upsertClip(
+                    ClipRecord(
+                        id = item.id,
+                        scriptId = "",
+                        jobId = item.id,
+                        title = item.title,
+                        photoSha = null,
+                        voiceSha = null,
+                        alignSha = null,
+                        lipsyncSha = null,
+                        finalSha = null,
+                        status = RenderJobStatus.READY,
+                        progressFraction = 1f,
+                        stageDetail = "Ready",
+                        errorMessage = null,
+                        durationMs = item.durationMs,
+                        waveformPeaks = emptyList(),
+                        thumbHash = null,
+                        alignedWords = emptyList(),
+                        chyronHeadline = item.title,
+                        chyronSubline = "",
+                        remoteLipsyncUrl = null,
+                        remoteFinalUrl = item.videoUrl,
+                        exportedUri = null,
+                        createdAtMillis = now - idx * 1_000L,
+                        updatedAtMillis = now - idx * 1_000L
+                    )
+                )
+            } else if (existing.remoteFinalUrl.isNullOrBlank()) {
+                localRepo.upsertClip(existing.copy(remoteFinalUrl = item.videoUrl))
+            }
+        }
+    }
 
     fun renderActiveProject(pollIntervalMs: Long = MAC_RIG_POLL_INTERVAL_MS) {
         val current = _uiState.value.activeProject
@@ -486,20 +686,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
         val hasRecordedWav = casStore.fileForSha(current.masterAudioSha, "wav") != null
         val effectiveProject = when {
-            current.voiceSource == VoiceSource.MIC_VOICEOVER && !hasRecordedWav && current.activeBeats.isNotEmpty() ->
-                current.copy(voiceSource = VoiceSource.ENROLLED_VOICE_CLONE)
+            hasRecordedWav && current.voiceSource == VoiceSource.MIC_VOICEOVER -> current
+            current.activeBeats.isNotEmpty() -> current.copy(voiceSource = VoiceSource.ENROLLED_VOICE_CLONE)
+            current.ideaSpark.isNotBlank() -> current.copy(
+                voiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
+                beats = listOf(ScriptBeat(index = 0, spokenText = current.ideaSpark.trim()))
+            )
             else -> current
         }
 
         if (effectiveProject.voiceSource == VoiceSource.ENROLLED_VOICE_CLONE && effectiveProject.activeBeats.isEmpty()) {
             _uiState.update {
-                it.copy(errorMessage = "Tap Mic to record your voice or type a spoken line before rendering.")
-            }
-            return
-        }
-        if (effectiveProject.voiceSource == VoiceSource.MIC_VOICEOVER && !hasRecordedWav) {
-            _uiState.update {
-                it.copy(errorMessage = "Tap Mic to record your voice before rendering.")
+                it.copy(errorMessage = "Type a news idea or segment (or record your voice) before generating.")
             }
             return
         }
@@ -507,50 +705,39 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             _uiState.update { it.copy(isEnqueuingRender = true, errorMessage = null) }
             try {
-                val health = macRigGateway.resolveAndCheckHealth(settings.tailscaleRigUrl)
-                val resolvedUrl = health.resolvedUrl
-                _uiState.update {
-                    it.copy(
-                        rigHealth = RigHealthUiState(
-                            status = RigConnectionStatus.ONLINE,
-                            resolvedUrl = resolvedUrl,
-                            loraVersion = health.loraVersion,
-                            bundleVersion = health.bundleVersion,
-                            pendingPreferences = health.pendingPreferences,
-                            renderBridgeAvailable = health.renderBridgeAvailable,
-                            errorMessage = null
-                        )
-                    )
-                }
-
+                val resolvedUrl = resolveRigUrlOrThrow()
                 val enqueued = macRigGateway.enqueueMacRigRender(
                     rigBaseUrl = resolvedUrl,
                     project = effectiveProject,
                     photoSha = photoSha,
                     resolution = "720P",
                     ratio = "9:16",
-                    maxDurationSec = effectiveProject.targetDurationSec.coerceIn(5, 10)
+                    maxDurationSec = effectiveProject.totalActiveSeconds.coerceIn(5, 10)
                 )
                 val now = System.currentTimeMillis()
+                val displayTitle = effectiveProject.stageConfig.chyronHeadline
+                    .ifBlank { effectiveProject.title }
+                    .ifBlank { effectiveProject.ideaSpark.take(36) }
+                    .ifBlank { "Breaking News" }
                 val clip = ClipRecord(
                     id = enqueued.clipId,
                     scriptId = effectiveProject.id,
                     jobId = enqueued.jobId,
-                    title = effectiveProject.title.ifBlank { "Untitled Aircheck" },
+                    title = displayTitle,
                     photoSha = photoSha,
                     voiceSha = effectiveProject.masterAudioSha,
                     alignSha = null,
                     lipsyncSha = null,
                     finalSha = null,
                     status = RenderJobStatus.QUEUED,
-                    progressFraction = 0.05f,
-                    stageDetail = "Queued on Mac Studio rig",
+                    progressFraction = 0.08f,
+                    stageDetail = "Preparing broadcast",
                     errorMessage = null,
                     durationMs = effectiveProject.totalActiveSeconds * 1000L,
                     waveformPeaks = _uiState.value.waveformPeaks,
                     thumbHash = null,
                     alignedWords = emptyList(),
-                    chyronHeadline = effectiveProject.stageConfig.chyronHeadline.ifBlank { effectiveProject.title },
+                    chyronHeadline = effectiveProject.stageConfig.chyronHeadline.ifBlank { displayTitle },
                     chyronSubline = effectiveProject.stageConfig.chyronSubline,
                     remoteLipsyncUrl = null,
                     remoteFinalUrl = null,
@@ -563,7 +750,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     it.copy(
                         isEnqueuingRender = false,
                         liveNavToClipId = clip.id,
-                        statusNotice = "Render queued on Mac Rig (${enqueued.jobId.take(8)})."
+                        statusNotice = "Generating news clip…"
                     )
                 }
                 startMacRigJobPolling(
@@ -576,11 +763,30 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.update {
                     it.copy(
                         isEnqueuingRender = false,
-                        errorMessage = e.localizedMessage ?: "Unable to reach Mac Studio rig."
+                        errorMessage = e.localizedMessage ?: "Unable to connect to your Mac studio."
                     )
                 }
             }
         }
+    }
+
+    private suspend fun resolveRigUrlOrThrow(): String {
+        val configured = _uiState.value.settings.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+        val health = macRigGateway.resolveAndCheckHealth(configured)
+        _uiState.update {
+            it.copy(
+                rigHealth = RigHealthUiState(
+                    status = RigConnectionStatus.ONLINE,
+                    resolvedUrl = health.resolvedUrl,
+                    loraVersion = health.loraVersion,
+                    bundleVersion = health.bundleVersion,
+                    pendingPreferences = health.pendingPreferences,
+                    renderBridgeAvailable = health.renderBridgeAvailable,
+                    errorMessage = null
+                )
+            )
+        }
+        return health.resolvedUrl
     }
 
     private fun startMacRigJobPolling(
@@ -604,11 +810,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         consecutiveErrors++
                         if (consecutiveErrors >= 5) {
                             val latest = localRepo.getClipById(initialClip.id) ?: initialClip
-                            val errMsg = err?.localizedMessage ?: "Lost connection to Mac Rig while polling."
+                            val errMsg = err?.localizedMessage ?: "Lost connection to Mac studio while rendering."
                             localRepo.upsertClip(
                                 latest.copy(
                                     status = RenderJobStatus.FAILED,
-                                    stageDetail = "Rig unreachable",
+                                    stageDetail = "Connection lost",
                                     errorMessage = errMsg,
                                     updatedAtMillis = System.currentTimeMillis()
                                 )
@@ -627,11 +833,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         RenderJobStatus.READY -> {
                             val videoUrl = snapshot.videoUrl
                             if (videoUrl.isNullOrBlank()) {
-                                val msg = "Mac Rig reported READY without a video URL."
+                                val msg = "Render finished without a video URL."
                                 localRepo.upsertClip(
                                     latest.copy(
                                         status = RenderJobStatus.FAILED,
-                                        stageDetail = "Missing video URL",
+                                        stageDetail = "Missing video",
                                         errorMessage = msg,
                                         updatedAtMillis = System.currentTimeMillis()
                                     )
@@ -645,7 +851,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                                 latest.copy(
                                     status = RenderJobStatus.PACKAGING,
                                     progressFraction = 0.95f,
-                                    stageDetail = "Downloading MP4 locally",
+                                    stageDetail = "Saving video to phone",
                                     remoteFinalUrl = videoUrl,
                                     durationMs = resolvedDuration,
                                     errorMessage = null,
@@ -662,7 +868,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                                     currentClip.copy(
                                         status = RenderJobStatus.READY,
                                         progressFraction = 1f,
-                                        stageDetail = formatMacRigReadyDetail(snapshot),
+                                        stageDetail = "Ready",
                                         finalSha = stored.sha256,
                                         remoteFinalUrl = videoUrl,
                                         durationMs = resolvedDuration,
@@ -671,16 +877,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                                     )
                                 )
                                 _uiState.update {
-                                    it.copy(statusNotice = "Clip ready (${currentClip.title.ifBlank { "Aircheck" }}).")
+                                    it.copy(statusNotice = "News clip ready.")
                                 }
+                                refreshRemoteClips()
                             }.onFailure { err ->
                                 if (err is CancellationException) throw err
-                                val msg = err.localizedMessage ?: "Failed to download rendered MP4."
+                                val msg = err.localizedMessage ?: "Failed to download video."
                                 val currentClip = localRepo.getClipById(initialClip.id) ?: latest
                                 localRepo.upsertClip(
                                     currentClip.copy(
                                         status = RenderJobStatus.FAILED,
-                                        stageDetail = "MP4 download failed",
+                                        stageDetail = "Download failed",
                                         remoteFinalUrl = videoUrl,
                                         errorMessage = msg,
                                         updatedAtMillis = System.currentTimeMillis()
@@ -692,7 +899,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         }
 
                         RenderJobStatus.FAILED -> {
-                            val msg = snapshot.errorMessage ?: "Mac Rig render failed."
+                            val msg = snapshot.errorMessage ?: "Video generation failed."
                             localRepo.upsertClip(
                                 latest.copy(
                                     status = RenderJobStatus.FAILED,
@@ -710,8 +917,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                             localRepo.upsertClip(
                                 latest.copy(
                                     status = snapshot.status,
-                                    progressFraction = snapshot.progressFraction.coerceIn(0.05f, 0.95f),
-                                    stageDetail = snapshot.stageDetail.ifBlank { snapshot.status.label },
+                                    progressFraction = snapshot.progressFraction.coerceIn(0.08f, 0.95f),
+                                    stageDetail = friendlyStageDetail(snapshot),
                                     errorMessage = null,
                                     updatedAtMillis = System.currentTimeMillis()
                                 )
@@ -725,12 +932,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun formatMacRigReadyDetail(snapshot: MacRigJobSnapshot): String {
-        val parts = mutableListOf<String>()
-        snapshot.cer?.let { parts += "CER ${"%.2f".format(it)}" }
-        snapshot.wespeakerCosine?.let { parts += "Sim ${"%.2f".format(it)}" }
-        snapshot.dnsmosP808?.let { parts += "MOS ${"%.2f".format(it)}" }
-        return if (parts.isEmpty()) "Ready" else "Ready · ${parts.joinToString(" · ")}"
+    private fun friendlyStageDetail(snapshot: MacRigJobSnapshot): String = when (snapshot.status) {
+        RenderJobStatus.QUEUED -> "Starting studio render"
+        RenderJobStatus.VOICE -> "Generating anchor voice"
+        RenderJobStatus.LIPSYNC -> "Filming news anchor"
+        RenderJobStatus.PACKAGING -> "Adding breaking news graphics"
+        else -> snapshot.stageDetail.ifBlank { snapshot.status.label }
     }
 
     fun exportClip(clip: ClipRecord, openShareSheet: Boolean = false) {
@@ -747,7 +954,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     it.copy(
                         exportState = ExportState.EXPORTED,
                         pendingShareIntent = if (openShareSheet) exported.shareIntent else null,
-                        statusNotice = "Saved to Movies/Aircheck."
+                        statusNotice = "Saved to Photos."
                     )
                 }
             }.onFailure { err ->
@@ -761,7 +968,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    // --- Persisted Settings, Local Rig Health & Hairline Clipper ---
+    // --- Settings & Server Connection ---
 
     fun setBrandChannel(channel: BrandChannel) {
         viewModelScope.launch { profileStore.setBrandChannel(channel) }
@@ -770,7 +977,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun clearCasCache() {
         viewModelScope.launch {
             casStore.clearAllCache()
-            _uiState.update { it.copy(statusNotice = "Local media cache cleared.") }
+            _uiState.update { it.copy(statusNotice = "Cache cleared.") }
         }
     }
 
@@ -785,11 +992,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val trimmed = url.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
         viewModelScope.launch {
             profileStore.setTailscaleRigUrl(trimmed)
-            otaBundleSyncManager.refreshLocalState(trimmed)
             _uiState.update {
                 it.copy(
                     rigHealth = RigHealthUiState(resolvedUrl = trimmed),
-                    statusNotice = "Mac Rig URL saved."
+                    statusNotice = "Studio server URL saved."
                 )
             }
             testMacRigConnection(trimmed)
@@ -819,6 +1025,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     )
                 }
+                val renders = runCatching { macRigGateway.listRemoteRenders(health.resolvedUrl) }.getOrNull()
+                if (renders != null) {
+                    mergeRemoteRendersIntoRoom(renders)
+                }
             }.onFailure { err ->
                 if (err is CancellationException) throw err
                 _uiState.update {
@@ -826,7 +1036,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         rigHealth = RigHealthUiState(
                             status = RigConnectionStatus.ERROR,
                             resolvedUrl = candidate,
-                            errorMessage = err.localizedMessage ?: "Mac Rig connection failed."
+                            errorMessage = err.localizedMessage ?: "Studio server unreachable."
                         )
                     )
                 }
@@ -841,20 +1051,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update { it.copy(errorMessage = null) }
             val resolvedUrl = runCatching { macRigGateway.resolveAndCheckHealth(candidate).resolvedUrl }
                 .getOrDefault(candidate)
-            if (resolvedUrl != _uiState.value.settings.tailscaleRigUrl) {
-                profileStore.setTailscaleRigUrl(resolvedUrl)
-            }
             val result = voiceStudioCoordinator.syncOtaBundleNow(resolvedUrl)
             refreshVmRssTelemetry()
             result.onSuccess { manifest ->
                 _uiState.update {
-                    it.copy(
-                        statusNotice = "OTA ready: ${manifest.bundleVersion} (LoRA v${manifest.loraVersion})."
-                    )
+                    it.copy(statusNotice = "Offline models ready (${manifest.bundleVersion}).")
                 }
             }.onFailure { err ->
                 _uiState.update {
-                    it.copy(errorMessage = err.localizedMessage ?: "OTA bundle sync failed.")
+                    it.copy(errorMessage = err.localizedMessage ?: "Model sync failed.")
                 }
             }
         }
@@ -866,342 +1071,21 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val resolvedUrl = runCatching { macRigGateway.resolveAndCheckHealth(candidate).resolvedUrl }
                 .getOrDefault(candidate)
-            if (resolvedUrl != _uiState.value.settings.tailscaleRigUrl) {
-                profileStore.setTailscaleRigUrl(resolvedUrl)
-            }
             voiceStudioCoordinator.enqueuePreferenceSyncAndLoraCheck(
                 tailscaleBaseUrl = resolvedUrl,
                 requireUnmetered = false
             )
-            _uiState.update {
-                it.copy(statusNotice = "Queued preferences.jsonl upload & LoRA delta check.")
-            }
+            _uiState.update { it.copy(statusNotice = "Synced preferences.") }
         }
-    }
-
-    fun loadClipperForProject(projectId: String) {
-        if (activeClipperProjectId == projectId && voiceManifestObserverJob?.isActive == true) {
-            return
-        }
-        activeClipperProjectId = projectId
-        voiceManifestObserverJob?.cancel()
-        voiceManifestObserverJob = viewModelScope.launch {
-            otaBundleSyncManager.refreshLocalState(_uiState.value.settings.tailscaleRigUrl)
-            ensureEdlPlayerInitializedIfPossible()
-            localRepo.observeVoiceManifest(projectId).collectLatest { manifest ->
-                val peaks = if (manifest != null) {
-                    withContext(Dispatchers.IO) {
-                        PcmWaveformExtractor.extractMinMaxPeaks(manifest)
-                    }
-                } else {
-                    FloatArray(0)
-                }
-                if (manifest != null && edlPlayerInitialized) {
-                    withContext(Dispatchers.IO) {
-                        runCatching { edlController.preloadManifestFiles(manifest) }
-                        runCatching { edlController.updateFromManifest(manifest) }
-                    }
-                }
-                _uiState.update { cur ->
-                    cur.copy(
-                        clipperState = cur.clipperState.copy(
-                            manifest = manifest,
-                            waveformMinMaxPeaks = peaks
-                        )
-                    )
-                }
-            }
-        }
-    }
-
-    fun toggleClipperPlayPause() {
-        if (edlController.isPlaying.value) {
-            edlController.pause()
-            return
-        }
-        val manifest = _uiState.value.clipperState.manifest
-        if (manifest == null || manifest.clauses.isEmpty()) {
-            _uiState.update { cur ->
-                cur.copy(
-                    clipperState = cur.clipperState.copy(
-                        synthesisError = "No synthesized 44.1 kHz clauses ready for EDL playback."
-                    )
-                )
-            }
-            return
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            val initErr = ensureEdlPlayerInitializedIfPossible()
-            if (initErr != null) {
-                _uiState.update { cur ->
-                    cur.copy(clipperState = cur.clipperState.copy(synthesisError = initErr))
-                }
-                return@launch
-            }
-            val updateRes = edlController.updateFromManifest(manifest)
-            if (updateRes.isFailure) {
-                _uiState.update { cur ->
-                    cur.copy(
-                        clipperState = cur.clipperState.copy(
-                            synthesisError = updateRes.exceptionOrNull()?.message ?: "EDL snapshot update failed."
-                        )
-                    )
-                }
-                return@launch
-            }
-            val startRes = edlController.start()
-            if (startRes.isFailure) {
-                _uiState.update { cur ->
-                    cur.copy(
-                        clipperState = cur.clipperState.copy(
-                            synthesisError = startRes.exceptionOrNull()?.message ?: "Oboe EDL start failed."
-                        )
-                    )
-                }
-            } else {
-                _uiState.update { cur ->
-                    cur.copy(clipperState = cur.clipperState.copy(synthesisError = null))
-                }
-            }
-        }
-    }
-
-    fun seekClipperSample(sample: Long) {
-        val clamped = sample.coerceAtLeast(0L)
-        edlController.seekToSample(clamped)
-        _uiState.update { cur ->
-            cur.copy(clipperState = cur.clipperState.copy(playheadSample = clamped))
-        }
-    }
-
-    fun setClipperEditingClause(clauseId: String?) {
-        _uiState.update { cur ->
-            cur.copy(clipperState = cur.clipperState.copy(editingClauseId = clauseId))
-        }
-    }
-
-    fun onClipperSwapTake(clauseId: String, nextTakeIndex: Int) {
-        val currentManifest = _uiState.value.clipperState.manifest ?: return
-        val clause = currentManifest.clauses.firstOrNull { it.clauseId == clauseId } ?: return
-        if (nextTakeIndex !in clause.candidates.indices || nextTakeIndex == clause.selectedTakeIndex) return
-
-        val rejectedTake = clause.selectedCandidate
-        val chosenTake = clause.candidates[nextTakeIndex]
-        val updatedManifest = currentManifest.copy(
-            clauses = currentManifest.clauses.map { node ->
-                if (node.clauseId == clauseId) node.copy(selectedTakeIndex = nextTakeIndex) else node
-            }
-        )
-
-        val telemetry = PreferenceTelemetryRecord(
-            timestamp = System.currentTimeMillis(),
-            clauseId = clause.clauseId,
-            loraVersion = updatedManifest.activeLoraVersion,
-            rawText = clause.rawText,
-            normalizedPhonemes = clause.normalizedPhonemes,
-            userAction = PreferenceUserAction.TAKE_SWAP,
-            userGapScale = updatedManifest.globalGapScale.coerceIn(MIN_GLOBAL_GAP_SCALE, MAX_GLOBAL_GAP_SCALE),
-            chosenTokens = chosenTake.discreteAudioTokens.toList(),
-            rejectedTokens = rejectedTake?.discreteAudioTokens?.toList().orEmpty()
-        )
-
-        applyClipperManifestMutation(updatedManifest, telemetry)
-    }
-
-    fun onClipperOverrideClauseText(clauseId: String, newText: String, newPhonemes: String) {
-        val currentManifest = _uiState.value.clipperState.manifest ?: return
-        val clause = currentManifest.clauses.firstOrNull { it.clauseId == clauseId } ?: return
-        val trimmedText = newText.trim()
-        if (trimmedText.isEmpty()) return
-        val trimmedPhonemes = newPhonemes.trim()
-
-        val updatedManifest = currentManifest.copy(
-            clauses = currentManifest.clauses.map { node ->
-                if (node.clauseId == clauseId) {
-                    node.copy(rawText = trimmedText, normalizedPhonemes = trimmedPhonemes)
-                } else {
-                    node
-                }
-            }
-        )
-
-        val currentTokens = clause.selectedCandidate?.discreteAudioTokens?.toList().orEmpty()
-        val telemetry = PreferenceTelemetryRecord(
-            timestamp = System.currentTimeMillis(),
-            clauseId = clause.clauseId,
-            loraVersion = updatedManifest.activeLoraVersion,
-            rawText = trimmedText,
-            normalizedPhonemes = trimmedPhonemes,
-            userAction = PreferenceUserAction.PHONEME_OVERRIDE,
-            userGapScale = updatedManifest.globalGapScale.coerceIn(MIN_GLOBAL_GAP_SCALE, MAX_GLOBAL_GAP_SCALE),
-            chosenTokens = emptyList(),
-            rejectedTokens = currentTokens
-        )
-
-        applyClipperManifestMutation(updatedManifest, telemetry)
-        voiceStudioCoordinator.enqueueSingleClauseResynthesis(updatedManifest.projectId, clauseId)
-        _uiState.update { it.copy(statusNotice = "Queued single-clause resynthesis for $clauseId.") }
-    }
-
-    fun onClipperGlobalGapScaleChange(scale: Float) {
-        val currentManifest = _uiState.value.clipperState.manifest ?: return
-        val clamped = scale.coerceIn(MIN_GLOBAL_GAP_SCALE, MAX_GLOBAL_GAP_SCALE)
-        val updatedManifest = currentManifest.copy(globalGapScale = clamped)
-
-        val pos = EdlTimelineCalculator.mapSampleToPosition(updatedManifest, _uiState.value.clipperState.playheadSample)
-        val referenceClause = updatedManifest.clauses.firstOrNull { it.clauseId == pos.clauseId }
-            ?: updatedManifest.clauses.firstOrNull()
-
-        val telemetry = referenceClause?.let { clause ->
-            PreferenceTelemetryRecord(
-                timestamp = System.currentTimeMillis(),
-                clauseId = clause.clauseId,
-                loraVersion = updatedManifest.activeLoraVersion,
-                rawText = clause.rawText,
-                normalizedPhonemes = clause.normalizedPhonemes,
-                userAction = PreferenceUserAction.PACE_EDIT,
-                userGapScale = clamped,
-                chosenTokens = clause.selectedCandidate?.discreteAudioTokens?.toList().orEmpty(),
-                rejectedTokens = emptyList()
-            )
-        }
-
-        applyClipperManifestMutation(updatedManifest, telemetry)
-    }
-
-    fun onClipperToggleVideoAnchor(clauseId: String, wordIndex: Int, videoAnchorId: String?) {
-        val currentManifest = _uiState.value.clipperState.manifest ?: return
-        val clause = currentManifest.clauses.firstOrNull { it.clauseId == clauseId } ?: return
-        val selected = clause.selectedCandidate ?: return
-        if (wordIndex !in selected.tokens.indices) return
-
-        val updatedTokens = selected.tokens.mapIndexed { idx, token ->
-            if (idx == wordIndex) token.copy(videoAnchorId = videoAnchorId) else token
-        }
-        val updatedCandidates = clause.candidates.mapIndexed { idx, candidate ->
-            if (idx == clause.selectedTakeIndex) candidate.copy(tokens = updatedTokens) else candidate
-        }
-        val updatedManifest = currentManifest.copy(
-            clauses = currentManifest.clauses.map { node ->
-                if (node.clauseId == clauseId) node.copy(candidates = updatedCandidates) else node
-            }
-        )
-
-        val telemetry = PreferenceTelemetryRecord(
-            timestamp = System.currentTimeMillis(),
-            clauseId = clause.clauseId,
-            loraVersion = updatedManifest.activeLoraVersion,
-            rawText = clause.rawText,
-            normalizedPhonemes = clause.normalizedPhonemes,
-            userAction = PreferenceUserAction.VIDEO_ANCHOR_SNAP,
-            userGapScale = updatedManifest.globalGapScale.coerceIn(MIN_GLOBAL_GAP_SCALE, MAX_GLOBAL_GAP_SCALE),
-            chosenTokens = selected.discreteAudioTokens.toList(),
-            rejectedTokens = emptyList()
-        )
-
-        applyClipperManifestMutation(updatedManifest, telemetry)
-    }
-
-    fun onClipperExport() {
-        val manifest = _uiState.value.clipperState.manifest
-        if (manifest == null || manifest.clauses.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "No synthesized clauses to export.") }
-            return
-        }
-        val anchorsUs = Media3BeatExporter.computeAnchorTimestampsUs(manifest)
-        val totalDurationUs = Media3BeatExporter.computeTotalTimelineDurationUs(manifest)
-        val firstClause = manifest.clauses.first()
-
-        val telemetry = PreferenceTelemetryRecord(
-            timestamp = System.currentTimeMillis(),
-            clauseId = firstClause.clauseId,
-            loraVersion = manifest.activeLoraVersion,
-            rawText = firstClause.rawText,
-            normalizedPhonemes = firstClause.normalizedPhonemes,
-            userAction = PreferenceUserAction.PROJECT_EXPORT,
-            userGapScale = manifest.globalGapScale.coerceIn(MIN_GLOBAL_GAP_SCALE, MAX_GLOBAL_GAP_SCALE),
-            chosenTokens = firstClause.selectedCandidate?.discreteAudioTokens?.toList().orEmpty(),
-            rejectedTokens = emptyList()
-        )
-
-        viewModelScope.launch {
-            localRepo.appendPreference(telemetry)
-            val durationSec = totalDurationUs / 1_000_000.0
-            _uiState.update {
-                it.copy(
-                    statusNotice = "Beat timeline locked: ${anchorsUs.size} cuts · ${"%.2f".format(durationSec)}s."
-                )
-            }
-        }
-    }
-
-    private fun applyClipperManifestMutation(
-        updatedManifest: VoiceProjectManifest,
-        telemetry: PreferenceTelemetryRecord?
-    ) {
-        _uiState.update { cur ->
-            cur.copy(clipperState = cur.clipperState.copy(manifest = updatedManifest))
-        }
-        viewModelScope.launch {
-            clipperSaveMutex.withLock {
-                withContext(Dispatchers.IO) {
-                    localRepo.saveProjectManifest(updatedManifest)
-                    if (telemetry != null) {
-                        localRepo.appendPreference(telemetry)
-                    }
-                    if (edlPlayerInitialized) {
-                        runCatching { edlController.updateFromManifest(updatedManifest) }
-                    }
-                    val peaks = PcmWaveformExtractor.extractMinMaxPeaks(updatedManifest)
-                    _uiState.update { cur ->
-                        if (cur.clipperState.manifest?.projectId == updatedManifest.projectId) {
-                            cur.copy(clipperState = cur.clipperState.copy(waveformMinMaxPeaks = peaks))
-                        } else {
-                            cur
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private suspend fun ensureEdlPlayerInitializedIfPossible(): String? {
-        if (edlPlayerInitialized) return null
-        val roomTone = otaBundleSyncManager.resolveArtifactFile(OtaArtifactRole.ROOM_TONE_PCM)
-            ?: return "Missing room_tone_44k.pcm in verified OTA bundle. Sync OTA bundle in System Deck."
-        val res = edlController.initPlayer(roomTone.absolutePath)
-        return if (res.isSuccess) {
-            edlPlayerInitialized = true
-            null
-        } else {
-            res.exceptionOrNull()?.message ?: "Failed initializing Oboe EDL stream."
-        }
-    }
-
-    private fun formatOtaStatusSummary(state: OtaBundleState): String = when (state.status) {
-        OtaBundleStatus.NOT_INSTALLED -> state.errorMessage
-            ?: "Not installed. Tap Sync OTA Bundle in System Deck to pull models from your Mac Rig."
-        OtaBundleStatus.SYNCING -> {
-            val verifiedMb = state.verifiedBytes / (1024.0 * 1024.0)
-            val totalMb = state.totalBytes / (1024.0 * 1024.0)
-            "Syncing ${"%.1f".format(verifiedMb)} / ${"%.1f".format(totalMb)} MB"
-        }
-        OtaBundleStatus.READY -> {
-            val ver = state.activeManifest?.bundleVersion ?: "verified"
-            "Ready ($ver · LoRA v${state.activeLoraVersion})"
-        }
-        OtaBundleStatus.CORRUPT_OR_INCOMPATIBLE -> state.errorMessage ?: "Corrupt or incompatible OTA bundle."
-        OtaBundleStatus.SYNC_FAILED -> state.errorMessage ?: "OTA sync failed."
     }
 
     override fun onCleared() {
         super.onCleared()
-        voiceManifestObserverJob?.cancel()
+        activeAiJob?.cancel()
         rigHealthCheckJob?.cancel()
         macRigPollingJobs.values.forEach { it.cancel() }
         macRigPollingJobs.clear()
         audioEngine.stopPlayback()
-        edlController.pause()
     }
 
     companion object {

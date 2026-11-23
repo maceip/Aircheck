@@ -18,8 +18,8 @@ enum class BrandChannel(val label: String, val accentHex: String) {
 }
 
 enum class StudioTab(val label: String) {
-    SCRIPT("Script"),
-    PHOTO("Photo"),
+    SCRIPT("Story"),
+    PHOTO("Desk"),
     CLIPS("Clips")
 }
 

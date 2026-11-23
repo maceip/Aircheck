@@ -33,8 +33,40 @@ data class MacRigJobSnapshot(
     val dnsmosP808: Double? = null
 )
 
+data class AiStoryDraftResult(
+    val headline: String,
+    val subline: String,
+    val segments: List<String>
+)
+
+data class RemoteRenderSummary(
+    val id: String,
+    val filename: String,
+    val title: String,
+    val durationMs: Long,
+    val sizeBytes: Long,
+    val updatedAtUtc: String,
+    val videoUrl: String,
+    val thumbUrl: String
+)
+
 interface MacRigRenderGateway {
     suspend fun resolveAndCheckHealth(configuredUrl: String): MacRigHealthResult
+
+    suspend fun aiFleshOutStory(
+        rigBaseUrl: String,
+        idea: String,
+        targetSegments: Int = 2
+    ): AiStoryDraftResult
+
+    suspend fun aiPolishField(
+        rigBaseUrl: String,
+        mode: String,
+        text: String,
+        context: String
+    ): String
+
+    suspend fun listRemoteRenders(rigBaseUrl: String): List<RemoteRenderSummary>
 
     suspend fun enqueueMacRigRender(
         rigBaseUrl: String,

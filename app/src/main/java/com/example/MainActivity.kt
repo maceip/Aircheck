@@ -51,8 +51,6 @@ import com.example.ui.theme.ConsoleElevated
 import com.example.ui.theme.LocalAircheckTokens
 import com.example.ui.theme.OledVoid
 import com.example.ui.theme.StudioCrisp
-import com.voicestudio.ui.ClipperActions
-import com.voicestudio.ui.ClipperScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -108,8 +106,7 @@ fun AircheckApp(viewModel: StudioViewModel) {
     LaunchedEffect(currentRoute) {
         snackbarHostState.currentSnackbarData?.dismiss()
     }
-    val isFullScreenOverlay = currentRoute is ScreenKey.SystemDeckKey ||
-        currentRoute is ScreenKey.ClipperKey
+    val isFullScreenOverlay = currentRoute is ScreenKey.SystemDeckKey
 
     AircheckTheme(channel = uiState.settings.brandChannel) {
         val tokens = LocalAircheckTokens.current
@@ -118,17 +115,17 @@ fun AircheckApp(viewModel: StudioViewModel) {
             entry<ScreenKey.ScriptKey> {
                 ScriptScreen(
                     uiState = uiState,
-                    onUpdateTitle = viewModel::updateTitle,
-                    onSetTargetDuration = viewModel::setTargetDuration,
+                    onUpdateIdea = viewModel::updateStoryIdea,
+                    onAiFleshOutStory = viewModel::aiFleshOutStory,
                     onUpdateBeatText = viewModel::updateBeatText,
-                    onToggleCutBeat = viewModel::toggleCutBeat,
-                    onToggleMicRecord = { beatId -> viewModel.toggleMicRecording(beatId) },
+                    onAiPolishSegment = viewModel::aiPolishSegment,
+                    onToggleBeatMicRecord = { beatId -> viewModel.toggleMicRecording(beatId) },
                     onTogglePreviewWav = viewModel::togglePreviewMasterWav,
-                    onSetVoiceSource = viewModel::setVoiceSource,
+                    onClearMicTake = viewModel::clearRecordedMicTake,
                     onAddBeat = viewModel::addBeat,
                     onDeleteBeat = viewModel::deleteBeat,
+                    onNewStory = viewModel::createNewProject,
                     onDismissError = viewModel::dismissError,
-                    onOpenClipper = { navigator.openClipper(uiState.activeProject.id) },
                     onRender = { viewModel.renderActiveProject() }
                 )
             }
@@ -139,7 +136,8 @@ fun AircheckApp(viewModel: StudioViewModel) {
                     casStore = viewModel.casStore,
                     onImportPhoto = viewModel::importPhoto,
                     onUpdateStageConfig = viewModel::updateStageConfig,
-                    onSetVoiceSource = viewModel::setVoiceSource,
+                    onAiPolishHeadline = viewModel::aiPolishHeadline,
+                    onAiPolishSubline = viewModel::aiPolishSubline,
                     onEnqueueRender = { viewModel.renderActiveProject() },
                     onDismissError = viewModel::dismissError
                 )
@@ -150,7 +148,8 @@ fun AircheckApp(viewModel: StudioViewModel) {
                     uiState = uiState,
                     casStore = viewModel.casStore,
                     onOpenClip = { clipId -> navigator.openClipReview(clipId) },
-                    onEnqueueRender = { viewModel.renderActiveProject() },
+                    onRefreshClips = viewModel::refreshRemoteClips,
+                    onStartNewStory = { navigator.selectTab(StudioTab.SCRIPT) },
                     onDismissError = viewModel::dismissError
                 )
             }
@@ -167,27 +166,6 @@ fun AircheckApp(viewModel: StudioViewModel) {
                     onBack = { navigator.goBack() },
                     onExport = { targetClip, share -> viewModel.exportClip(targetClip, openShareSheet = share) },
                     onDismissError = viewModel::dismissError
-                )
-            }
-
-            entry<ScreenKey.ClipperKey> { key ->
-                LaunchedEffect(key.projectId) {
-                    viewModel.loadClipperForProject(key.projectId)
-                }
-                ClipperScreen(
-                    state = uiState.clipperState,
-                    actions = ClipperActions(
-                        onPlayPause = viewModel::toggleClipperPlayPause,
-                        onSeekSample = viewModel::seekClipperSample,
-                        onSwapTake = viewModel::onClipperSwapTake,
-                        onOverrideClauseText = viewModel::onClipperOverrideClauseText,
-                        onGlobalGapScaleChange = viewModel::onClipperGlobalGapScaleChange,
-                        onToggleVideoAnchor = viewModel::onClipperToggleVideoAnchor,
-                        onExportClip = viewModel::onClipperExport,
-                        onOpenOtaSync = { navigator.navigate(ScreenKey.SystemDeckKey) },
-                        onBack = { navigator.goBack() },
-                        onEditingClauseChange = viewModel::setClipperEditingClause
-                    )
                 )
             }
 
@@ -237,7 +215,7 @@ fun AircheckApp(viewModel: StudioViewModel) {
                             StudioTopBar(
                                 title = when (navigationState.activeTab) {
                                     StudioTab.SCRIPT -> "Aircheck"
-                                    StudioTab.PHOTO -> "Photo"
+                                    StudioTab.PHOTO -> "News Desk"
                                     StudioTab.CLIPS -> "Clips"
                                 },
                                 isRigOnline = uiState.rigHealth.status == RigConnectionStatus.ONLINE,

@@ -56,9 +56,16 @@ MAX_RENDER_BODY_BYTES = 64 * 1024 * 1024  # 64 MiB (WAV + JPEG base64 uploads)
 
 DEFAULT_AVATAR_PATH = Path("/Users/mac/Downloads/clone/images/avatar_ref.jpg")
 DEFAULT_VENV_PYTHON = Path("/Users/mac/.venv/bin/python")
+DEFAULT_BL_BIN = Path("/Users/mac/.local/bin/bl")
 VALID_VOICE_SOURCES = frozenset({"ENROLLED_VOICE_CLONE", "MIC_VOICEOVER"})
 VALID_RESOLUTIONS = frozenset({"480P", "720P", "1080P"})
 VALID_RATIOS = frozenset({"9:16", "16:9", "1:1"})
+VALID_AI_ASSIST_MODES = frozenset({
+    "flesh_out_story",
+    "polish_headline",
+    "polish_subline",
+    "polish_segment",
+})
 
 _TAILSCALE_IPV4_NET = ipaddress.ip_network("100.64.0.0/10")
 _TAILSCALE_IPV6_NET = ipaddress.ip_network("fd7a:115c:a1e0::/48")
@@ -715,6 +722,104 @@ class RenderJobManager:
                 if job.get("status") not in ("READY", "FAILED")
             )
 
+    def list_renders(self) -> list[dict[str, Any]]:
+        """Lists completed MP4 clips in `renders_dir`, newest first, with thumbnail URLs."""
+        self.renders_dir.mkdir(parents=True, exist_ok=True)
+        jobs_by_id: dict[str, dict[str, Any]] = {}
+        with self._lock:
+            for jid, rec in self._jobs.items():
+                jobs_by_id[jid] = dict(rec)
+
+        items: list[dict[str, Any]] = []
+        for path in sorted(
+            self.renders_dir.glob("*.mp4"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ):
+            name = path.name
+            if not path.is_file() or path.stat().st_size == 0:
+                continue
+            if (
+                name.endswith("_raw_wan.mp4")
+                or name.endswith("_exact_input_voice.mp4")
+                or name.endswith("_wan_audio.mp4")
+                or name.endswith("_v2_lipsync.mp4")
+            ):
+                continue
+            stem = path.stem
+            job_rec = jobs_by_id.get(stem)
+            if job_rec and job_rec.get("title"):
+                title = str(job_rec["title"])
+            else:
+                title = stem.replace("_", " ").strip().title()
+            st = path.stat()
+            dur_ms = int(job_rec.get("duration_ms") or 0) if job_rec else 0
+            if dur_ms <= 0:
+                dur_ms = _probe_media_duration_ms(path)
+            updated_utc = datetime.datetime.fromtimestamp(
+                st.st_mtime, tz=datetime.timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            items.append(
+                {
+                    "id": stem,
+                    "filename": name,
+                    "title": title,
+                    "duration_ms": dur_ms,
+                    "size_bytes": st.st_size,
+                    "updated_at_utc": updated_utc,
+                    "video_url": f"/v1/renders/{name}",
+                    "thumb_url": f"/v1/render-thumbs/{stem}.jpg",
+                }
+            )
+        return items
+
+    def get_or_create_render_thumb(self, thumb_filename: str) -> Path | None:
+        """Lazily extracts a 360px wide JPEG thumbnail for `{stem}.mp4`."""
+        if not thumb_filename.endswith(".jpg"):
+            raise PermissionError("Thumbnail must end with .jpg")
+        if not _SAFE_SEGMENT_RE.match(thumb_filename) or thumb_filename in (".", ".."):
+            raise PermissionError(f"Unsafe thumbnail filename rejected: {thumb_filename!r}")
+        stem = thumb_filename[: -len(".jpg")]
+        mp4_path = self.resolve_render_file(f"{stem}.mp4")
+        if mp4_path is None:
+            return None
+        thumbs_dir = (self.renders_dir / ".thumbs").resolve()
+        thumbs_dir.mkdir(parents=True, exist_ok=True)
+        thumb_path = (thumbs_dir / thumb_filename).resolve()
+        if not thumb_path.is_relative_to(thumbs_dir):
+            raise PermissionError("Path traversal outside thumbs directory rejected")
+        if thumb_path.is_file() and thumb_path.stat().st_mtime >= mp4_path.stat().st_mtime:
+            return thumb_path
+        tmp_jpg = thumbs_dir / f".{thumb_filename}.tmp.{os.getpid()}.jpg"
+        try:
+            proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    "0.4",
+                    "-i",
+                    str(mp4_path),
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    "scale=360:-1",
+                    "-q:v",
+                    "4",
+                    str(tmp_jpg),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode == 0 and tmp_jpg.is_file() and tmp_jpg.stat().st_size > 0:
+                os.replace(tmp_jpg, thumb_path)
+                return thumb_path
+        finally:
+            if tmp_jpg.exists():
+                tmp_jpg.unlink(missing_ok=True)
+        return None
+
     def resolve_render_file(self, filename: str) -> Path | None:
         """Safely resolves `renders_dir/{filename}` rejecting traversal and symlink escapes."""
         if not _SAFE_SEGMENT_RE.match(filename) or filename in (".", ".."):
@@ -811,6 +916,10 @@ class RenderJobManager:
             "updated_at_utc": now_iso,
         }
 
+        chyron_headline = str(payload.get("chyron_headline") or "").strip()[:72]
+        chyron_subline = str(payload.get("chyron_subline") or "").strip()[:96]
+        show_brand_bug = bool(payload.get("show_brand_bug", True))
+
         work_spec: dict[str, Any] = {
             "job_id": job_id,
             "script_id": script_id,
@@ -822,6 +931,9 @@ class RenderJobManager:
             "resolution": resolution,
             "ratio": ratio,
             "max_duration": max_duration_raw,
+            "chyron_headline": chyron_headline,
+            "chyron_subline": chyron_subline,
+            "show_brand_bug": show_brand_bug,
             "work_dir": work_dir,
         }
 
@@ -1038,6 +1150,17 @@ class RenderJobManager:
         ]
         if spoken_text:
             head_cmd.extend(["--transcript", spoken_text])
+        head_cmd.extend(
+            [
+                "--style-prompt",
+                (
+                    "Image 1 is a deadpan, serious breaking-news television anchor reporting live "
+                    "from a sleek dark obsidian cable-news broadcast desk with softly blurred crimson "
+                    "and blue newsroom screens behind him. Locked medium close-up camera, crisp "
+                    "studio key lighting, natural blinking, accurate lip-sync matching Audio 1."
+                ),
+            ]
+        )
 
         head_proc = subprocess.run(head_cmd, capture_output=True, text=True, check=False)
         if head_proc.returncode != 0:
@@ -1064,6 +1187,25 @@ class RenderJobManager:
                 f"generate_talking_head.py exited 0 but did not produce {chosen_mp4}"
             )
 
+        chyron_headline = str(spec.get("chyron_headline") or "").strip()
+        chyron_subline = str(spec.get("chyron_subline") or "").strip()
+        show_brand_bug = bool(spec.get("show_brand_bug", True))
+        if chyron_headline or chyron_subline or show_brand_bug:
+            report_progress(
+                status="PACKAGING",
+                progress_fraction=0.88,
+                stage_detail="Adding breaking news graphics",
+                metrics=metrics,
+            )
+            branded_mp4 = work_dir / "talking_head_branded.mp4"
+            chosen_mp4 = _burn_breaking_news_chyron(
+                src_mp4=chosen_mp4,
+                out_mp4=branded_mp4,
+                headline=chyron_headline or str(spec.get("title") or "BREAKING NEWS").upper(),
+                subline=chyron_subline or "AIRCHECK LIVE DESK",
+                show_live_bug=show_brand_bug,
+            )
+
         target_mp4 = self.renders_dir / f"{spec['job_id']}.mp4"
         _atomic_publish_mp4(chosen_mp4, target_mp4)
         duration_ms = _probe_media_duration_ms(target_mp4)
@@ -1075,6 +1217,262 @@ class RenderJobManager:
             "duration_ms": duration_ms,
             "metrics": metrics,
         }
+
+
+def _burn_breaking_news_chyron(
+    *,
+    src_mp4: Path,
+    out_mp4: Path,
+    headline: str,
+    subline: str,
+    show_live_bug: bool = True,
+) -> Path:
+    """Burns a broadcast LIVE bug + BREAKING NEWS lower-third chyron onto a 9:16 MP4."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    overlay_png = out_mp4.with_suffix(".chyron.png")
+    img = Image.new("RGBA", (720, 1280), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    repo_root = Path(__file__).resolve().parents[2]
+    font_bold_path = repo_root / "app" / "src" / "main" / "res" / "font" / "space_grotesk.ttf"
+    font_mono_path = repo_root / "app" / "src" / "main" / "res" / "font" / "jetbrains_mono.ttf"
+
+    def _load_font(p: Path, size: int) -> Any:
+        if p.is_file():
+            return ImageFont.truetype(str(p), size)
+        return ImageFont.load_default()
+
+    f_live = _load_font(font_mono_path, 22)
+    f_loc = _load_font(font_mono_path, 20)
+    f_tag = _load_font(font_mono_path, 20)
+    f_head = _load_font(font_bold_path, 30)
+    f_sub = _load_font(font_mono_path, 20)
+
+    if show_live_bug:
+        draw.rectangle([28, 46, 152, 88], fill=(217, 4, 41, 245))
+        draw.ellipse([42, 60, 56, 74], fill=(255, 255, 255, 255))
+        draw.text((64, 54), "LIVE", font=f_live, fill=(255, 255, 255, 255))
+        draw.rectangle([152, 46, 396, 88], fill=(10, 12, 16, 224))
+        draw.text((168, 55), "AIRCHECK NEWS", font=f_loc, fill=(232, 238, 245, 255))
+
+    clean_head = headline.strip().upper()[:38]
+    clean_sub = subline.strip().upper()[:48]
+    if clean_head or clean_sub:
+        draw.rectangle([24, 1040, 260, 1080], fill=(217, 4, 41, 245))
+        draw.text((40, 1048), "BREAKING NEWS", font=f_tag, fill=(255, 255, 255, 255))
+        draw.rectangle([24, 1080, 696, 1204], fill=(9, 12, 18, 232))
+        draw.rectangle([24, 1080, 32, 1204], fill=(184, 255, 0, 255))
+        if clean_head:
+            draw.text((48, 1096), clean_head, font=f_head, fill=(255, 255, 255, 255))
+        if clean_sub:
+            draw.text((48, 1148), clean_sub, font=f_sub, fill=(184, 255, 0, 255))
+
+    img.save(overlay_png)
+    filter_complex = (
+        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30[bg];"
+        "[bg][1:v]overlay=0:0:shortest=1[v];"
+        "[0:a]loudnorm=I=-16:TP=-1.5:LRA=9[a]"
+    )
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src_mp4),
+            "-loop",
+            "1",
+            "-i",
+            str(overlay_png),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            "-movflags",
+            "+faststart",
+            str(out_mp4),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0 or not out_mp4.is_file() or out_mp4.stat().st_size == 0:
+        raise RuntimeError(_summarize_subprocess_error("ffmpeg chyron burn", proc))
+    return out_mp4
+
+
+def _extract_json_objects(raw_text: str) -> list[dict[str, Any]]:
+    """Extracts all top-level JSON objects from stdout/content (ignoring CLI warnings or fences)."""
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    decoder = json.JSONDecoder()
+    objs: list[dict[str, Any]] = []
+    pos = 0
+    while pos < len(cleaned):
+        idx = cleaned.find("{", pos)
+        if idx < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(cleaned, idx)
+            if isinstance(obj, dict):
+                objs.append(obj)
+            pos = end
+        except json.JSONDecodeError:
+            pos = idx + 1
+    return objs
+
+
+def _extract_first_json_object(raw_text: str, *, required_key: str | None = None) -> dict[str, Any]:
+    objs = _extract_json_objects(raw_text)
+    if required_key is not None:
+        for obj in objs:
+            if required_key in obj:
+                return obj
+    if objs:
+        return objs[0]
+    raise RuntimeError(f"AI model did not return valid JSON: {raw_text.strip()[:200]}")
+
+
+def _run_ai_assist(payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) -> dict[str, Any]:
+    """Real DashScope `qwen3.8-max` AI writer for Aircheck text inputs via `bl text chat`."""
+    if not isinstance(payload, dict):
+        raise ValueError("AI assist body must be a JSON object")
+
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode not in VALID_AI_ASSIST_MODES:
+        raise ValueError(f"mode must be one of {sorted(VALID_AI_ASSIST_MODES)}, got {mode!r}")
+
+    text = str(payload.get("text") or "").strip()
+    context = str(payload.get("context") or "").strip()
+    if not text and not context:
+        raise ValueError("Type a quick idea or draft text first before tapping AI assist.")
+
+    resolved_bl = bl_bin if bl_bin.is_file() else Path(shutil.which("bl") or "")
+    if not resolved_bl.is_file():
+        raise RuntimeError("Bailian CLI `bl` is not available on this Mac rig.")
+
+    system_prompt = (
+        "You are a deadpan, overly serious breaking-news cable TV producer writing punchy, "
+        "absurdly serious fake-news scripts for a solo anchor. Never explain the joke, never "
+        "add stage directions or brackets, and write natural spoken English ready to read on air."
+    )
+
+    if mode == "flesh_out_story":
+        target_segments = payload.get("target_segments", 2)
+        try:
+            seg_count = max(1, min(4, int(target_segments)))
+        except (TypeError, ValueError):
+            seg_count = 2
+        seed = text or context
+        user_prompt = (
+            f"Turn this rough story idea into a short, deadpan breaking-news broadcast:\n"
+            f"IDEA: {seed}\n\n"
+            f"Return STRICT JSON ONLY with this exact schema:\n"
+            f'{{"headline":"ALL CAPS MAX 34 CHARS","subline":"ALL CAPS TICKER MAX 42 CHARS",'
+            f'"segments":["segment 1 spoken anchor text (12-22 words)","segment 2 ..."]}}\n'
+            f"Produce exactly {seg_count} crisp spoken segments."
+        )
+    elif mode == "polish_headline":
+        user_prompt = (
+            f"Write ONE punchy ALL-CAPS breaking-news lower-third headline (max 34 characters, no quotes).\n"
+            f"Draft: {text}\nStory context: {context}\n"
+            f'Return STRICT JSON ONLY: {{"text":"HEADLINE HERE"}}'
+        )
+    elif mode == "polish_subline":
+        user_prompt = (
+            f"Write ONE punchy ALL-CAPS cable-news lower-third subline/ticker (max 42 characters, no quotes).\n"
+            f"Draft: {text}\nStory context: {context}\n"
+            f'Return STRICT JSON ONLY: {{"text":"SUBLINE HERE"}}'
+        )
+    else:  # polish_segment
+        user_prompt = (
+            f"Rewrite or flesh out this single spoken news anchor segment (14-24 words, deadpan serious cable news tone, "
+            f"plain spoken text with no stage directions or quotes).\n"
+            f"Segment draft: {text}\nStory context: {context}\n"
+            f'Return STRICT JSON ONLY: {{"text":"Spoken segment here."}}'
+        )
+
+    proc = subprocess.run(
+        [
+            str(resolved_bl),
+            "text",
+            "chat",
+            "--model",
+            "qwen3.8-max",
+            "--enable-thinking",
+            "false",
+            "--enable-search",
+            "false",
+            "--system",
+            system_prompt,
+            "--message",
+            user_prompt,
+            "--output",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(_summarize_subprocess_error("bl text chat", proc))
+
+    outer = _extract_first_json_object(proc.stdout)
+    content = str(outer.get("content") or "").strip()
+    if not content and isinstance(outer.get("choices"), list) and outer["choices"]:
+        first_choice = outer["choices"][0]
+        if isinstance(first_choice, dict):
+            msg = first_choice.get("message")
+            if isinstance(msg, dict):
+                content = str(msg.get("content") or "").strip()
+    if not content:
+        raise RuntimeError("AI writer returned empty content.")
+
+    inner = _extract_first_json_object(content)
+    if mode == "flesh_out_story":
+        headline = str(inner.get("headline") or "").strip().upper()[:40]
+        subline = str(inner.get("subline") or "").strip().upper()[:52]
+        raw_segs = inner.get("segments")
+        if not isinstance(raw_segs, list):
+            raise RuntimeError("AI response missing segments list.")
+        segments = [str(s).strip() for s in raw_segs if str(s).strip()]
+        if not segments:
+            raise RuntimeError("AI response returned zero segments.")
+        return {
+            "mode": mode,
+            "headline": headline or seed[:34].upper(),
+            "subline": subline or "DEVELOPING STORY · LIVE",
+            "segments": segments,
+        }
+
+    polished = str(inner.get("text") or "").strip()
+    if not polished:
+        raise RuntimeError("AI writer returned empty text.")
+    if mode in ("polish_headline", "polish_subline"):
+        polished = polished.upper()
+    return {"mode": mode, "text": polished}
 
 
 class OtaHttpServer(ThreadingHTTPServer):
@@ -1159,6 +1557,27 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             self._handle_health(head_only=head_only)
             return
 
+        if raw_path == "/v1/default-avatar":
+            self._handle_default_avatar(head_only=head_only)
+            return
+
+        if raw_path == "/v1/renders":
+            self._handle_list_renders(head_only=head_only)
+            return
+
+        if raw_path.startswith("/v1/render-thumbs/"):
+            remainder = raw_path[len("/v1/render-thumbs/") :]
+            parts = remainder.split("/")
+            if len(parts) != 1 or not parts[0]:
+                self._send_json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": "not_found", "detail": "Invalid render-thumb route"},
+                    head_only=head_only,
+                )
+                return
+            self._handle_render_thumb(parts[0], head_only=head_only)
+            return
+
         if raw_path == "/v1/bundles/latest/manifest.json":
             self._handle_manifest("latest", head_only=head_only)
             return
@@ -1241,6 +1660,44 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             payload["manifest_error"] = manifest_error
 
         self._send_json(HTTPStatus.OK, payload, head_only=head_only)
+
+    def _handle_default_avatar(self, *, head_only: bool) -> None:
+        avatar = self.server.render_manager.default_avatar_path
+        if not avatar.is_file() or avatar.stat().st_size == 0:
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {"error": "not_found", "detail": "Default anchor portrait not configured"},
+                head_only=head_only,
+            )
+            return
+        self._serve_file_with_range(
+            avatar,
+            _content_type_for_filename(avatar.name),
+            head_only=head_only,
+        )
+
+    def _handle_list_renders(self, *, head_only: bool) -> None:
+        items = self.server.render_manager.list_renders()
+        self._send_json(HTTPStatus.OK, {"renders": items}, head_only=head_only)
+
+    def _handle_render_thumb(self, filename: str, *, head_only: bool) -> None:
+        try:
+            thumb_path = self.server.render_manager.get_or_create_render_thumb(filename)
+        except PermissionError as exc:
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": "forbidden", "detail": str(exc)},
+                head_only=head_only,
+            )
+            return
+        if thumb_path is None:
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {"error": "not_found", "detail": f"Thumbnail for '{filename}' not found"},
+                head_only=head_only,
+            )
+            return
+        self._serve_file_with_range(thumb_path, "image/jpeg", head_only=head_only)
 
     def _handle_get_job(self, job_id: str, *, head_only: bool) -> None:
         try:
@@ -1463,6 +1920,9 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/render-video":
             self._handle_post_render_video()
             return
+        if parsed.path == "/v1/ai-assist":
+            self._handle_post_ai_assist()
+            return
 
         self._send_json(
             HTTPStatus.NOT_FOUND,
@@ -1524,6 +1984,37 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             return
 
         self._send_json(HTTPStatus.ACCEPTED, enqueued)
+
+    def _handle_post_ai_assist(self) -> None:
+        text_body = self._read_post_utf8_body(
+            max_bytes=256 * 1024,
+            empty_detail="Empty AI assist payload",
+        )
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"},
+            )
+            return
+        try:
+            result = _run_ai_assist(decoded)
+        except ValueError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "invalid_ai_request", "detail": str(exc)},
+            )
+            return
+        except Exception as exc:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY,
+                {"error": "ai_assist_failed", "detail": str(exc)},
+            )
+            return
+        self._send_json(HTTPStatus.OK, result)
 
 
 def create_ota_server(
