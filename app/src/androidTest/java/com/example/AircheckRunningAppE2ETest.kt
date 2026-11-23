@@ -260,19 +260,13 @@ class AircheckRunningAppE2ETest {
     }
 
     private fun captureScreenshot(dir: File, filename: String) {
-        composeRule.runOnUiThread {
-            runCatching {
-                val root = composeRule.activity.window.decorView.rootView
-                if (root.width > 0 && root.height > 0) {
-                    val bmp = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888)
-                    val canvas = Canvas(bmp)
-                    root.draw(canvas)
-                    FileOutputStream(File(dir, filename)).use { out ->
-                        bmp.compress(Bitmap.CompressFormat.PNG, 92, out)
-                    }
-                    bmp.recycle()
-                }
+        composeRule.waitForIdle()
+        val bmp = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+        if (bmp != null) {
+            FileOutputStream(File(dir, filename)).use { out ->
+                bmp.compress(Bitmap.CompressFormat.PNG, 92, out)
             }
+            bmp.recycle()
         }
     }
 }
