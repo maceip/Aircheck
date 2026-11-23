@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aircheck.local/schemas/clause_node.schema.json",
+  "title": "ClauseNode",
+  "description": "Canonical per-clause synthesis, 4-gate verification, and 48kHz zero-crossing token map contract shared across Android (Kotlin/C++ JNI) and the Home/Cloud Training Rig (Python).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "clause_id",
+    "raw_text",
+    "normalized_phonemes",
+    "selected_take_index",
+    "gap_after_ms",
+    "candidates"
+  ],
+  "properties": {
+    "clause_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-zA-Z0-9_-]+$"
+    },
+    "raw_text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "normalized_phonemes": {
+      "type": "string"
+    },
+    "acoustic_prefix_uri": {
+      "type": ["string", "null"],
+      "description": "Relative URI to previous winning clause tail (e.g. takes/c_003_winner_tail_1500ms.pcm, 48kHz f32 mono)."
+    },
+    "selected_take_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "gap_after_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3000
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TakeCandidate"
+      }
+    }
+  },
+  "$defs": {
+    "TakeCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "take_id",
+        "pcm_uri",
+        "seed",
+        "temperature",
+        "metrics",
+        "tokens"
+      ],
+      "properties": {
+        "take_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pcm_uri": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Relative URI to 48kHz Float32 little-endian mono PCM take."
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 2.0
+        },
+        "metrics": {
+          "$ref": "#/$defs/VerificationMetrics"
+        },
+        "tokens": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ZeroCrossingToken"
+          }
+        }
+      }
+    },
+    "VerificationMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cer",
+        "speaker_cosine_sim",
+        "utmos_score",
+        "syllables_per_sec",
+        "passed_all_gates"
+      ],
+      "properties": {
+        "cer": {
+          "type": "number",
+          "minimum": 0.0,
+          "description": "Gate 1: CTC Character Error Rate (strict 0.0 pass criterion)."
+        },
+        "speaker_cosine_sim": {
+          "type": "number",
+          "minimum": -1.0,
+          "maximum": 1.0,
+          "description": "Gate 2: WeSpeaker cosine similarity against enrolled speaker centroid."
+        },
+        "utmos_score": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 5.0,
+          "description": "Gate 3: UTMOSv2 predicted perceptual quality score."
+        },
+        "syllables_per_sec": {
+          "type": "number",
+          "minimum": 0.0,
+          "description": "Gate 4: Prosody pacing rate in syllables per second."
+        },
+        "passed_all_gates": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ZeroCrossingToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "word",
+        "start_sample",
+        "end_sample",
+        "zero_cross_in",
+        "zero_cross_out",
+        "f0_peak_sample"
+      ],
+      "properties": {
+        "word": {
+          "type": "string",
+          "minLength": 1
+        },
+        "start_sample": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_sample": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "zero_cross_in": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "zero_cross_out": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "f0_peak_sample": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "video_anchor_id": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

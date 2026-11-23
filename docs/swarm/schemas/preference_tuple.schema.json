@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aircheck.local/schemas/preference_tuple.schema.json",
+  "title": "PreferenceTuple",
+  "description": "Implicit Chosen-vs-Rejected human preference record emitted by the Hairline Clipper and uploaded as JSONL over Wi-Fi/Tailscale for nightly GRPO + On-Policy Self-Distillation (OPSD) adapter updates.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "timestamp_utc",
+    "bundle_version",
+    "script_id",
+    "clause_id",
+    "raw_text",
+    "normalized_phonemes",
+    "action_type",
+    "chosen_take_id",
+    "rejected_take_ids",
+    "gap_after_ms"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp_utc": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bundle_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "script_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "clause_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "raw_text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "normalized_phonemes": {
+      "type": "string"
+    },
+    "acoustic_prefix_uri": {
+      "type": ["string", "null"]
+    },
+    "action_type": {
+      "type": "string",
+      "enum": [
+        "TAKE_SWAP",
+        "GAP_ADJUST",
+        "BOUNDARY_TRIM",
+        "VIDEO_ANCHOR_SNAP",
+        "PHONEME_OVERRIDE"
+      ]
+    },
+    "chosen_take_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rejected_take_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "chosen_metrics": {
+      "type": ["object", "null"]
+    },
+    "rejected_metrics": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "gap_after_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trim_in_sample": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "trim_out_sample": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "video_anchor_id": {
+      "type": ["string", "null"]
+    }
+  }
+}
