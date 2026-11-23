@@ -457,6 +457,174 @@ class VerifierGateTest {
         assertTrue(fbank.all { it.isFinite() })
     }
 
+    @Test
+    fun dnsmosP808MelSpectrogram_matchesMicrosoftDnsChallengeLibrosaReference() {
+        val sig = makeParityReferenceSignal16k()
+
+        // Short 2.0s signal must tile cyclically to 9.01s (144,160), drop trailing 160 samples,
+        // and produce 1 window of exact [900, 120] features in [-1, 1].
+        val windows = OrtDnsmosP808Engine.buildWindowedMelFeatures(sig)
+        assertEquals(1, windows.size)
+        val feat = windows[0]
+        assertEquals(AudioDspMetrics.DNSMOS_TARGET_FRAMES * AudioDspMetrics.DNSMOS_MEL_BINS, feat.size)
+        assertTrue("All DNSMOS Mel features must be finite", feat.all { it.isFinite() })
+
+        var minVal = Float.POSITIVE_INFINITY
+        var maxVal = Float.NEGATIVE_INFINITY
+        var sum = 0.0
+        for (v in feat) {
+            if (v < minVal) minVal = v
+            if (v > maxVal) maxVal = v
+            sum += v.toDouble()
+        }
+        assertEquals(-1.0f, minVal, 1e-5f)
+        assertEquals(1.0f, maxVal, 1e-5f)
+        assertEquals(-0.6262509f, (sum / feat.size.toDouble()).toFloat(), 1e-4f)
+
+        // Exact golden coordinates computed by `librosa.feature.melspectrogram(y=seg[:-160],
+        // sr=16000, n_fft=321, hop_length=160, n_mels=120)` + `(power_to_db(ref=np.max) + 40) / 40`.
+        val expected = listOf(
+            Triple(0, 0, -0.3421761f),
+            Triple(0, 10, 0.0139379f),
+            Triple(15, 5, 0.6408461f),
+            Triple(15, 40, 0.2797655f),
+            Triple(100, 12, 0.0326921f),
+            Triple(100, 75, -0.4386942f),
+            Triple(450, 30, -1.0000000f),
+            Triple(450, 105, -1.0000000f),
+            Triple(899, 119, -1.0000000f)
+        )
+        for ((frame, bin, refVal) in expected) {
+            val actual = feat[frame * AudioDspMetrics.DNSMOS_MEL_BINS + bin]
+            assertEquals(
+                "DNSMOS feature mismatch at ($frame, $bin)",
+                refVal,
+                actual,
+                1e-4f
+            )
+        }
+
+        // Verify sliding-window hop count on > 10s signal (11.0s -> 2 hops of [900, 120]).
+        val longSig = FloatArray(11 * AudioDspMetrics.DNSMOS_SAMPLE_RATE_HZ) { idx ->
+            sig[idx % sig.size]
+        }
+        val longWindows = OrtDnsmosP808Engine.buildWindowedMelFeatures(longSig)
+        assertEquals(2, longWindows.size)
+        assertEquals(AudioDspMetrics.DNSMOS_TARGET_FRAMES * AudioDspMetrics.DNSMOS_MEL_BINS, longWindows[1].size)
+
+        // Verify leading/trailing digital-zero trimming leaves active signal intact.
+        val padded = FloatArray(sig.size + 400).also { sig.copyInto(it, destinationOffset = 200) }
+        val trimmed = AudioDspMetrics.trimDigitalSilence(padded)
+        assertTrue(trimmed.size <= sig.size)
+        assertTrue(trimmed.size >= sig.size - 16)
+    }
+
+    @Test
+    fun citrinetPerFeatureCmvn_matchesNemoReferenceAndPreservesWeSpeakerCmn() {
+        val sig = makeParityReferenceSignal16k()
+
+        // 1. NeMo Citrinet-512 per-feature CMVN: (x - mean) / (std + 1e-5)
+        val (cmvn, frames) = AudioDspMetrics.computeLogMelFilterbank(
+            pcm16k = sig,
+            numMelBins = 80,
+            frameLengthSamples = 400,
+            frameShiftSamples = 160,
+            fftSize = 512,
+            fMinHz = 20.0f,
+            fMaxHz = 7600.0f,
+            applyCmn = true,
+            applyCmvn = true
+        )
+        assertEquals(198, frames)
+        assertEquals(198 * 80, cmvn.size)
+        assertTrue(cmvn.all { it.isFinite() })
+
+        // Every feature channel must have mean ~= 0.0 and std ~= 1.0.
+        for (m in 0 until 80) {
+            var sum = 0.0
+            for (t in 0 until frames) sum += cmvn[t * 80 + m].toDouble()
+            val mean = sum / frames.toDouble()
+            var varSum = 0.0
+            for (t in 0 until frames) {
+                val d = cmvn[t * 80 + m].toDouble() - mean
+                varSum += d * d
+            }
+            val std = sqrt(varSum / frames.toDouble())
+            assertEquals("Channel $m CMVN mean must be 0", 0.0, mean, 1e-4)
+            assertEquals("Channel $m CMVN std must be 1", 1.0, std, 1e-3)
+        }
+
+        // Exact golden coordinates matching `enroll_voice_assets.compute_log_mel_filterbank(..., apply_cmvn=True)`.
+        val expected = listOf(
+            Triple(0, 0, -0.0272460f),
+            Triple(0, 20, 0.1789445f),
+            Triple(25, 10, 0.4846002f),
+            Triple(25, 50, -0.2743051f),
+            Triple(100, 15, -0.4776739f),
+            Triple(100, 70, -1.0237106f),
+            Triple(197, 5, -0.2810893f),
+            Triple(197, 79, 1.6078589f)
+        )
+        for ((frame, bin, refVal) in expected) {
+            val actual = cmvn[frame * 80 + bin]
+            assertEquals("Citrinet CMVN mismatch at ($frame, $bin)", refVal, actual, 1e-4f)
+        }
+
+        // 2. Verify OrtCtcAlignerEngine channel-first [C, T] transpose matches exact CMVN values.
+        val (transposed, ctcFrames) = OrtCtcAlignerEngine.buildCtcFeatureTensorData(
+            pcm16k = sig,
+            featDim = 80,
+            isChannelsFirstNemo = true
+        )
+        assertEquals(frames, ctcFrames)
+        for ((frame, bin, refVal) in expected) {
+            assertEquals(
+                "Transposed NeMo CTC tensor mismatch at ($frame, $bin)",
+                refVal,
+                transposed[bin * ctcFrames + frame],
+                1e-4f
+            )
+        }
+
+        // 3. Verify default WeSpeaker mode (applyCmn=true, applyCmvn=false) preserves unscaled variance.
+        val (cmnOnly, cmnFrames) = AudioDspMetrics.computeLogMelFilterbank(
+            pcm16k = sig,
+            numMelBins = 80,
+            applyCmn = true
+        )
+        assertEquals(frames, cmnFrames)
+        var maxChannelStd = 0.0
+        for (m in 0 until 80) {
+            var varSum = 0.0
+            for (t in 0 until cmnFrames) {
+                val v = cmnOnly[t * 80 + m].toDouble()
+                varSum += v * v
+            }
+            val std = sqrt(varSum / cmnFrames.toDouble())
+            if (std > maxChannelStd) maxChannelStd = std
+        }
+        assertTrue("WeSpeaker CMN-only std must remain unnormalized (> 2.0), got $maxChannelStd", maxChannelStd > 2.0)
+    }
+
+    private fun makeParityReferenceSignal16k(): FloatArray {
+        val sr = 16_000
+        val n = sr * 2
+        return FloatArray(n) { i ->
+            val t = i.toDouble() / sr.toDouble()
+            val env = 0.55 + 0.45 * sin(2.0 * PI * 3.5 * t)
+            val f0Phase = 2.0 * PI * (165.0 * t + 12.0 * sin(2.0 * PI * 1.2 * t))
+            val sample = env * (
+                0.25 * sin(f0Phase) +
+                    0.14 * sin(2.0 * f0Phase + 0.3) +
+                    0.08 * sin(5.0 * f0Phase + 0.7) +
+                    0.04 * sin(14.0 * f0Phase + 1.2)
+                ) +
+                0.008 * sin(2.0 * PI * (2800.0 * t + 900.0 * t * t)) +
+                0.005 * sin(2.0 * PI * (5200.0 * t + 600.0 * t * t))
+            sample.toFloat()
+        }
+    }
+
     // --- Deterministic Test Fixtures (Real Waveforms & Real Vector Math) ---
 
     private fun makeRealisticSpeechPcm(

@@ -8,6 +8,7 @@ import java.io.File
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
 import kotlin.math.exp
+import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.max
 
@@ -123,8 +124,9 @@ class OrtWeSpeakerEngine private constructor(
 
 /**
  * Production ONNX Runtime Android engine for Microsoft DNSMOS p808 (`dnsmos_p808.onnx`, 4 MB, <15ms).
- * Supports both `[1, T, 120]` 16 kHz log-Mel spectrogram (`model_v8.onnx`) and `[1, N]` 16 kHz
- * waveform exports.
+ * Supports both `[1, 900, 120]` official Microsoft DNS-Challenge 16 kHz log-Mel spectrogram
+ * (`model_v8.onnx`, `n_fft = 321`, `hop = 160`, `n_mels = 120`, `(power_to_db(ref=max) + 40) / 40`)
+ * and `[1, N]` 16 kHz waveform exports.
  */
 class OrtDnsmosP808Engine private constructor(
     private val env: OrtEnvironment,
@@ -141,74 +143,64 @@ class OrtDnsmosP808Engine private constructor(
         val shape = tensorInfo.shape
 
         val pcm16k = AudioDspMetrics.resample44kTo16k(pcm44k)
-        val inputTensor = when (shape.size) {
+        when (shape.size) {
             3 -> {
-                val melBins = if (shape[2] > 0) shape[2].toInt() else 120
-                val (mel, numFrames) = AudioDspMetrics.computeLogMelFilterbank(
+                val melBins = if (shape[2] > 0) shape[2].toInt() else AudioDspMetrics.DNSMOS_MEL_BINS
+                val targetFrames = if (shape[1] > 0) shape[1].toInt() else AudioDspMetrics.DNSMOS_TARGET_FRAMES
+                val windows = buildWindowedMelFeatures(
                     pcm16k = pcm16k,
-                    numMelBins = melBins,
-                    frameLengthSamples = 320,
-                    frameShiftSamples = 160,
-                    fftSize = 512,
-                    fMinHz = 0.0f,
-                    fMaxHz = 8000.0f,
-                    applyCmn = false
+                    targetFrames = targetFrames,
+                    melBins = melBins
                 )
-                val targetFrames = if (shape[1] > 0) shape[1].toInt() else numFrames
-                val finalMel = if (targetFrames == numFrames) {
-                    mel
-                } else {
-                    val sized = FloatArray(targetFrames * melBins)
-                    if (numFrames > 0) {
-                        var dstFrame = 0
-                        while (dstFrame < targetFrames) {
-                            val copyFrames = minOf(numFrames, targetFrames - dstFrame)
-                            mel.copyInto(
-                                destination = sized,
-                                destinationOffset = dstFrame * melBins,
-                                startIndex = 0,
-                                endIndex = copyFrames * melBins
-                            )
-                            dstFrame += copyFrames
+                require(windows.isNotEmpty()) { "DNSMOS p808 produced zero evaluation windows" }
+                var sumMos = 0.0
+                for (feat in windows) {
+                    val inputTensor = OnnxTensor.createTensor(
+                        env,
+                        FloatBuffer.wrap(feat),
+                        longArrayOf(1L, targetFrames.toLong(), melBins.toLong())
+                    )
+                    inputTensor.use { tensor ->
+                        session.run(mapOf(inputName to tensor)).use { result ->
+                            val outTensor = result.get(0) as? OnnxTensor
+                                ?: error("DNSMOS output 0 is not an OnnxTensor")
+                            val fb = outTensor.floatBuffer
+                            val scores = FloatArray(fb.remaining())
+                            fb.get(scores)
+                            require(scores.isNotEmpty()) { "DNSMOS p808 returned empty output tensor" }
+                            val mos = if (scores.size >= 3) scores[2] else scores[0]
+                            require(mos.isFinite()) { "DNSMOS p808 produced non-finite score" }
+                            sumMos += mos.toDouble()
                         }
                     }
-                    sized
                 }
-                OnnxTensor.createTensor(
-                    env,
-                    FloatBuffer.wrap(finalMel),
-                    longArrayOf(1L, targetFrames.toLong(), melBins.toLong())
-                )
+                (sumMos / windows.size.toDouble()).toFloat()
             }
             2 -> {
                 val targetLen = if (shape[1] > 0) shape[1].toInt() else pcm16k.size
-                val wave = FloatArray(targetLen)
-                if (pcm16k.isNotEmpty()) {
-                    var offset = 0
-                    while (offset < targetLen) {
-                        val copyLen = minOf(pcm16k.size, targetLen - offset)
-                        pcm16k.copyInto(wave, destinationOffset = offset, startIndex = 0, endIndex = copyLen)
-                        offset += copyLen
+                val wave = tileToMinLength(AudioDspMetrics.trimDigitalSilence(pcm16k), targetLen)
+                    .let { if (it.size == targetLen) it else it.copyOfRange(0, targetLen) }
+                val inputTensor = OnnxTensor.createTensor(
+                    env,
+                    FloatBuffer.wrap(wave),
+                    longArrayOf(1L, targetLen.toLong())
+                )
+                inputTensor.use { tensor ->
+                    session.run(mapOf(inputName to tensor)).use { result ->
+                        val outTensor = result.get(0) as? OnnxTensor
+                            ?: error("DNSMOS output 0 is not an OnnxTensor")
+                        val fb = outTensor.floatBuffer
+                        val scores = FloatArray(fb.remaining())
+                        fb.get(scores)
+                        require(scores.isNotEmpty()) { "DNSMOS p808 returned empty output tensor" }
+                        // Single-output p808 returns MOS at [0]; 3-output [SIG, BAK, OVRL] returns OVRL at [2].
+                        val mos = if (scores.size >= 3) scores[2] else scores[0]
+                        require(mos.isFinite()) { "DNSMOS p808 produced non-finite score" }
+                        mos
                     }
                 }
-                OnnxTensor.createTensor(env, FloatBuffer.wrap(wave), longArrayOf(1L, targetLen.toLong()))
             }
             else -> error("Unsupported DNSMOS p808 input tensor rank: ${shape.contentToString()}")
-        }
-
-        inputTensor.use { tensor ->
-            session.run(mapOf(inputName to tensor)).use { result ->
-                val outTensor = result.get(0) as? OnnxTensor
-                    ?: error("DNSMOS output 0 is not an OnnxTensor")
-                val fb = outTensor.floatBuffer
-                val scores = FloatArray(fb.remaining())
-                fb.get(scores)
-                require(scores.isNotEmpty()) { "DNSMOS p808 returned empty output tensor" }
-                // Single-output p808 returns MOS at [0]; 3-output [SIG, BAK, OVRL] returns OVRL at [2].
-                val mos = if (scores.size >= 3) scores[2] else scores[0]
-                require(mos.isFinite()) { "DNSMOS p808 produced non-finite score" }
-                mos
-            }
         }
     }
 
@@ -217,6 +209,82 @@ class OrtDnsmosP808Engine private constructor(
     }
 
     companion object {
+        private const val INPUT_LENGTH_SEC: Double = 9.01
+
+        internal fun tileToMinLength(audio: FloatArray, minSamples: Int): FloatArray {
+            if (audio.isEmpty() || audio.size >= minSamples) return audio
+            val tiled = FloatArray(minSamples)
+            var offset = 0
+            while (offset < minSamples) {
+                val copyLen = minOf(audio.size, minSamples - offset)
+                audio.copyInto(tiled, destinationOffset = offset, startIndex = 0, endIndex = copyLen)
+                offset += copyLen
+            }
+            return tiled
+        }
+
+        /**
+         * Prepares official Microsoft DNS-Challenge 9.01s sliding windows (1.0s hop) of
+         * `[targetFrames, melBins]` features (`n_fft = 321`, `hop = 160`, `n_mels = 120`,
+         * `(power_to_db(ref = max) + 40.0) / 40.0`) matching `enroll_voice_assets.DnsmosP808Engine`.
+         */
+        internal fun buildWindowedMelFeatures(
+            pcm16k: FloatArray,
+            targetFrames: Int = AudioDspMetrics.DNSMOS_TARGET_FRAMES,
+            melBins: Int = AudioDspMetrics.DNSMOS_MEL_BINS
+        ): List<FloatArray> {
+            require(pcm16k.isNotEmpty()) { "pcm16k must not be empty" }
+            val inputSamples = AudioDspMetrics.DNSMOS_INPUT_SAMPLES
+            val prepared = tileToMinLength(AudioDspMetrics.trimDigitalSilence(pcm16k), inputSamples)
+            val hop = AudioDspMetrics.DNSMOS_SAMPLE_RATE_HZ
+            val numHops = max(
+                1,
+                (floor(prepared.size.toDouble() / hop.toDouble()) - INPUT_LENGTH_SEC).toInt() + 1
+            )
+            val windows = ArrayList<FloatArray>(numHops)
+            for (idx in 0 until numHops) {
+                val start = idx * hop
+                val end = start + inputSamples
+                if (end > prepared.size) break
+                // Match `seg[:-160]` (144,000 samples -> exactly 900 centered frames at hop=160).
+                val seg = prepared.copyOfRange(start, end - AudioDspMetrics.DNSMOS_HOP_LENGTH)
+                val (mel, numFrames) = AudioDspMetrics.computeDnsmosP808MelSpectrogram(
+                    pcm16k = seg,
+                    sampleRateHz = AudioDspMetrics.DNSMOS_SAMPLE_RATE_HZ,
+                    fftSize = AudioDspMetrics.DNSMOS_FFT_SIZE,
+                    hopLength = AudioDspMetrics.DNSMOS_HOP_LENGTH,
+                    numMelBins = melBins
+                )
+                windows.add(fitFramesWithEdgePad(mel, numFrames, targetFrames, melBins))
+            }
+            return windows
+        }
+
+        private fun fitFramesWithEdgePad(
+            mel: FloatArray,
+            numFrames: Int,
+            targetFrames: Int,
+            melBins: Int
+        ): FloatArray {
+            if (numFrames == targetFrames) return mel
+            val sized = FloatArray(targetFrames * melBins)
+            if (numFrames <= 0) return sized
+            val copyFrames = minOf(numFrames, targetFrames)
+            mel.copyInto(sized, destinationOffset = 0, startIndex = 0, endIndex = copyFrames * melBins)
+            if (copyFrames < targetFrames) {
+                val lastRowStart = (copyFrames - 1) * melBins
+                for (f in copyFrames until targetFrames) {
+                    mel.copyInto(
+                        destination = sized,
+                        destinationOffset = f * melBins,
+                        startIndex = lastRowStart,
+                        endIndex = lastRowStart + melBins
+                    )
+                }
+            }
+            return sized
+        }
+
         fun create(env: OrtEnvironment, modelFile: File): Result<OrtDnsmosP808Engine> = runCatching {
             require(modelFile.isFile && modelFile.canRead() && modelFile.length() > 0L) {
                 "Missing or empty DNSMOS p808 ONNX model: ${modelFile.absolutePath}"
@@ -271,35 +339,22 @@ class OrtCtcAlignerEngine private constructor(
                         shape[2] > 0L -> shape[2].toInt()
                         else -> 80
                     }
-                    val (fbank, frames) = AudioDspMetrics.computeLogMelFilterbank(
+                    val (tensorData, frames) = buildCtcFeatureTensorData(
                         pcm16k = pcm16k,
-                        numMelBins = featDim,
-                        frameLengthSamples = 400,
-                        frameShiftSamples = 160,
-                        fftSize = 512,
-                        fMinHz = 20.0f,
-                        fMaxHz = 7600.0f,
-                        applyCmn = true
+                        featDim = featDim,
+                        isChannelsFirstNemo = isChannelsFirstNemo
                     )
                     numInputFrames = frames
                     if (isChannelsFirstNemo) {
-                        // NeMo Citrinet / Conformer CTC expects [B, featDim, T].
-                        val transposed = FloatArray(featDim * frames)
-                        for (t in 0 until frames) {
-                            val srcBase = t * featDim
-                            for (f in 0 until featDim) {
-                                transposed[f * frames + t] = fbank[srcBase + f]
-                            }
-                        }
                         OnnxTensor.createTensor(
                             env,
-                            FloatBuffer.wrap(transposed),
+                            FloatBuffer.wrap(tensorData),
                             longArrayOf(1L, featDim.toLong(), frames.toLong())
                         )
                     } else {
                         OnnxTensor.createTensor(
                             env,
-                            FloatBuffer.wrap(fbank),
+                            FloatBuffer.wrap(tensorData),
                             longArrayOf(1L, frames.toLong(), featDim.toLong())
                         )
                     }
@@ -453,6 +508,39 @@ class OrtCtcAlignerEngine private constructor(
     }
 
     companion object {
+        /**
+         * Builds per-feature CMVN-normalized (`(x - mean) / (std + 1e-5)`) log-Mel features
+         * matching NeMo Citrinet-512 (`normalize_type: per_feature`). When `isChannelsFirstNemo`
+         * is true, transposes `[T, C]` to `[C, T]` for `[1, 80, T]` NeMo ONNX input.
+         */
+        internal fun buildCtcFeatureTensorData(
+            pcm16k: FloatArray,
+            featDim: Int = 80,
+            isChannelsFirstNemo: Boolean = true
+        ): Pair<FloatArray, Int> {
+            val (fbank, frames) = AudioDspMetrics.computeLogMelFilterbank(
+                pcm16k = pcm16k,
+                numMelBins = featDim,
+                frameLengthSamples = 400,
+                frameShiftSamples = 160,
+                fftSize = 512,
+                fMinHz = 20.0f,
+                fMaxHz = 7600.0f,
+                applyCmn = true,
+                applyCmvn = true
+            )
+            if (!isChannelsFirstNemo) return fbank to frames
+            // NeMo Citrinet / Conformer CTC expects [B, featDim, T].
+            val transposed = FloatArray(featDim * frames)
+            for (t in 0 until frames) {
+                val srcBase = t * featDim
+                for (f in 0 until featDim) {
+                    transposed[f * frames + t] = fbank[srcBase + f]
+                }
+            }
+            return transposed to frames
+        }
+
         fun validateModelDir(dir: File): Result<Pair<File, File>> = runCatching {
             require(dir.isDirectory && dir.canRead()) {
                 "Missing sherpa_ctc_model_dir directory: ${dir.absolutePath}"

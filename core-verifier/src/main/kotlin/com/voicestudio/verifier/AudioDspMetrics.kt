@@ -11,6 +11,8 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.exp
+import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.ln
 import kotlin.math.log10
@@ -35,6 +37,14 @@ object AudioDspMetrics {
     const val MAX_TAIL_HF_SPECTRAL_FLUX: Float = 0.008f
     const val MAX_TAIL_HF_ENERGY_DB: Float = -48.0f
     const val MAX_TAIL_PEAK_FRAME_RMS_DB: Float = -38.0f
+
+    // Official Microsoft DNS-Challenge DNSMOS p808 (model_v8.onnx) preprocessing constants.
+    const val DNSMOS_SAMPLE_RATE_HZ: Int = 16_000
+    const val DNSMOS_INPUT_SAMPLES: Int = 144_160 // 9.01s @ 16 kHz
+    const val DNSMOS_FFT_SIZE: Int = 321          // 161 RFFT frequency bins
+    const val DNSMOS_HOP_LENGTH: Int = 160        // 10 ms hop @ 16 kHz
+    const val DNSMOS_MEL_BINS: Int = 120
+    const val DNSMOS_TARGET_FRAMES: Int = 900
 
     data class TailAnalysisResult(
         val tailRmsDb: Float,
@@ -629,8 +639,34 @@ object AudioDspMetrics {
     }
 
     /**
+     * Trims leading and trailing near-digital-zero padding without modifying active audio.
+     * Mirrors `enroll_voice_assets.trim_digital_silence`.
+     */
+    fun trimDigitalSilence(pcm: FloatArray, threshold: Float = 1e-5f): FloatArray {
+        if (pcm.isEmpty()) return pcm
+        var first = -1
+        for (i in pcm.indices) {
+            if (abs(pcm[i]) > threshold) {
+                first = i
+                break
+            }
+        }
+        if (first < 0) return pcm
+        var last = first
+        for (i in pcm.lastIndex downTo first) {
+            if (abs(pcm[i]) > threshold) {
+                last = i
+                break
+            }
+        }
+        return if (first == 0 && last == pcm.lastIndex) pcm else pcm.copyOfRange(first, last + 1)
+    }
+
+    /**
      * Computes row-major `[numFrames, numMelBins]` log-Mel filterbank features on 16 kHz audio for
-     * WeSpeaker ResNet34 (`numMelBins = 80`), DNSMOS p808 (`numMelBins = 120`), and CTC models.
+     * WeSpeaker ResNet34 (`numMelBins = 80`, `applyCmn = true, applyCmvn = false`) and NeMo
+     * Citrinet-512 CTC (`numMelBins = 80`, `applyCmn = true, applyCmvn = true`, matching
+     * `normalize_type: per_feature`).
      */
     fun computeLogMelFilterbank(
         pcm16k: FloatArray,
@@ -641,7 +677,9 @@ object AudioDspMetrics {
         fftSize: Int = 512,
         fMinHz: Float = 20.0f,
         fMaxHz: Float = 7600.0f,
-        applyCmn: Boolean = true
+        applyCmn: Boolean = true,
+        applyCmvn: Boolean = false,
+        logFloor: Double = 1e-10
     ): Pair<FloatArray, Int> {
         if (pcm16k.isEmpty()) return FloatArray(0) to 0
         val padded = if (pcm16k.size < frameLengthSamples) {
@@ -718,24 +756,280 @@ object AudioDspMetrics {
                     val w = weights[k]
                     if (w > 0.0) energy += w * powerSpec[k]
                 }
-                features[base + m] = ln(max(energy, 1e-10)).toFloat()
+                features[base + m] = ln(max(energy, logFloor)).toFloat()
             }
         }
 
-        if (applyCmn && numFrames > 1) {
+        if ((applyCmn || applyCmvn) && numFrames > 1) {
             for (m in 0 until numMelBins) {
                 var sum = 0.0
                 for (t in 0 until numFrames) {
                     sum += features[t * numMelBins + m].toDouble()
                 }
-                val mean = (sum / numFrames.toDouble()).toFloat()
+                val mean = sum / numFrames.toDouble()
+                var varSum = 0.0
                 for (t in 0 until numFrames) {
-                    features[t * numMelBins + m] -= mean
+                    val centered = features[t * numMelBins + m].toDouble() - mean
+                    features[t * numMelBins + m] = centered.toFloat()
+                    if (applyCmvn) {
+                        varSum += centered * centered
+                    }
+                }
+                if (applyCmvn) {
+                    val invStd = 1.0 / (sqrt(varSum / numFrames.toDouble()) + 1e-5)
+                    for (t in 0 until numFrames) {
+                        features[t * numMelBins + m] =
+                            (features[t * numMelBins + m].toDouble() * invStd).toFloat()
+                    }
                 }
             }
         }
 
         return features to numFrames
+    }
+
+    private class DnsmosSpectrogramPlan(
+        val sampleRateHz: Int,
+        val fftSize: Int,
+        val numMelBins: Int
+    ) {
+        val numSpecBins: Int = fftSize / 2 + 1
+        val isPowerOfTwo: Boolean = fftSize > 0 && (fftSize and (fftSize - 1)) == 0
+        val bluesteinSize: Int = if (isPowerOfTwo) fftSize else nextPowerOfTwo(2 * fftSize - 1)
+
+        // Periodic Hann window matching scipy/librosa `get_window("hann", n_fft, fftbins=True)`.
+        val window: DoubleArray = DoubleArray(fftSize) { n ->
+            0.5 - 0.5 * cos((2.0 * PI * n) / fftSize.toDouble())
+        }
+
+        // Bluestein chirp & pre-transformed kernel B = FFT(b) for arbitrary-length DFT (e.g. n_fft = 321).
+        val chirpReal: DoubleArray
+        val chirpImag: DoubleArray
+        val kernelFftReal: DoubleArray
+        val kernelFftImag: DoubleArray
+
+        // Sparse Slaney Mel filterbank (`htk = false, norm = "slaney"`) matching `librosa.filters.mel`.
+        val melStartBin: IntArray = IntArray(numMelBins)
+        val melEndBin: IntArray = IntArray(numMelBins)
+        val melWeights: Array<DoubleArray>
+
+        init {
+            if (!isPowerOfTwo) {
+                chirpReal = DoubleArray(fftSize)
+                chirpImag = DoubleArray(fftSize)
+                val twoN = 2L * fftSize.toLong()
+                for (n in 0 until fftSize) {
+                    val modSq = (n.toLong() * n.toLong()) % twoN
+                    val angle = PI * modSq.toDouble() / fftSize.toDouble()
+                    chirpReal[n] = cos(angle)
+                    chirpImag[n] = -sin(angle)
+                }
+                kernelFftReal = DoubleArray(bluesteinSize)
+                kernelFftImag = DoubleArray(bluesteinSize)
+                kernelFftReal[0] = 1.0
+                kernelFftImag[0] = 0.0
+                for (n in 1 until fftSize) {
+                    kernelFftReal[n] = chirpReal[n]
+                    kernelFftImag[n] = -chirpImag[n]
+                    kernelFftReal[bluesteinSize - n] = chirpReal[n]
+                    kernelFftImag[bluesteinSize - n] = -chirpImag[n]
+                }
+                radix2Fft(kernelFftReal, kernelFftImag)
+            } else {
+                chirpReal = DoubleArray(0)
+                chirpImag = DoubleArray(0)
+                kernelFftReal = DoubleArray(0)
+                kernelFftImag = DoubleArray(0)
+            }
+
+            // Slaney mel scale constants matching `librosa.hz_to_mel(..., htk=False)`.
+            val fMin = 0.0
+            val fMax = sampleRateHz * 0.5
+            val fSp = 200.0 / 3.0
+            val minLogHz = 1000.0
+            val minLogMel = (minLogHz - fMin) / fSp
+            val logStep = ln(6.4) / 27.0
+
+            fun hzToMelSlaney(hz: Double): Double =
+                if (hz >= minLogHz) minLogMel + ln(hz / minLogHz) / logStep else (hz - fMin) / fSp
+
+            fun melToHzSlaney(mel: Double): Double =
+                if (mel >= minLogMel) minLogHz * exp(logStep * (mel - minLogMel)) else fMin + fSp * mel
+
+            val melMin = hzToMelSlaney(fMin)
+            val melMax = hzToMelSlaney(fMax)
+            val melFreqs = DoubleArray(numMelBins + 2) { m ->
+                melToHzSlaney(melMin + (melMax - melMin) * m.toDouble() / (numMelBins + 1).toDouble())
+            }
+            val binFreqStep = sampleRateHz.toDouble() / fftSize.toDouble()
+
+            melWeights = Array(numMelBins) { m ->
+                val lower = melFreqs[m]
+                val center = melFreqs[m + 1]
+                val upper = melFreqs[m + 2]
+                val diffLo = center - lower
+                val diffHi = upper - center
+                val enorm = if (upper > lower) 2.0 / (upper - lower) else 0.0
+                var first = numSpecBins
+                var last = -1
+                val dense = DoubleArray(numSpecBins)
+                for (k in 0 until numSpecBins) {
+                    val f = k * binFreqStep
+                    val ramLo = if (diffLo > 0.0) (f - lower) / diffLo else 0.0
+                    val ramHi = if (diffHi > 0.0) (upper - f) / diffHi else 0.0
+                    val w = max(0.0, min(ramLo, ramHi)) * enorm
+                    if (w > 0.0) {
+                        dense[k] = w
+                        if (k < first) first = k
+                        if (k > last) last = k
+                    }
+                }
+                if (last >= first) {
+                    melStartBin[m] = first
+                    melEndBin[m] = last
+                    dense.copyOfRange(first, last + 1)
+                } else {
+                    melStartBin[m] = 0
+                    melEndBin[m] = -1
+                    DoubleArray(0)
+                }
+            }
+        }
+    }
+
+    private val defaultDnsmosPlan: DnsmosSpectrogramPlan by lazy {
+        DnsmosSpectrogramPlan(DNSMOS_SAMPLE_RATE_HZ, DNSMOS_FFT_SIZE, DNSMOS_MEL_BINS)
+    }
+
+    private fun nextPowerOfTwo(n: Int): Int {
+        var p = 1
+        while (p < n) p = p shl 1
+        return p
+    }
+
+    /**
+     * Computes row-major `[numFrames, numMelBins]` Microsoft DNS-Challenge DNSMOS p808 Mel
+     * spectrogram features matching official `dnsmos_local.py` / `librosa`:
+     *   - `n_fft = 321` (161 RFFT bins), `hop_length = 160`, `n_mels = 120`
+     *   - Centered zero-padded STFT (`pad = n_fft / 2`) with periodic Hann window
+     *   - Slaney Mel scale & Slaney area normalization (`2.0 / (f_upper - f_lower)`)
+     *   - `(power_to_db(mel, ref = max, amin = 1e-10, top_db = 80.0) + 40.0) / 40.0` in `[-1, 1]`
+     *
+     * For the canonical 9.01s segment sliced as `seg[0 until 144_000]` (`seg[:-160]`), yields
+     * exact `[900, 120]` float32 features matching `librosa` to `< 1e-5`.
+     */
+    fun computeDnsmosP808MelSpectrogram(
+        pcm16k: FloatArray,
+        sampleRateHz: Int = DNSMOS_SAMPLE_RATE_HZ,
+        fftSize: Int = DNSMOS_FFT_SIZE,
+        hopLength: Int = DNSMOS_HOP_LENGTH,
+        numMelBins: Int = DNSMOS_MEL_BINS,
+        topDb: Double = 80.0,
+        amin: Double = 1e-10
+    ): Pair<FloatArray, Int> {
+        if (pcm16k.isEmpty() || fftSize <= 1 || hopLength <= 0 || numMelBins <= 0) {
+            return FloatArray(0) to 0
+        }
+        val plan = if (
+            sampleRateHz == DNSMOS_SAMPLE_RATE_HZ &&
+            fftSize == DNSMOS_FFT_SIZE &&
+            numMelBins == DNSMOS_MEL_BINS
+        ) {
+            defaultDnsmosPlan
+        } else {
+            DnsmosSpectrogramPlan(sampleRateHz, fftSize, numMelBins)
+        }
+
+        val pad = fftSize / 2
+        val paddedLen = pcm16k.size + 2 * pad
+        if (paddedLen < fftSize) return FloatArray(0) to 0
+        val numFrames = 1 + (paddedLen - fftSize) / hopLength
+        val numSpecBins = plan.numSpecBins
+
+        val melPower = DoubleArray(numFrames * numMelBins)
+        val powerSpec = DoubleArray(numSpecBins)
+        val bufLen = plan.bluesteinSize
+        val aReal = DoubleArray(bufLen)
+        val aImag = DoubleArray(bufLen)
+        val invBluesteinScaleSq = 1.0 / (bufLen.toDouble() * bufLen.toDouble())
+        var maxMelPower = 0.0
+
+        for (t in 0 until numFrames) {
+            val paddedStart = t * hopLength
+            aReal.fill(0.0)
+            aImag.fill(0.0)
+
+            if (plan.isPowerOfTwo) {
+                for (n in 0 until fftSize) {
+                    val srcIdx = paddedStart + n - pad
+                    if (srcIdx in pcm16k.indices) {
+                        aReal[n] = pcm16k[srcIdx].toDouble() * plan.window[n]
+                    }
+                }
+                radix2Fft(aReal, aImag)
+                for (k in 0 until numSpecBins) {
+                    powerSpec[k] = aReal[k] * aReal[k] + aImag[k] * aImag[k]
+                }
+            } else {
+                for (n in 0 until fftSize) {
+                    val srcIdx = paddedStart + n - pad
+                    if (srcIdx in pcm16k.indices) {
+                        val xw = pcm16k[srcIdx].toDouble() * plan.window[n]
+                        aReal[n] = xw * plan.chirpReal[n]
+                        aImag[n] = xw * plan.chirpImag[n]
+                    }
+                }
+                radix2Fft(aReal, aImag)
+                val bR = plan.kernelFftReal
+                val bI = plan.kernelFftImag
+                for (i in 0 until bufLen) {
+                    val ar = aReal[i]
+                    val ai = aImag[i]
+                    val br = bR[i]
+                    val bi = bI[i]
+                    // Conjugate product to evaluate IFFT via forward FFT: IFFT(z) = conj(FFT(conj(z))) / M.
+                    aReal[i] = ar * br - ai * bi
+                    aImag[i] = -(ar * bi + ai * br)
+                }
+                radix2Fft(aReal, aImag)
+                // |X[k]|^2 = |exp(-i*pi*k^2/N) * conv[k]|^2 = (convR[k]^2 + convI[k]^2) / M^2.
+                for (k in 0 until numSpecBins) {
+                    powerSpec[k] = (aReal[k] * aReal[k] + aImag[k] * aImag[k]) * invBluesteinScaleSq
+                }
+            }
+
+            val base = t * numMelBins
+            for (m in 0 until numMelBins) {
+                val startBin = plan.melStartBin[m]
+                val endBin = plan.melEndBin[m]
+                if (endBin < startBin) continue
+                val weights = plan.melWeights[m]
+                var energy = 0.0
+                for (k in startBin..endBin) {
+                    energy += weights[k - startBin] * powerSpec[k]
+                }
+                melPower[base + m] = energy
+                if (energy > maxMelPower) maxMelPower = energy
+            }
+        }
+
+        // Exact `librosa.power_to_db(mel, ref=np.max, amin=1e-10, top_db=80.0)` + `(db + 40.0) / 40.0`.
+        val ref = max(amin, maxMelPower)
+        val logRef = 10.0 * log10(ref)
+        val dbValues = DoubleArray(melPower.size)
+        var maxDb = Double.NEGATIVE_INFINITY
+        for (i in melPower.indices) {
+            val db = 10.0 * log10(max(amin, melPower[i])) - logRef
+            dbValues[i] = db
+            if (db > maxDb) maxDb = db
+        }
+        val minAllowedDb = maxDb - topDb
+        val out = FloatArray(melPower.size)
+        for (i in dbValues.indices) {
+            val clamped = max(dbValues[i], minAllowedDb)
+            out[i] = ((clamped + 40.0) / 40.0).toFloat()
+        }
+        return out to numFrames
     }
 
     fun ctcGreedyDecode(
