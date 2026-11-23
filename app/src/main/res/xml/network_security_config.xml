@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allows cleartext HTTP to private LAN (10.0.0.0/8, 192.168.0.0/16),
+         Tailscale CGNAT (100.64.0.0/10), and loopback (127.0.0.1) Mac Studio rig
+         endpoints on Android 16/17 while keeping standard system CA trust for HTTPS. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

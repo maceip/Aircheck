@@ -64,7 +64,9 @@ class AircheckContainer(context: Context) {
     val scriptGateway: ScriptGateway by lazy { CloudScriptGateway(aiRepo) }
     val ingestGateway: IngestGateway by lazy { CloudIngestGateway(okHttpClient) }
     val poseGateGateway: PoseGateGateway by lazy { CloudPoseGateGateway(casStore, okHttpClient) }
-    val renderJobGateway: RenderJobGateway by lazy { CloudRenderJobGateway(appContext, casStore) }
+    val renderJobGateway: CloudRenderJobGateway by lazy {
+        CloudRenderJobGateway(appContext, casStore, okHttpClient)
+    }
     val personaTrainingGateway: PersonaTrainingGateway by lazy { CloudPersonaTrainingGateway(appContext) }
 
     // VoiceStudio Bare-Metal Local Synthesis, Wait-Free Oboe EDL & Tailscale OTA Sync

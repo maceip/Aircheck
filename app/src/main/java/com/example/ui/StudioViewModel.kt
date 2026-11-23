@@ -20,6 +20,7 @@ import com.example.data.Stage4Mode
 import com.example.data.StageProviderSettings
 import com.example.data.VoiceSource
 import com.example.data.estimateDurationSeconds
+import com.example.data.gateway.MacRigJobSnapshot
 import com.example.data.local.CasMediaStore
 import com.example.data.local.StudioSettings
 import com.example.data.remote.ActiveModels
@@ -50,15 +51,35 @@ import com.voicestudio.ui.PcmWaveformExtractor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+
+enum class RigConnectionStatus {
+    IDLE,
+    CHECKING,
+    ONLINE,
+    ERROR
+}
+
+data class RigHealthUiState(
+    val status: RigConnectionStatus = RigConnectionStatus.IDLE,
+    val loraVersion: Int = 0,
+    val bundleVersion: String? = null,
+    val pendingPreferences: Int = 0,
+    val renderBridgeAvailable: Boolean = false,
+    val errorMessage: String? = null
+)
 
 data class StudioUiState(
     val projects: List<ScriptProject> = emptyList(),
@@ -90,6 +111,7 @@ data class StudioUiState(
     val statusNotice: String? = null,
     val activeModels: ActiveModels = ActiveModels(),
     val otaBundleState: OtaBundleState = OtaBundleState(),
+    val rigHealth: RigHealthUiState = RigHealthUiState(),
     val synthesisProgress: ClauseSynthesisProgress = ClauseSynthesisProgress(),
     val unsyncedPreferenceCount: Int = 0,
     val measuredVmRssMb: Int? = null,
@@ -124,6 +146,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private var jobsObserverJob: Job? = null
     private var personaObserverJob: Job? = null
     private var voiceManifestObserverJob: Job? = null
+    private var rigHealthCheckJob: Job? = null
+    private val macRigPollingJobs = mutableMapOf<String, Job>()
+    private val scriptSaveMutex = Mutex()
+    private val clipperSaveMutex = Mutex()
     private var activeClipperProjectId: String? = null
     private var edlPlayerInitialized: Boolean = false
     private var activeRecordingFile: File? = null
@@ -198,10 +224,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         loadWaveformForProject(chosen)
                     }
                 } else {
-                    val currentId = _uiState.value.activeProject.id
-                    val updatedActive = savedProjects.firstOrNull { it.id == currentId }
-                        ?: savedProjects.firstOrNull()
-                        ?: _uiState.value.activeProject
+                    val currentActive = _uiState.value.activeProject
+                    val fromRoom = savedProjects.firstOrNull { it.id == currentActive.id }
+                    val updatedActive = when {
+                        fromRoom != null && fromRoom.updatedAtMillis >= currentActive.updatedAtMillis -> fromRoom
+                        fromRoom != null -> currentActive
+                        else -> savedProjects.firstOrNull() ?: currentActive
+                    }
                     _uiState.update { it.copy(projects = savedProjects, activeProject = updatedActive) }
                 }
             }
@@ -370,12 +399,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             state.copy(activeProject = stamped, projects = updatedList)
         }
         viewModelScope.launch {
-            localRepo.saveScript(stamped)
-            profileStore.setActiveScriptId(stamped.id)
-            if (pushCloud && currentUid != null) {
-                val res = firestoreRepo.syncProject(stamped)
-                if (res.isFailure) {
-                    localRepo.enqueueOutbox("script", stamped.id, "UPSERT", "{}")
+            scriptSaveMutex.withLock {
+                localRepo.saveScript(stamped)
+                profileStore.setActiveScriptId(stamped.id)
+                if (pushCloud && currentUid != null) {
+                    val res = firestoreRepo.syncProject(stamped)
+                    if (res.isFailure) {
+                        localRepo.enqueueOutbox("script", stamped.id, "UPSERT", "{}")
+                    }
                 }
             }
         }
@@ -1067,12 +1098,100 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         audioEngine.playWavFile(viewModelScope, wavFile)
     }
 
-    // --- Cloud Render Enqueue (Firebase Cloud Functions v2 -> Cloud Tasks DAG) ---
+    // --- Direct Mac Rig Render Bridge & Cloud Render Enqueue ---
 
     fun enqueueCloudRender() {
+        renderActiveProject()
+    }
+
+    /**
+     * Routes directly to the Mac Studio Rig (`POST {tailscaleRigUrl}/v1/render-video`) whenever
+     * `tailscaleRigUrl` is configured (zero Firebase/auth requirement), polling live job status
+     * into Room and caching the finished MP4 in `CasMediaStore`. Falls back to the Firebase Cloud
+     * Functions pipeline only when no Mac Rig URL is configured.
+     */
+    fun renderActiveProject(pollIntervalMs: Long = MAC_RIG_POLL_INTERVAL_MS) {
         val current = _uiState.value.activeProject
         val settings = _uiState.value.settings
+        val rigUrl = settings.tailscaleRigUrl.trim()
         val photoSha = current.stageConfig.activePhotoSha ?: settings.persona.defaultPhotoSha.ifBlank { null }
+
+        if (rigUrl.isNotBlank()) {
+            if (current.voiceSource == VoiceSource.ENROLLED_VOICE_CLONE && current.activeBeats.isEmpty()) {
+                _uiState.update { it.copy(errorMessage = "Write at least one spoken beat before rendering.") }
+                return
+            }
+            if (current.voiceSource == VoiceSource.MIC_VOICEOVER &&
+                casStore.fileForSha(current.masterAudioSha, "wav") == null
+            ) {
+                _uiState.update {
+                    it.copy(errorMessage = "Record a mic voiceover take before rendering in Mic Voiceover mode.")
+                }
+                return
+            }
+
+            viewModelScope.launch {
+                _uiState.update { it.copy(isEnqueuingRender = true, errorMessage = null) }
+                try {
+                    val enqueued = renderJobGateway.enqueueMacRigRender(
+                        rigBaseUrl = rigUrl,
+                        project = current,
+                        photoSha = photoSha,
+                        resolution = "720P",
+                        ratio = "9:16",
+                        maxDurationSec = 10
+                    )
+                    val now = System.currentTimeMillis()
+                    val clip = ClipRecord(
+                        id = enqueued.clipId,
+                        scriptId = current.id,
+                        jobId = enqueued.jobId,
+                        title = current.title.ifBlank { "Untitled Aircheck" },
+                        photoSha = photoSha,
+                        voiceSha = current.masterAudioSha,
+                        alignSha = null,
+                        lipsyncSha = null,
+                        finalSha = null,
+                        status = RenderJobStatus.QUEUED,
+                        progressFraction = 0.05f,
+                        stageDetail = "Queued on Mac Studio rig",
+                        errorMessage = null,
+                        durationMs = current.totalActiveSeconds * 1000L,
+                        waveformPeaks = _uiState.value.waveformPeaks,
+                        thumbHash = null,
+                        alignedWords = emptyList(),
+                        chyronHeadline = current.stageConfig.chyronHeadline.ifBlank { current.title },
+                        chyronSubline = current.stageConfig.chyronSubline,
+                        remoteLipsyncUrl = null,
+                        remoteFinalUrl = null,
+                        exportedUri = null,
+                        createdAtMillis = now,
+                        updatedAtMillis = now
+                    )
+                    localRepo.upsertClip(clip)
+                    _uiState.update {
+                        it.copy(
+                            isEnqueuingRender = false,
+                            liveNavToClipId = clip.id,
+                            statusNotice = "Render queued on Mac Rig (${enqueued.jobId.take(8)})."
+                        )
+                    }
+                    startMacRigJobPolling(
+                        rigBaseUrl = rigUrl,
+                        initialClip = clip,
+                        pollIntervalMs = pollIntervalMs
+                    )
+                } catch (e: Exception) {
+                    _uiState.update {
+                        it.copy(
+                            isEnqueuingRender = false,
+                            errorMessage = e.localizedMessage ?: "Unable to enqueue Mac Rig render."
+                        )
+                    }
+                }
+            }
+            return
+        }
 
         if (current.activeBeats.isEmpty()) {
             _uiState.update { it.copy(errorMessage = "Write at least one spoken beat before rendering.") }
@@ -1137,6 +1256,156 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
+    }
+
+    private fun startMacRigJobPolling(
+        rigBaseUrl: String,
+        initialClip: ClipRecord,
+        pollIntervalMs: Long
+    ) {
+        macRigPollingJobs.remove(initialClip.id)?.cancel()
+        val intervalMs = pollIntervalMs.coerceAtLeast(25L)
+        macRigPollingJobs[initialClip.id] = viewModelScope.launch {
+            var consecutiveErrors = 0
+            try {
+                while (isActive) {
+                    delay(intervalMs)
+                    val pollResult = runCatching {
+                        renderJobGateway.pollMacRigJob(rigBaseUrl, initialClip.jobId)
+                    }
+                    if (pollResult.isFailure) {
+                        val err = pollResult.exceptionOrNull()
+                        if (err is CancellationException) throw err
+                        consecutiveErrors++
+                        if (consecutiveErrors >= 5) {
+                            val latest = localRepo.getClipById(initialClip.id) ?: initialClip
+                            val errMsg = err?.localizedMessage ?: "Lost connection to Mac Rig while polling."
+                            localRepo.upsertClip(
+                                latest.copy(
+                                    status = RenderJobStatus.FAILED,
+                                    stageDetail = "Rig unreachable",
+                                    errorMessage = errMsg,
+                                    updatedAtMillis = System.currentTimeMillis()
+                                )
+                            )
+                            _uiState.update { it.copy(errorMessage = errMsg) }
+                            break
+                        }
+                        continue
+                    }
+
+                    consecutiveErrors = 0
+                    val snapshot = pollResult.getOrThrow()
+                    val latest = localRepo.getClipById(initialClip.id) ?: initialClip
+
+                    when (snapshot.status) {
+                        RenderJobStatus.READY -> {
+                            val videoUrl = snapshot.videoUrl
+                            if (videoUrl.isNullOrBlank()) {
+                                val msg = "Mac Rig reported READY without a video URL."
+                                localRepo.upsertClip(
+                                    latest.copy(
+                                        status = RenderJobStatus.FAILED,
+                                        stageDetail = "Missing video URL",
+                                        errorMessage = msg,
+                                        updatedAtMillis = System.currentTimeMillis()
+                                    )
+                                )
+                                _uiState.update { it.copy(errorMessage = msg) }
+                                break
+                            }
+
+                            val resolvedDuration = if (snapshot.durationMs > 0L) snapshot.durationMs else latest.durationMs
+                            localRepo.upsertClip(
+                                latest.copy(
+                                    status = RenderJobStatus.PACKAGING,
+                                    progressFraction = 0.95f,
+                                    stageDetail = "Caching MP4 locally",
+                                    remoteFinalUrl = videoUrl,
+                                    durationMs = resolvedDuration,
+                                    errorMessage = null,
+                                    updatedAtMillis = System.currentTimeMillis()
+                                )
+                            )
+
+                            val downloadRes = runCatching {
+                                renderJobGateway.downloadRenderedMp4ToCas(videoUrl)
+                            }
+                            downloadRes.onSuccess { stored ->
+                                val currentClip = localRepo.getClipById(initialClip.id) ?: latest
+                                localRepo.upsertClip(
+                                    currentClip.copy(
+                                        status = RenderJobStatus.READY,
+                                        progressFraction = 1f,
+                                        stageDetail = formatMacRigReadyDetail(snapshot),
+                                        finalSha = stored.sha256,
+                                        remoteFinalUrl = videoUrl,
+                                        durationMs = resolvedDuration,
+                                        errorMessage = null,
+                                        updatedAtMillis = System.currentTimeMillis()
+                                    )
+                                )
+                                _uiState.update {
+                                    it.copy(statusNotice = "Clip ready (${currentClip.title.ifBlank { "Aircheck" }}).")
+                                }
+                            }.onFailure { err ->
+                                if (err is CancellationException) throw err
+                                val msg = err.localizedMessage ?: "Failed to download rendered MP4."
+                                val currentClip = localRepo.getClipById(initialClip.id) ?: latest
+                                localRepo.upsertClip(
+                                    currentClip.copy(
+                                        status = RenderJobStatus.FAILED,
+                                        stageDetail = "MP4 download failed",
+                                        remoteFinalUrl = videoUrl,
+                                        errorMessage = msg,
+                                        updatedAtMillis = System.currentTimeMillis()
+                                    )
+                                )
+                                _uiState.update { it.copy(errorMessage = msg) }
+                            }
+                            break
+                        }
+
+                        RenderJobStatus.FAILED -> {
+                            val msg = snapshot.errorMessage ?: "Mac Rig render failed."
+                            localRepo.upsertClip(
+                                latest.copy(
+                                    status = RenderJobStatus.FAILED,
+                                    progressFraction = snapshot.progressFraction,
+                                    stageDetail = snapshot.stageDetail.ifBlank { "Failed" },
+                                    errorMessage = msg,
+                                    updatedAtMillis = System.currentTimeMillis()
+                                )
+                            )
+                            _uiState.update { it.copy(errorMessage = msg) }
+                            break
+                        }
+
+                        else -> {
+                            localRepo.upsertClip(
+                                latest.copy(
+                                    status = snapshot.status,
+                                    progressFraction = snapshot.progressFraction.coerceIn(0.05f, 0.95f),
+                                    stageDetail = snapshot.stageDetail.ifBlank { snapshot.status.label },
+                                    errorMessage = null,
+                                    updatedAtMillis = System.currentTimeMillis()
+                                )
+                            )
+                        }
+                    }
+                }
+            } finally {
+                macRigPollingJobs.remove(initialClip.id)
+            }
+        }
+    }
+
+    private fun formatMacRigReadyDetail(snapshot: MacRigJobSnapshot): String {
+        val parts = mutableListOf<String>()
+        snapshot.cer?.let { parts += "CER ${"%.2f".format(it)}" }
+        snapshot.wespeakerCosine?.let { parts += "Sim ${"%.2f".format(it)}" }
+        snapshot.dnsmosP808?.let { parts += "MOS ${"%.2f".format(it)}" }
+        return if (parts.isEmpty()) "Ready" else "Ready · ${parts.joinToString(" · ")}"
     }
 
     fun exportClip(clip: ClipRecord, openShareSheet: Boolean = false) {
@@ -1254,12 +1523,60 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             otaBundleSyncManager.refreshLocalState(trimmed)
             _uiState.update {
                 it.copy(
+                    rigHealth = RigHealthUiState(),
                     statusNotice = if (trimmed.isNotEmpty()) {
                         "Tailscale Rig URL saved."
                     } else {
                         "Tailscale Rig URL cleared."
                     }
                 )
+            }
+        }
+    }
+
+    fun testMacRigConnection(overrideUrl: String? = null) {
+        val url = overrideUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: _uiState.value.settings.tailscaleRigUrl.trim()
+        if (url.isEmpty()) {
+            _uiState.update {
+                it.copy(
+                    rigHealth = RigHealthUiState(
+                        status = RigConnectionStatus.ERROR,
+                        errorMessage = "Enter a Mac Rig URL (e.g. http://10.0.0.242:8443) first."
+                    )
+                )
+            }
+            return
+        }
+        rigHealthCheckJob?.cancel()
+        rigHealthCheckJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(rigHealth = RigHealthUiState(status = RigConnectionStatus.CHECKING))
+            }
+            val result = runCatching { renderJobGateway.checkMacRigHealth(url) }
+            result.onSuccess { health ->
+                _uiState.update {
+                    it.copy(
+                        rigHealth = RigHealthUiState(
+                            status = RigConnectionStatus.ONLINE,
+                            loraVersion = health.loraVersion,
+                            bundleVersion = health.bundleVersion,
+                            pendingPreferences = health.pendingPreferences,
+                            renderBridgeAvailable = health.renderBridgeAvailable,
+                            errorMessage = null
+                        )
+                    )
+                }
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                _uiState.update {
+                    it.copy(
+                        rigHealth = RigHealthUiState(
+                            status = RigConnectionStatus.ERROR,
+                            errorMessage = err.localizedMessage ?: "Mac Rig connection failed."
+                        )
+                    )
+                }
             }
         }
     }
@@ -1586,20 +1903,22 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             cur.copy(clipperState = cur.clipperState.copy(manifest = updatedManifest))
         }
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                localRepo.saveProjectManifest(updatedManifest)
-                if (telemetry != null) {
-                    localRepo.appendPreference(telemetry)
-                }
-                if (edlPlayerInitialized) {
-                    runCatching { edlController.updateFromManifest(updatedManifest) }
-                }
-                val peaks = PcmWaveformExtractor.extractMinMaxPeaks(updatedManifest)
-                _uiState.update { cur ->
-                    if (cur.clipperState.manifest?.projectId == updatedManifest.projectId) {
-                        cur.copy(clipperState = cur.clipperState.copy(waveformMinMaxPeaks = peaks))
-                    } else {
-                        cur
+            clipperSaveMutex.withLock {
+                withContext(Dispatchers.IO) {
+                    localRepo.saveProjectManifest(updatedManifest)
+                    if (telemetry != null) {
+                        localRepo.appendPreference(telemetry)
+                    }
+                    if (edlPlayerInitialized) {
+                        runCatching { edlController.updateFromManifest(updatedManifest) }
+                    }
+                    val peaks = PcmWaveformExtractor.extractMinMaxPeaks(updatedManifest)
+                    _uiState.update { cur ->
+                        if (cur.clipperState.manifest?.projectId == updatedManifest.projectId) {
+                            cur.copy(clipperState = cur.clipperState.copy(waveformMinMaxPeaks = peaks))
+                        } else {
+                            cur
+                        }
                     }
                 }
             }
@@ -1643,7 +1962,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         jobsObserverJob?.cancel()
         personaObserverJob?.cancel()
         voiceManifestObserverJob?.cancel()
+        rigHealthCheckJob?.cancel()
+        macRigPollingJobs.values.forEach { it.cancel() }
+        macRigPollingJobs.clear()
         audioEngine.stopPlayback()
         edlController.pause()
+    }
+
+    companion object {
+        const val MAC_RIG_POLL_INTERVAL_MS: Long = 2_500L
     }
 }

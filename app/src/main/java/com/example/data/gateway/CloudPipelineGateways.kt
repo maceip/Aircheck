@@ -15,6 +15,7 @@ import com.example.data.Stage4Mode
 import com.example.data.StageProviderSettings
 import com.example.data.VoiceSource
 import com.example.data.local.CasMediaStore
+import com.example.data.local.CasStoredAsset
 import com.example.data.remote.AircheckAiRepository
 import com.example.data.remote.FactCheckResult
 import com.example.data.remote.HonedScriptResult
@@ -40,6 +41,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
+import java.util.Base64
 
 class CloudScriptGateway(
     private val aiRepo: AircheckAiRepository
@@ -228,9 +231,32 @@ class CloudPoseGateGateway(
     }
 }
 
+data class MacRigHealthResult(
+    val status: String,
+    val loraVersion: Int,
+    val bundleVersion: String?,
+    val pendingPreferences: Int,
+    val renderBridgeAvailable: Boolean,
+    val activeRenderJobs: Int
+)
+
+data class MacRigJobSnapshot(
+    val jobId: String,
+    val status: RenderJobStatus,
+    val progressFraction: Float,
+    val stageDetail: String,
+    val errorMessage: String?,
+    val videoUrl: String?,
+    val durationMs: Long,
+    val cer: Double? = null,
+    val wespeakerCosine: Double? = null,
+    val dnsmosP808: Double? = null
+)
+
 class CloudRenderJobGateway(
     private val context: Context,
-    private val casStore: CasMediaStore
+    private val casStore: CasMediaStore,
+    private val okHttpClient: OkHttpClient = OkHttpClient()
 ) : RenderJobGateway {
 
     private val db: FirebaseFirestore by lazy {
@@ -238,6 +264,240 @@ class CloudRenderJobGateway(
             context.applicationContext.getString(R.string.firestore_database_id)
         )
     }
+
+    /**
+     * Real HTTP GET /health probe against the user's Mac Studio rig (`ota_server.py`).
+     * Never fabricates online state on HTTP or socket errors.
+     */
+    suspend fun checkMacRigHealth(rigBaseUrl: String): MacRigHealthResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val req = Request.Builder()
+            .url("$baseUrl/health")
+            .get()
+            .build()
+        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = extractErrorDetail(bodyStr)
+                throw IllegalStateException(
+                    "Mac Rig /health failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                )
+            }
+            if (bodyStr.isBlank()) {
+                throw IllegalStateException("Mac Rig /health returned an empty response.")
+            }
+            bodyStr
+        }
+        val json = JSONObject(rawBody)
+        MacRigHealthResult(
+            status = json.optNullableString("status") ?: "unknown",
+            loraVersion = json.optInt("lora_version", 0),
+            bundleVersion = json.optNullableString("bundle_version"),
+            pendingPreferences = json.optInt("pending_preferences", 0),
+            renderBridgeAvailable = json.optBoolean("render_bridge", false),
+            activeRenderJobs = json.optInt("active_render_jobs", 0)
+        )
+    }
+
+    /**
+     * Direct Mac Studio Render Bridge (`POST {rigBaseUrl}/v1/render-video`).
+     * Works 100% offline from Firebase / without `google-services.json`.
+     */
+    suspend fun enqueueMacRigRender(
+        rigBaseUrl: String,
+        project: ScriptProject,
+        photoSha: String?,
+        resolution: String = "720P",
+        ratio: String = "9:16",
+        maxDurationSec: Int = 10
+    ): EnqueuedRenderResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val spokenText = project.activeBeats.joinToString(" ") { it.spokenText.trim() }.trim()
+
+        if (project.voiceSource == VoiceSource.ENROLLED_VOICE_CLONE && spokenText.isBlank()) {
+            throw IllegalStateException("Write at least one spoken beat before rendering.")
+        }
+
+        val audioWavBase64: String? = if (project.voiceSource == VoiceSource.MIC_VOICEOVER) {
+            val wavSha = project.masterAudioSha
+                ?: throw IllegalStateException("Record a mic voiceover take before rendering in Mic Voiceover mode.")
+            val wavFile = casStore.fileForSha(wavSha, "wav")
+                ?: throw IllegalStateException("Recorded WAV take is missing from local CAS.")
+            Base64.getEncoder().encodeToString(wavFile.readBytes())
+        } else {
+            null
+        }
+
+        val photoJpegBase64: String? = photoSha
+            ?.takeIf { it.isNotBlank() }
+            ?.let { sha -> casStore.fileForSha(sha, "jpg") }
+            ?.let { file -> Base64.getEncoder().encodeToString(file.readBytes()) }
+
+        val clampedMaxDuration = maxDurationSec.coerceIn(2, 60)
+        val canonicalInput = buildString {
+            append(baseUrl).append('|')
+            append(project.id).append('|')
+            append(project.title).append('|')
+            append(spokenText).append('|')
+            append(project.voiceSource.name).append('|')
+            append(photoSha.orEmpty()).append('|')
+            append(project.masterAudioSha.orEmpty()).append('|')
+            append(resolution).append('|')
+            append(ratio).append('|')
+            append(clampedMaxDuration)
+        }
+        val inputHash = CasMediaStore.computeSha256Hex(canonicalInput.toByteArray(Charsets.UTF_8))
+
+        val payload = JSONObject()
+            .put("script_id", project.id)
+            .put("title", project.title.ifBlank { "Untitled Aircheck" })
+            .put("spoken_text", spokenText)
+            .put("voice_source", project.voiceSource.name)
+            .put("resolution", resolution)
+            .put("ratio", ratio)
+            .put("max_duration", clampedMaxDuration)
+        if (!audioWavBase64.isNullOrBlank()) {
+            payload.put("audio_wav_base64", audioWavBase64)
+        }
+        if (!photoJpegBase64.isNullOrBlank()) {
+            payload.put("photo_jpeg_base64", photoJpegBase64)
+        }
+
+        val req = Request.Builder()
+            .url("$baseUrl/v1/render-video")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = extractErrorDetail(bodyStr)
+                throw IllegalStateException(
+                    "Mac Rig render rejected (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                )
+            }
+            if (bodyStr.isBlank()) {
+                throw IllegalStateException("Mac Rig /v1/render-video returned an empty response.")
+            }
+            bodyStr
+        }
+
+        val json = JSONObject(rawBody)
+        val jobId = json.optNullableString("job_id")
+            ?: throw IllegalStateException("Mac Rig /v1/render-video did not return a job_id.")
+        EnqueuedRenderResult(jobId = jobId, clipId = jobId, inputHash = inputHash)
+    }
+
+    /**
+     * Polls real persisted render job status from `GET {rigBaseUrl}/v1/jobs/{jobId}`.
+     */
+    suspend fun pollMacRigJob(rigBaseUrl: String, jobId: String): MacRigJobSnapshot =
+        withContext(Dispatchers.IO) {
+            val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+            val cleanJobId = jobId.trim()
+            require(cleanJobId.isNotEmpty()) { "jobId must not be blank." }
+
+            val req = Request.Builder()
+                .url("$baseUrl/v1/jobs/$cleanJobId")
+                .get()
+                .build()
+
+            val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+                val bodyStr = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    val detail = extractErrorDetail(bodyStr)
+                    throw IllegalStateException(
+                        "Mac Rig job poll failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                    )
+                }
+                if (bodyStr.isBlank()) {
+                    throw IllegalStateException("Mac Rig job poll returned an empty response.")
+                }
+                bodyStr
+            }
+
+            val json = JSONObject(rawBody)
+            val rawVideoUrl = json.optNullableString("video_url")
+            val resolvedVideoUrl = when {
+                rawVideoUrl == null -> null
+                rawVideoUrl.startsWith("http://") || rawVideoUrl.startsWith("https://") -> rawVideoUrl
+                rawVideoUrl.startsWith("/") -> "$baseUrl$rawVideoUrl"
+                else -> "$baseUrl/$rawVideoUrl"
+            }
+            val metricsObj = if (!json.isNull("metrics")) json.optJSONObject("metrics") else null
+
+            MacRigJobSnapshot(
+                jobId = json.optNullableString("job_id") ?: cleanJobId,
+                status = RenderJobStatus.fromRaw(json.optNullableString("status")),
+                progressFraction = json.optDouble("progress_fraction", 0.0).toFloat().coerceIn(0f, 1f),
+                stageDetail = json.optNullableString("stage_detail").orEmpty(),
+                errorMessage = json.optNullableString("error_message"),
+                videoUrl = resolvedVideoUrl,
+                durationMs = json.optLong("duration_ms", 0L).coerceAtLeast(0L),
+                cer = metricsObj?.optNullableDouble("cer"),
+                wespeakerCosine = metricsObj?.optNullableDouble("wespeaker_cosine"),
+                dnsmosP808 = metricsObj?.optNullableDouble("dnsmos_p808")
+            )
+        }
+
+    /**
+     * Streams finished MP4 from `GET {videoUrl}` to disk and stores it immutably in `CasMediaStore`.
+     */
+    suspend fun downloadRenderedMp4ToCas(videoUrl: String): CasStoredAsset =
+        withContext(Dispatchers.IO) {
+            val cleanUrl = videoUrl.trim()
+            require(cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")) {
+                "Invalid Mac Rig render video URL: $videoUrl"
+            }
+            val tmpFile = casStore.createTempScratchFile("mac_render_", "mp4")
+            try {
+                val req = Request.Builder().url(cleanUrl).get().build()
+                okHttpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        val detail = extractErrorDetail(resp.body?.string().orEmpty())
+                        throw IllegalStateException(
+                            "Failed to download Mac Rig MP4 (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                        )
+                    }
+                    val bodyStream = resp.body?.byteStream()
+                        ?: throw IllegalStateException("Mac Rig returned an empty MP4 body.")
+                    FileOutputStream(tmpFile).use { out ->
+                        bodyStream.copyTo(out, bufferSize = 64 * 1024)
+                    }
+                }
+                if (!tmpFile.exists() || tmpFile.length() == 0L) {
+                    throw IllegalStateException("Downloaded Mac Rig MP4 is empty.")
+                }
+                casStore.putFile(tmpFile, "mp4")
+            } finally {
+                if (tmpFile.exists()) tmpFile.delete()
+            }
+        }
+
+    private fun normalizeMacRigBaseUrl(rawUrl: String): String {
+        val trimmed = rawUrl.trim().trimEnd('/')
+        require(trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            "Enter a valid Mac Rig URL starting with http:// or https:// (e.g. http://10.0.0.242:8443)."
+        }
+        return trimmed
+    }
+
+    private fun extractErrorDetail(rawBody: String): String {
+        if (rawBody.isBlank()) return ""
+        return runCatching {
+            val obj = JSONObject(rawBody)
+            obj.optNullableString("detail")
+                ?: obj.optNullableString("error_message")
+                ?: obj.optNullableString("error")
+                ?: rawBody.take(200)
+        }.getOrElse { rawBody.take(200) }
+    }
+
+    private fun JSONObject.optNullableString(key: String): String? =
+        if (!has(key) || isNull(key)) null else optString(key).takeIf { it.isNotBlank() }
+
+    private fun JSONObject.optNullableDouble(key: String): Double? =
+        if (!has(key) || isNull(key)) null else runCatching { getDouble(key) }.getOrNull()
 
     override suspend fun enqueueClipRender(
         project: ScriptProject,
