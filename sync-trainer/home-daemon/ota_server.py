@@ -1071,6 +1071,8 @@ class RenderJobManager:
                 str(synth_script),
                 "--target-text",
                 spoken_text,
+                "--seeds",
+                "948101,948102",
                 "--output-wav",
                 str(synth_wav),
                 "--report-json",

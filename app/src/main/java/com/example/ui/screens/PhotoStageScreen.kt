@@ -141,6 +141,7 @@ fun PhotoStageScreen(
                                 model = imageModel,
                                 contentDescription = "News anchor portrait",
                                 contentScale = ContentScale.Crop,
+                                alignment = Alignment.TopCenter,
                                 modifier = Modifier.fillMaxSize()
                             )
 
@@ -291,7 +292,7 @@ fun PhotoStageScreen(
                                     onValueChange = { v -> onUpdateStageConfig { it.copy(chyronHeadline = v) } },
                                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = StudioCrisp),
                                     cursorBrush = SolidColor(tokens.channelAccent),
-                                    singleLine = true,
+                                    maxLines = 2,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .testTag("chyron_headline_input")
@@ -341,7 +342,7 @@ fun PhotoStageScreen(
                                     onValueChange = { v -> onUpdateStageConfig { it.copy(chyronSubline = v) } },
                                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = StudioCrisp),
                                     cursorBrush = SolidColor(tokens.channelAccent),
-                                    singleLine = true,
+                                    maxLines = 2,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .testTag("chyron_subline_input")
