@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -42,20 +43,28 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.AircheckApplication
 import com.example.R
 import com.example.data.BrandChannel
+import com.example.ui.RigConnectionStatus
+import com.example.ui.RigHealthUiState
 import com.example.ui.StudioUiState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import com.example.ui.components.AircheckBrandMark
 import com.example.ui.components.HazardCutOverlay
 import com.example.ui.components.StudioCard
@@ -97,15 +106,69 @@ fun SystemDeckSheet(
     onSyncOtaBundle: (String) -> Unit = {},
     onSyncPreferences: (String) -> Unit = {},
     onRefreshVmRss: () -> Unit = {},
+    onTestRigConnection: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val activeChannel = uiState.settings.brandChannel
     val persona = uiState.settings.persona
     val otaState = uiState.otaBundleState
 
     var rigUrlDraft by remember(uiState.settings.tailscaleRigUrl) {
         mutableStateOf(uiState.settings.tailscaleRigUrl)
+    }
+    var localRigHealth by remember(uiState.settings.tailscaleRigUrl) {
+        mutableStateOf(RigHealthUiState())
+    }
+    val rigHealth = if (onTestRigConnection != null || uiState.rigHealth.status != RigConnectionStatus.IDLE) {
+        uiState.rigHealth
+    } else {
+        localRigHealth
+    }
+
+    fun triggerRigHealthCheck() {
+        if (onTestRigConnection != null) {
+            onTestRigConnection(rigUrlDraft)
+            return
+        }
+        val url = rigUrlDraft.trim()
+        if (url.isEmpty()) {
+            localRigHealth = RigHealthUiState(
+                status = RigConnectionStatus.ERROR,
+                errorMessage = "Enter a Mac Rig URL (e.g. http://10.0.0.242:8443) first."
+            )
+            return
+        }
+        val app = context.applicationContext as? AircheckApplication
+        if (app == null) {
+            localRigHealth = RigHealthUiState(
+                status = RigConnectionStatus.ERROR,
+                errorMessage = "Mac Rig client unavailable."
+            )
+            return
+        }
+        localRigHealth = RigHealthUiState(status = RigConnectionStatus.CHECKING)
+        scope.launch {
+            val result = runCatching { app.container.renderJobGateway.checkMacRigHealth(url) }
+            result.onSuccess { health ->
+                localRigHealth = RigHealthUiState(
+                    status = RigConnectionStatus.ONLINE,
+                    loraVersion = health.loraVersion,
+                    bundleVersion = health.bundleVersion,
+                    pendingPreferences = health.pendingPreferences,
+                    renderBridgeAvailable = health.renderBridgeAvailable,
+                    errorMessage = null
+                )
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                localRigHealth = RigHealthUiState(
+                    status = RigConnectionStatus.ERROR,
+                    errorMessage = err.localizedMessage ?: "Mac Rig connection failed."
+                )
+            }
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -328,9 +391,15 @@ fun SystemDeckSheet(
                 val vmRssLabel = uiState.measuredVmRssMb?.let { rss ->
                     "VmRSS $rss / $FOREGROUND_RAM_CEILING_MB MB"
                 } ?: "VmRSS unavailable"
+                val rigStatusLabel = when (rigHealth.status) {
+                    RigConnectionStatus.IDLE -> "Not tested"
+                    RigConnectionStatus.CHECKING -> "Checking…"
+                    RigConnectionStatus.ONLINE -> "Online · LoRA v${rigHealth.loraVersion}"
+                    RigConnectionStatus.ERROR -> "Offline"
+                }
 
                 StudioCard(modifier = Modifier.fillMaxWidth()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         // Row 1: Title + real LoRA version (strictly 2 adjacent labels)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -419,6 +488,64 @@ fun SystemDeckSheet(
                             ) {
                                 Text("Save")
                             }
+                        }
+
+                        // Real HTTP /health check button + single status readout (strictly <= 2 adjacent labels)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedButton(
+                                onClick = { triggerRigHealthCheck() },
+                                enabled = rigHealth.status != RigConnectionStatus.CHECKING,
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, tokens.hairline),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .height(40.dp)
+                                    .testTag("test_rig_connection_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.NetworkCheck,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (rigHealth.status == RigConnectionStatus.CHECKING) {
+                                        "Testing…"
+                                    } else {
+                                        "Test Rig Connection"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = rigStatusLabel,
+                                style = TelemetryTimecodeStyle,
+                                color = when (rigHealth.status) {
+                                    RigConnectionStatus.ONLINE -> LiveTallyGreen
+                                    RigConnectionStatus.CHECKING -> TelemetryCyan
+                                    RigConnectionStatus.ERROR -> OnAirCrimson
+                                    RigConnectionStatus.IDLE -> TelemetryMuted
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.testTag("rig_connection_status_label")
+                            )
+                        }
+
+                        val rigError = rigHealth.errorMessage
+                        if (rigHealth.status == RigConnectionStatus.ERROR && !rigError.isNullOrBlank()) {
+                            Text(
+                                text = rigError,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = OnAirCrimson,
+                                modifier = Modifier.testTag("rig_connection_error_label")
+                            )
                         }
 
                         // Pending preferences.jsonl count (strictly 2 adjacent labels)
