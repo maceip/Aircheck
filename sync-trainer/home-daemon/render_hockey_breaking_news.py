@@ -221,7 +221,7 @@ def main() -> int:
             tokenizer,
             beat["spoken"],
             ref_turns=ref_turns,
-            prompt_style="chatml_multi",
+            prompt_style="multiturn",
         )
         for seed in seeds_per_beat:
             res = s2i.generate_dual_ar_codes(
