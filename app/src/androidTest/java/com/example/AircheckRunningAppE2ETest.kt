@@ -124,11 +124,13 @@ class AircheckRunningAppE2ETest {
 
         // Switch cleanly back to AI voice and trim to 1 crisp segment for fast live render check.
         composeRule.onNodeWithTag("clear_mic_take_button").performClick()
-        val beatsAfterAi = runBlocking { app.container.localRepo.scripts.first().first().beats }
-        if (beatsAfterAi.size > 1) {
-            val extraId = beatsAfterAi.last().id
+        while (true) {
+            val currentBeats = runBlocking { app.container.localRepo.scripts.first().first().beats }
+            if (currentBeats.size <= 1) break
+            val extraId = currentBeats.last().id
             scrollListTo("script_lazy_list", "beat_delete_$extraId")
             composeRule.onNodeWithTag("beat_delete_$extraId").performClick()
+            composeRule.waitForIdle()
         }
         assertNoErrorBanner("story tab complete")
 
@@ -215,7 +217,7 @@ class AircheckRunningAppE2ETest {
             }
         }
 
-        val readyId = renderedClipId ?: fail("Rendered clip ID missing")
+        val readyId = requireNotNull(renderedClipId) { "Rendered clip ID missing" }
         val readyClip = runBlocking { app.container.localRepo.getClipById(readyId) }
         assertNotNull("Rendered clip must exist in Room", readyClip)
         val mp4File = app.container.casStore.fileForSha(readyClip?.finalSha, "mp4")
