@@ -27,6 +27,11 @@ import com.example.data.remote.FirestoreSyncRepository
 import com.example.engine.AircheckPlayerController
 import com.example.engine.AudioEngine
 import com.example.engine.ClipExporter
+import com.voicestudio.edl.EdlController
+import com.voicestudio.sync.OtaBundleSyncManager
+import com.voicestudio.sync.SyncConfigProvider
+import com.voicestudio.sync.VoiceStudioRuntimeRegistry
+import com.voicestudio.sync.VoiceStudioSyncCoordinator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -61,6 +66,25 @@ class AircheckContainer(context: Context) {
     val poseGateGateway: PoseGateGateway by lazy { CloudPoseGateGateway(casStore, okHttpClient) }
     val renderJobGateway: RenderJobGateway by lazy { CloudRenderJobGateway(appContext, casStore) }
     val personaTrainingGateway: PersonaTrainingGateway by lazy { CloudPersonaTrainingGateway(appContext) }
+
+    // VoiceStudio Bare-Metal Local Synthesis, Wait-Free Oboe EDL & Tailscale OTA Sync
+    val otaBundleSyncManager: OtaBundleSyncManager by lazy {
+        OtaBundleSyncManager(appContext, okHttpClient)
+    }
+    val edlController: EdlController by lazy { EdlController() }
+    val voiceStudioCoordinator: VoiceStudioSyncCoordinator by lazy {
+        VoiceStudioSyncCoordinator(appContext, otaBundleSyncManager)
+    }
+
+    fun bindVoiceStudioRuntime() {
+        VoiceStudioRuntimeRegistry.otaBundleSyncManager = otaBundleSyncManager
+        VoiceStudioRuntimeRegistry.preferenceStore = localRepo
+        VoiceStudioRuntimeRegistry.projectStore = localRepo
+        VoiceStudioRuntimeRegistry.configProvider = object : SyncConfigProvider {
+            override suspend fun getTailscaleBaseUrl(): String =
+                profileStore.current().tailscaleRigUrl
+        }
+    }
 }
 
 class AircheckApplication : Application(), SingletonImageLoader.Factory {
@@ -71,9 +95,12 @@ class AircheckApplication : Application(), SingletonImageLoader.Factory {
     override fun onCreate() {
         super.onCreate()
         container = AircheckContainer(this)
-        // Preload binary Proto DataStore asynchronously so UI cold start stays <200 ms with zero main-thread I/O.
+        container.bindVoiceStudioRuntime()
+        // Preload binary Proto DataStore & local OTA bundle state off main thread (<200 ms cold start).
         container.appScope.launch {
             container.profileStore.preload()
+            val rigUrl = runCatching { container.profileStore.current().tailscaleRigUrl }.getOrDefault("")
+            container.otaBundleSyncManager.refreshLocalState(rigUrl)
         }
     }
 

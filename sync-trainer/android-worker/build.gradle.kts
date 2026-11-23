@@ -10,6 +10,7 @@ android {
     defaultConfig {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles("consumer-rules.pro")
     }
 
     compileOptions {
@@ -28,6 +29,7 @@ dependencies {
     api(project(":audio-edl"))
     implementation(project(":core-engine"))
     implementation(project(":core-verifier"))
+    implementation(libs.litert)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.work.runtime.ktx)

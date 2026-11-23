@@ -29,7 +29,26 @@ import com.example.engine.AudioEngine
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
+import com.voicestudio.edl.ClauseSynthesisPhase
+import com.voicestudio.edl.ClauseSynthesisProgress
+import com.voicestudio.edl.EdlController
+import com.voicestudio.edl.EdlTimelineCalculator
+import com.voicestudio.edl.OtaArtifactRole
+import com.voicestudio.edl.OtaBundleState
+import com.voicestudio.edl.OtaBundleStatus
+import com.voicestudio.edl.PreferenceTelemetryRecord
+import com.voicestudio.edl.PreferenceUserAction
+import com.voicestudio.edl.VoiceProjectManifest
+import com.voicestudio.sync.OtaBundleSyncManager
+import com.voicestudio.sync.ProcessMemoryReader
+import com.voicestudio.sync.VoiceStudioSyncCoordinator
+import com.voicestudio.ui.ClipperUiState
+import com.voicestudio.ui.MAX_GLOBAL_GAP_SCALE
+import com.voicestudio.ui.MIN_GLOBAL_GAP_SCALE
+import com.voicestudio.ui.Media3BeatExporter
+import com.voicestudio.ui.PcmWaveformExtractor
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +57,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 data class StudioUiState(
@@ -68,7 +88,12 @@ data class StudioUiState(
     val lastSyncMessage: String? = null,
     val errorMessage: String? = null,
     val statusNotice: String? = null,
-    val activeModels: ActiveModels = ActiveModels()
+    val activeModels: ActiveModels = ActiveModels(),
+    val otaBundleState: OtaBundleState = OtaBundleState(),
+    val synthesisProgress: ClauseSynthesisProgress = ClauseSynthesisProgress(),
+    val unsyncedPreferenceCount: Int = 0,
+    val measuredVmRssMb: Int? = null,
+    val clipperState: ClipperUiState = ClipperUiState()
 )
 
 class StudioViewModel(application: Application) : AndroidViewModel(application) {
@@ -86,6 +111,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val poseGateGateway = container.poseGateGateway
     private val renderJobGateway = container.renderJobGateway
     private val personaTrainingGateway = container.personaTrainingGateway
+    private val otaBundleSyncManager: OtaBundleSyncManager = container.otaBundleSyncManager
+    private val edlController: EdlController = container.edlController
+    private val voiceStudioCoordinator: VoiceStudioSyncCoordinator = container.voiceStudioCoordinator
 
     private val _uiState = MutableStateFlow(StudioUiState())
     val uiState: StateFlow<StudioUiState> = _uiState.asStateFlow()
@@ -95,6 +123,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private var cloudSyncJob: Job? = null
     private var jobsObserverJob: Job? = null
     private var personaObserverJob: Job? = null
+    private var voiceManifestObserverJob: Job? = null
+    private var activeClipperProjectId: String? = null
+    private var edlPlayerInitialized: Boolean = false
     private var activeRecordingFile: File? = null
     private var initializedProject = false
 
@@ -198,6 +229,64 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
+
+        // VoiceStudio real OTA bundle state, synthesis progress, Room preference queue & EDL playhead
+        viewModelScope.launch {
+            otaBundleSyncManager.bundleState.collect { otaState ->
+                _uiState.update { cur ->
+                    val statusLabel = formatOtaStatusSummary(otaState)
+                    cur.copy(
+                        otaBundleState = otaState,
+                        clipperState = cur.clipperState.copy(
+                            otaReady = otaState.status == OtaBundleStatus.READY,
+                            otaStatusText = statusLabel
+                        )
+                    )
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            voiceStudioCoordinator.progress.collect { synthProgress ->
+                _uiState.update { cur ->
+                    cur.copy(
+                        synthesisProgress = synthProgress,
+                        measuredVmRssMb = synthProgress.measuredRssMb ?: cur.measuredVmRssMb,
+                        clipperState = cur.clipperState.copy(
+                            synthesisError = if (synthProgress.phase == ClauseSynthesisPhase.FAILED) {
+                                synthProgress.errorMessage
+                            } else {
+                                null
+                            }
+                        )
+                    )
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            localRepo.unsyncedPreferenceCount.collect { count ->
+                _uiState.update { it.copy(unsyncedPreferenceCount = count) }
+            }
+        }
+
+        viewModelScope.launch {
+            edlController.isPlaying.collect { playing ->
+                _uiState.update { cur ->
+                    cur.copy(clipperState = cur.clipperState.copy(isPlaying = playing))
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            edlController.playheadSample.collect { sample ->
+                _uiState.update { cur ->
+                    cur.copy(clipperState = cur.clipperState.copy(playheadSample = sample))
+                }
+            }
+        }
+
+        refreshVmRssTelemetry()
     }
 
     fun observeClip(clipId: String): Flow<ClipRecord?> = localRepo.observeClip(clipId)
@@ -1149,6 +1238,403 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    // --- VoiceStudio Local Rig, OTA Sync & Hairline Clipper ---
+
+    fun refreshVmRssTelemetry() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val rssMb = ProcessMemoryReader.readVmRssMb()
+            _uiState.update { it.copy(measuredVmRssMb = rssMb) }
+        }
+    }
+
+    fun saveTailscaleRigUrl(url: String) {
+        val trimmed = url.trim()
+        viewModelScope.launch {
+            profileStore.setTailscaleRigUrl(trimmed)
+            otaBundleSyncManager.refreshLocalState(trimmed)
+            _uiState.update {
+                it.copy(
+                    statusNotice = if (trimmed.isNotEmpty()) {
+                        "Tailscale Rig URL saved."
+                    } else {
+                        "Tailscale Rig URL cleared."
+                    }
+                )
+            }
+        }
+    }
+
+    fun syncOtaBundleFromRig(overrideUrl: String? = null) {
+        val url = overrideUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: _uiState.value.settings.tailscaleRigUrl.trim()
+        if (url.isEmpty()) {
+            _uiState.update {
+                it.copy(errorMessage = "Enter your Tailscale Rig URL (e.g. http://100.x.y.z:8443) first.")
+            }
+            return
+        }
+        viewModelScope.launch {
+            if (url != _uiState.value.settings.tailscaleRigUrl) {
+                profileStore.setTailscaleRigUrl(url)
+            }
+            _uiState.update { it.copy(errorMessage = null) }
+            val result = voiceStudioCoordinator.syncOtaBundleNow(url)
+            refreshVmRssTelemetry()
+            result.onSuccess { manifest ->
+                _uiState.update {
+                    it.copy(
+                        statusNotice = "OTA ready: ${manifest.bundleVersion} (LoRA v${manifest.loraVersion})."
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(errorMessage = err.localizedMessage ?: "OTA bundle sync failed.")
+                }
+            }
+        }
+    }
+
+    fun syncPreferencesNow(overrideUrl: String? = null) {
+        val url = overrideUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: _uiState.value.settings.tailscaleRigUrl.trim()
+        if (url.isEmpty()) {
+            _uiState.update {
+                it.copy(errorMessage = "Configure a Tailscale Rig URL before syncing preferences.jsonl.")
+            }
+            return
+        }
+        viewModelScope.launch {
+            if (url != _uiState.value.settings.tailscaleRigUrl) {
+                profileStore.setTailscaleRigUrl(url)
+            }
+            voiceStudioCoordinator.enqueuePreferenceSyncAndLoraCheck(
+                tailscaleBaseUrl = url,
+                requireUnmetered = false
+            )
+            _uiState.update {
+                it.copy(statusNotice = "Queued preferences.jsonl upload & LoRA delta check.")
+            }
+        }
+    }
+
+    fun enqueueLocalVoiceSynthesis(projectId: String = _uiState.value.activeProject.id) {
+        voiceStudioCoordinator.enqueueProjectSynthesis(projectId)
+        _uiState.update { it.copy(statusNotice = "Queued local 44.1 kHz VoiceStudio synthesis.") }
+    }
+
+    fun loadClipperForProject(projectId: String) {
+        if (activeClipperProjectId == projectId && voiceManifestObserverJob?.isActive == true) {
+            return
+        }
+        activeClipperProjectId = projectId
+        voiceManifestObserverJob?.cancel()
+        voiceManifestObserverJob = viewModelScope.launch {
+            otaBundleSyncManager.refreshLocalState(_uiState.value.settings.tailscaleRigUrl)
+            ensureEdlPlayerInitializedIfPossible()
+            localRepo.observeVoiceManifest(projectId).collectLatest { manifest ->
+                val peaks = if (manifest != null) {
+                    withContext(Dispatchers.IO) {
+                        PcmWaveformExtractor.extractMinMaxPeaks(manifest)
+                    }
+                } else {
+                    FloatArray(0)
+                }
+                if (manifest != null && edlPlayerInitialized) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { edlController.preloadManifestFiles(manifest) }
+                        runCatching { edlController.updateFromManifest(manifest) }
+                    }
+                }
+                _uiState.update { cur ->
+                    cur.copy(
+                        clipperState = cur.clipperState.copy(
+                            manifest = manifest,
+                            waveformMinMaxPeaks = peaks
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun toggleClipperPlayPause() {
+        if (edlController.isPlaying.value) {
+            edlController.pause()
+            return
+        }
+        val manifest = _uiState.value.clipperState.manifest
+        if (manifest == null || manifest.clauses.isEmpty()) {
+            _uiState.update { cur ->
+                cur.copy(
+                    clipperState = cur.clipperState.copy(
+                        synthesisError = "No synthesized 44.1 kHz clauses ready for EDL playback."
+                    )
+                )
+            }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val initErr = ensureEdlPlayerInitializedIfPossible()
+            if (initErr != null) {
+                _uiState.update { cur ->
+                    cur.copy(clipperState = cur.clipperState.copy(synthesisError = initErr))
+                }
+                return@launch
+            }
+            val updateRes = edlController.updateFromManifest(manifest)
+            if (updateRes.isFailure) {
+                _uiState.update { cur ->
+                    cur.copy(
+                        clipperState = cur.clipperState.copy(
+                            synthesisError = updateRes.exceptionOrNull()?.message ?: "EDL snapshot update failed."
+                        )
+                    )
+                }
+                return@launch
+            }
+            val startRes = edlController.start()
+            if (startRes.isFailure) {
+                _uiState.update { cur ->
+                    cur.copy(
+                        clipperState = cur.clipperState.copy(
+                            synthesisError = startRes.exceptionOrNull()?.message ?: "Oboe EDL start failed."
+                        )
+                    )
+                }
+            } else {
+                _uiState.update { cur ->
+                    cur.copy(clipperState = cur.clipperState.copy(synthesisError = null))
+                }
+            }
+        }
+    }
+
+    fun seekClipperSample(sample: Long) {
+        val clamped = sample.coerceAtLeast(0L)
+        edlController.seekToSample(clamped)
+        _uiState.update { cur ->
+            cur.copy(clipperState = cur.clipperState.copy(playheadSample = clamped))
+        }
+    }
+
+    fun setClipperEditingClause(clauseId: String?) {
+        _uiState.update { cur ->
+            cur.copy(clipperState = cur.clipperState.copy(editingClauseId = clauseId))
+        }
+    }
+
+    fun onClipperSwapTake(clauseId: String, nextTakeIndex: Int) {
+        val currentManifest = _uiState.value.clipperState.manifest ?: return
+        val clause = currentManifest.clauses.firstOrNull { it.clauseId == clauseId } ?: return
+        if (nextTakeIndex !in clause.candidates.indices || nextTakeIndex == clause.selectedTakeIndex) return
+
+        val rejectedTake = clause.selectedCandidate
+        val chosenTake = clause.candidates[nextTakeIndex]
+        val updatedManifest = currentManifest.copy(
+            clauses = currentManifest.clauses.map { node ->
+                if (node.clauseId == clauseId) node.copy(selectedTakeIndex = nextTakeIndex) else node
+            }
+        )
+
+        val telemetry = PreferenceTelemetryRecord(
+            timestamp = System.currentTimeMillis(),
+            clauseId = clause.clauseId,
+            loraVersion = updatedManifest.activeLoraVersion,
+            rawText = clause.rawText,
+            normalizedPhonemes = clause.normalizedPhonemes,
+            userAction = PreferenceUserAction.TAKE_SWAP,
+            userGapScale = updatedManifest.globalGapScale.coerceIn(MIN_GLOBAL_GAP_SCALE, MAX_GLOBAL_GAP_SCALE),
+            chosenTokens = chosenTake.discreteAudioTokens.toList(),
+            rejectedTokens = rejectedTake?.discreteAudioTokens?.toList().orEmpty()
+        )
+
+        applyClipperManifestMutation(updatedManifest, telemetry)
+    }
+
+    fun onClipperOverrideClauseText(clauseId: String, newText: String, newPhonemes: String) {
+        val currentManifest = _uiState.value.clipperState.manifest ?: return
+        val clause = currentManifest.clauses.firstOrNull { it.clauseId == clauseId } ?: return
+        val trimmedText = newText.trim()
+        if (trimmedText.isEmpty()) return
+        val trimmedPhonemes = newPhonemes.trim()
+
+        val updatedManifest = currentManifest.copy(
+            clauses = currentManifest.clauses.map { node ->
+                if (node.clauseId == clauseId) {
+                    node.copy(rawText = trimmedText, normalizedPhonemes = trimmedPhonemes)
+                } else {
+                    node
+                }
+            }
+        )
+
+        val currentTokens = clause.selectedCandidate?.discreteAudioTokens?.toList().orEmpty()
+        val telemetry = PreferenceTelemetryRecord(
+            timestamp = System.currentTimeMillis(),
+            clauseId = clause.clauseId,
+            loraVersion = updatedManifest.activeLoraVersion,
+            rawText = trimmedText,
+            normalizedPhonemes = trimmedPhonemes,
+            userAction = PreferenceUserAction.PHONEME_OVERRIDE,
+            userGapScale = updatedManifest.globalGapScale.coerceIn(MIN_GLOBAL_GAP_SCALE, MAX_GLOBAL_GAP_SCALE),
+            chosenTokens = emptyList(),
+            rejectedTokens = currentTokens
+        )
+
+        applyClipperManifestMutation(updatedManifest, telemetry)
+        voiceStudioCoordinator.enqueueSingleClauseResynthesis(updatedManifest.projectId, clauseId)
+        _uiState.update { it.copy(statusNotice = "Queued single-clause resynthesis for $clauseId.") }
+    }
+
+    fun onClipperGlobalGapScaleChange(scale: Float) {
+        val currentManifest = _uiState.value.clipperState.manifest ?: return
+        val clamped = scale.coerceIn(MIN_GLOBAL_GAP_SCALE, MAX_GLOBAL_GAP_SCALE)
+        val updatedManifest = currentManifest.copy(globalGapScale = clamped)
+
+        val pos = EdlTimelineCalculator.mapSampleToPosition(updatedManifest, _uiState.value.clipperState.playheadSample)
+        val referenceClause = updatedManifest.clauses.firstOrNull { it.clauseId == pos.clauseId }
+            ?: updatedManifest.clauses.firstOrNull()
+
+        val telemetry = referenceClause?.let { clause ->
+            PreferenceTelemetryRecord(
+                timestamp = System.currentTimeMillis(),
+                clauseId = clause.clauseId,
+                loraVersion = updatedManifest.activeLoraVersion,
+                rawText = clause.rawText,
+                normalizedPhonemes = clause.normalizedPhonemes,
+                userAction = PreferenceUserAction.PACE_EDIT,
+                userGapScale = clamped,
+                chosenTokens = clause.selectedCandidate?.discreteAudioTokens?.toList().orEmpty(),
+                rejectedTokens = emptyList()
+            )
+        }
+
+        applyClipperManifestMutation(updatedManifest, telemetry)
+    }
+
+    fun onClipperToggleVideoAnchor(clauseId: String, wordIndex: Int, videoAnchorId: String?) {
+        val currentManifest = _uiState.value.clipperState.manifest ?: return
+        val clause = currentManifest.clauses.firstOrNull { it.clauseId == clauseId } ?: return
+        val selected = clause.selectedCandidate ?: return
+        if (wordIndex !in selected.tokens.indices) return
+
+        val updatedTokens = selected.tokens.mapIndexed { idx, token ->
+            if (idx == wordIndex) token.copy(videoAnchorId = videoAnchorId) else token
+        }
+        val updatedCandidates = clause.candidates.mapIndexed { idx, candidate ->
+            if (idx == clause.selectedTakeIndex) candidate.copy(tokens = updatedTokens) else candidate
+        }
+        val updatedManifest = currentManifest.copy(
+            clauses = currentManifest.clauses.map { node ->
+                if (node.clauseId == clauseId) node.copy(candidates = updatedCandidates) else node
+            }
+        )
+
+        val telemetry = PreferenceTelemetryRecord(
+            timestamp = System.currentTimeMillis(),
+            clauseId = clause.clauseId,
+            loraVersion = updatedManifest.activeLoraVersion,
+            rawText = clause.rawText,
+            normalizedPhonemes = clause.normalizedPhonemes,
+            userAction = PreferenceUserAction.VIDEO_ANCHOR_SNAP,
+            userGapScale = updatedManifest.globalGapScale.coerceIn(MIN_GLOBAL_GAP_SCALE, MAX_GLOBAL_GAP_SCALE),
+            chosenTokens = selected.discreteAudioTokens.toList(),
+            rejectedTokens = emptyList()
+        )
+
+        applyClipperManifestMutation(updatedManifest, telemetry)
+    }
+
+    fun onClipperExport() {
+        val manifest = _uiState.value.clipperState.manifest
+        if (manifest == null || manifest.clauses.isEmpty()) {
+            _uiState.update { it.copy(errorMessage = "No synthesized clauses to export.") }
+            return
+        }
+        val anchorsUs = Media3BeatExporter.computeAnchorTimestampsUs(manifest)
+        val totalDurationUs = Media3BeatExporter.computeTotalTimelineDurationUs(manifest)
+        val firstClause = manifest.clauses.first()
+
+        val telemetry = PreferenceTelemetryRecord(
+            timestamp = System.currentTimeMillis(),
+            clauseId = firstClause.clauseId,
+            loraVersion = manifest.activeLoraVersion,
+            rawText = firstClause.rawText,
+            normalizedPhonemes = firstClause.normalizedPhonemes,
+            userAction = PreferenceUserAction.PROJECT_EXPORT,
+            userGapScale = manifest.globalGapScale.coerceIn(MIN_GLOBAL_GAP_SCALE, MAX_GLOBAL_GAP_SCALE),
+            chosenTokens = firstClause.selectedCandidate?.discreteAudioTokens?.toList().orEmpty(),
+            rejectedTokens = emptyList()
+        )
+
+        viewModelScope.launch {
+            localRepo.appendPreference(telemetry)
+            val durationSec = totalDurationUs / 1_000_000.0
+            _uiState.update {
+                it.copy(
+                    statusNotice = "Beat timeline locked: ${anchorsUs.size} cuts · ${"%.2f".format(durationSec)}s."
+                )
+            }
+        }
+    }
+
+    private fun applyClipperManifestMutation(
+        updatedManifest: VoiceProjectManifest,
+        telemetry: PreferenceTelemetryRecord?
+    ) {
+        _uiState.update { cur ->
+            cur.copy(clipperState = cur.clipperState.copy(manifest = updatedManifest))
+        }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                localRepo.saveProjectManifest(updatedManifest)
+                if (telemetry != null) {
+                    localRepo.appendPreference(telemetry)
+                }
+                if (edlPlayerInitialized) {
+                    runCatching { edlController.updateFromManifest(updatedManifest) }
+                }
+                val peaks = PcmWaveformExtractor.extractMinMaxPeaks(updatedManifest)
+                _uiState.update { cur ->
+                    if (cur.clipperState.manifest?.projectId == updatedManifest.projectId) {
+                        cur.copy(clipperState = cur.clipperState.copy(waveformMinMaxPeaks = peaks))
+                    } else {
+                        cur
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun ensureEdlPlayerInitializedIfPossible(): String? {
+        if (edlPlayerInitialized) return null
+        val roomTone = otaBundleSyncManager.resolveArtifactFile(OtaArtifactRole.ROOM_TONE_PCM)
+            ?: return "Missing room_tone_44k.pcm in verified OTA bundle. Sync OTA bundle in System Deck."
+        val res = edlController.initPlayer(roomTone.absolutePath)
+        return if (res.isSuccess) {
+            edlPlayerInitialized = true
+            null
+        } else {
+            res.exceptionOrNull()?.message ?: "Failed initializing Oboe EDL stream."
+        }
+    }
+
+    private fun formatOtaStatusSummary(state: OtaBundleState): String = when (state.status) {
+        OtaBundleStatus.NOT_INSTALLED -> state.errorMessage
+            ?: "Not installed. Configure your Tailscale Rig URL in System Deck and tap Sync OTA Bundle."
+        OtaBundleStatus.SYNCING -> {
+            val verifiedMb = state.verifiedBytes / (1024.0 * 1024.0)
+            val totalMb = state.totalBytes / (1024.0 * 1024.0)
+            "Syncing ${"%.1f".format(verifiedMb)} / ${"%.1f".format(totalMb)} MB"
+        }
+        OtaBundleStatus.READY -> {
+            val ver = state.activeManifest?.bundleVersion ?: "verified"
+            "Ready ($ver · LoRA v${state.activeLoraVersion})"
+        }
+        OtaBundleStatus.CORRUPT_OR_INCOMPATIBLE -> state.errorMessage ?: "Corrupt or incompatible OTA bundle."
+        OtaBundleStatus.SYNC_FAILED -> state.errorMessage ?: "OTA sync failed."
+    }
+
     override fun onCleared() {
         super.onCleared()
         runCatching { Firebase.auth.removeAuthStateListener(authListener) }
@@ -1156,6 +1642,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         cloudSyncJob?.cancel()
         jobsObserverJob?.cancel()
         personaObserverJob?.cancel()
+        voiceManifestObserverJob?.cancel()
         audioEngine.stopPlayback()
+        edlController.pause()
     }
 }

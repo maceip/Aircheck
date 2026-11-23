@@ -28,17 +28,25 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -72,6 +80,8 @@ import com.example.ui.theme.StudioCrisp
 import com.example.ui.theme.TelemetryCyan
 import com.example.ui.theme.TelemetryMuted
 import com.example.ui.theme.TelemetryTimecodeStyle
+import com.voicestudio.edl.FOREGROUND_RAM_CEILING_MB
+import com.voicestudio.edl.OtaBundleStatus
 
 private data class BrandAssetItem(val title: String, val resId: Int)
 private data class ColorSwatchItem(val name: String, val hex: String, val color: Color)
@@ -87,11 +97,24 @@ fun SystemDeckSheet(
     onClearCasCache: () -> Unit,
     onPreviewAudio: () -> Unit,
     onClose: () -> Unit,
+    onSaveTailscaleRigUrl: (String) -> Unit = {},
+    onSyncOtaBundle: (String) -> Unit = {},
+    onSyncPreferences: (String) -> Unit = {},
+    onRefreshVmRss: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
     val activeChannel = uiState.settings.brandChannel
     val persona = uiState.settings.persona
+    val otaState = uiState.otaBundleState
+
+    var rigUrlDraft by remember(uiState.settings.tailscaleRigUrl) {
+        mutableStateOf(uiState.settings.tailscaleRigUrl)
+    }
+
+    LaunchedEffect(Unit) {
+        onRefreshVmRss()
+    }
 
     val brandAssets = remember(activeChannel) {
         if (activeChannel == BrandChannel.VOLT_LIME) {
@@ -178,7 +201,8 @@ fun SystemDeckSheet(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .widthIn(max = 640.dp),
+                .widthIn(max = 640.dp)
+                .testTag("system_deck_lazy_list"),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -294,7 +318,195 @@ fun SystemDeckSheet(
                 }
             }
 
-            // 3. Brand Asset Gallery (Bundled Volt & Cobalt Marks)
+            // 3. VoiceStudio Local Rig & OTA (Real Tailscale URL, LoRA Version, Preferences Queue, /proc/self/status VmRSS)
+            item(key = "voicestudio_ota_rig") {
+                val otaStatusLabel = when (otaState.status) {
+                    OtaBundleStatus.NOT_INSTALLED -> "Not installed"
+                    OtaBundleStatus.SYNCING -> {
+                        val verifiedMb = otaState.verifiedBytes / (1024.0 * 1024.0)
+                        val totalMb = otaState.totalBytes / (1024.0 * 1024.0)
+                        "Syncing ${"%.1f".format(verifiedMb)}/${"%.1f".format(totalMb)} MB"
+                    }
+                    OtaBundleStatus.READY -> otaState.activeManifest?.bundleVersion ?: "Ready"
+                    OtaBundleStatus.CORRUPT_OR_INCOMPATIBLE -> "Corrupt / incompatible"
+                    OtaBundleStatus.SYNC_FAILED -> "Sync failed"
+                }
+                val vmRssLabel = uiState.measuredVmRssMb?.let { rss ->
+                    "VmRSS $rss / $FOREGROUND_RAM_CEILING_MB MB"
+                } ?: "VmRSS unavailable"
+
+                StudioCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        // Row 1: Title + real LoRA version (strictly 2 adjacent labels)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "VoiceStudio Local Rig & OTA",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = StudioCrisp
+                            )
+                            Text(
+                                text = "LoRA v${otaState.activeLoraVersion}",
+                                style = TelemetryTimecodeStyle,
+                                color = if (otaState.status == OtaBundleStatus.READY) {
+                                    LiveTallyGreen
+                                } else {
+                                    TelemetryMuted
+                                },
+                                modifier = Modifier.testTag("ota_lora_version_label")
+                            )
+                        }
+
+                        // Row 2: Real OTA status + real /proc/self/status VmRSS (strictly 2 adjacent labels)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = otaStatusLabel,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = when (otaState.status) {
+                                    OtaBundleStatus.READY -> LiveTallyGreen
+                                    OtaBundleStatus.SYNCING -> TelemetryCyan
+                                    OtaBundleStatus.CORRUPT_OR_INCOMPATIBLE,
+                                    OtaBundleStatus.SYNC_FAILED -> OnAirCrimson
+                                    OtaBundleStatus.NOT_INSTALLED -> TelemetryMuted
+                                },
+                                modifier = Modifier.testTag("ota_status_label")
+                            )
+                            Text(
+                                text = vmRssLabel,
+                                style = TelemetryTimecodeStyle,
+                                color = TelemetryMuted,
+                                modifier = Modifier.testTag("vm_rss_label")
+                            )
+                        }
+
+                        if (!otaState.errorMessage.isNullOrBlank()) {
+                            Text(
+                                text = otaState.errorMessage!!,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = OnAirCrimson,
+                                modifier = Modifier.testTag("ota_error_label")
+                            )
+                        }
+
+                        // Tailscale Rig URL input + Save (persisted in Proto DataStore)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = rigUrlDraft,
+                                onValueChange = { rigUrlDraft = it },
+                                placeholder = {
+                                    Text("http://100.x.y.z:8443", color = TelemetryMuted)
+                                },
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
+                                colors = studioFieldColors(),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("tailscale_rig_url_input")
+                            )
+                            OutlinedButton(
+                                onClick = { onSaveTailscaleRigUrl(rigUrlDraft) },
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, tokens.hairline),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                                modifier = Modifier
+                                    .height(52.dp)
+                                    .testTag("save_tailscale_url_button")
+                            ) {
+                                Text("Save")
+                            }
+                        }
+
+                        // Pending preferences.jsonl count (strictly 2 adjacent labels)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Pending preferences.jsonl",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TelemetryMuted
+                            )
+                            Text(
+                                text = "${uiState.unsyncedPreferenceCount}",
+                                style = TelemetryTimecodeStyle,
+                                color = if (uiState.unsyncedPreferenceCount > 0) {
+                                    tokens.channelAccent
+                                } else {
+                                    TelemetryMuted
+                                },
+                                modifier = Modifier.testTag("pending_preferences_count_label")
+                            )
+                        }
+
+                        // Real OTA Sync & Preferences Sync triggers (2 buttons)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Button(
+                                onClick = { onSyncOtaBundle(rigUrlDraft) },
+                                enabled = otaState.status != OtaBundleStatus.SYNCING,
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = tokens.channelAccent,
+                                    contentColor = tokens.channelAccentInk
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("sync_ota_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.CloudSync,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (otaState.status == OtaBundleStatus.SYNCING) {
+                                        "Syncing…"
+                                    } else {
+                                        "Sync OTA Bundle"
+                                    },
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = { onSyncPreferences(rigUrlDraft) },
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, tokens.hairline),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("sync_preferences_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Sync,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Sync Now")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Brand Asset Gallery (Bundled Volt & Cobalt Marks)
             item(key = "brand_gallery") {
                 StudioCard(modifier = Modifier.fillMaxWidth()) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {

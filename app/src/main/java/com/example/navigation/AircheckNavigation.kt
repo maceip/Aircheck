@@ -37,6 +37,9 @@ sealed interface ScreenKey : NavKey {
     data class ClipReviewKey(val clipId: String) : ScreenKey
 
     @Serializable
+    data class ClipperKey(val projectId: String) : ScreenKey
+
+    @Serializable
     data object SettingsKey : ScreenKey
 
     @Serializable
@@ -174,6 +177,16 @@ class AircheckNavigator(val state: AircheckNavigationState) {
             clipsStack[clipsStack.lastIndex] = target
         } else {
             clipsStack.add(target)
+        }
+    }
+
+    fun openClipper(projectId: String) {
+        val stack = state.backStacks[state.topLevelRoute] ?: return
+        val target = ScreenKey.ClipperKey(projectId)
+        if (stack.lastOrNull() is ScreenKey.ClipperKey) {
+            stack[stack.lastIndex] = target
+        } else {
+            stack.add(target)
         }
     }
 

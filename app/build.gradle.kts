@@ -21,6 +21,10 @@ android {
     versionName = "2.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    ndk {
+      abiFilters += "arm64-v8a"
+    }
   }
 
   signingConfigs {
@@ -88,6 +92,9 @@ android {
   }
 
   packaging {
+    jniLibs {
+      useLegacyPackaging = false
+    }
     resources {
       excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
@@ -102,13 +109,19 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
-// Blue-Ocean Cloud-First Android Client:
-// ZERO ML Kit, ZERO AICore, ZERO LiteRT-LM / ONNX / local .so model runtimes.
+// Aircheck + VoiceStudio Rectified Bare-Metal Modules (GGUF+LoRA, LiteRT DAC, 4-Gate ONNX, Oboe EDL, Hairline Clipper, OTA Worker)
 dependencies {
+  implementation(project(":audio-edl"))
+  implementation(project(":core-engine"))
+  implementation(project(":core-verifier"))
+  implementation(project(":ui-clipper"))
+  implementation(project(":sync-trainer:android-worker"))
+
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
 
   implementation(libs.androidx.core.ktx)
+  implementation(libs.androidx.work.runtime.ktx)
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.runtime.compose)
@@ -175,6 +188,7 @@ dependencies {
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
+  testImplementation(libs.androidx.work.testing)
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
 

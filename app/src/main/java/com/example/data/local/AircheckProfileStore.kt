@@ -54,7 +54,8 @@ data class AircheckProfileProto(
     @ProtoNumber(17) val trainingJobId: String = "",
     @ProtoNumber(18) val trainingStatus: String = "",
     @ProtoNumber(19) val trainingError: String = "",
-    @ProtoNumber(20) val fcmToken: String = ""
+    @ProtoNumber(20) val fcmToken: String = "",
+    @ProtoNumber(21) val tailscaleRigUrl: String = ""
 )
 
 data class StudioSettings(
@@ -64,7 +65,8 @@ data class StudioSettings(
     val activeScriptId: String = "",
     val persona: PersonaProfile = PersonaProfile(),
     val providers: StageProviderSettings = StageProviderSettings(),
-    val fcmToken: String = ""
+    val fcmToken: String = "",
+    val tailscaleRigUrl: String = ""
 )
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -167,6 +169,10 @@ class AircheckProfileStore(
         dataStore.updateData { it.copy(fcmToken = token.trim()) }
     }
 
+    suspend fun setTailscaleRigUrl(url: String) {
+        dataStore.updateData { it.copy(tailscaleRigUrl = url.trim()) }
+    }
+
     private fun AircheckProfileProto.toDomain(): StudioSettings = StudioSettings(
         brandChannel = BrandChannel.fromRaw(brandChannel),
         voiceSource = VoiceSource.fromRaw(voiceSource),
@@ -191,6 +197,7 @@ class AircheckProfileStore(
             useLanHead = useLanHead,
             useLanPackage = useLanPackage
         ),
-        fcmToken = fcmToken
+        fcmToken = fcmToken,
+        tailscaleRigUrl = tailscaleRigUrl
     )
 }

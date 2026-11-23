@@ -57,6 +57,8 @@ import com.example.ui.theme.ConsoleElevated
 import com.example.ui.theme.LocalAircheckTokens
 import com.example.ui.theme.OledVoid
 import com.example.ui.theme.StudioCrisp
+import com.voicestudio.ui.ClipperActions
+import com.voicestudio.ui.ClipperScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -125,7 +127,9 @@ fun AircheckApp(viewModel: StudioViewModel) {
     }
 
     val currentRoute = navigationState.currentRoute
-    val isFullScreenOverlay = currentRoute is ScreenKey.SettingsKey || currentRoute is ScreenKey.SystemDeckKey
+    val isFullScreenOverlay = currentRoute is ScreenKey.SettingsKey ||
+        currentRoute is ScreenKey.SystemDeckKey ||
+        currentRoute is ScreenKey.ClipperKey
 
     AircheckTheme(channel = uiState.settings.brandChannel) {
         val tokens = LocalAircheckTokens.current
@@ -160,6 +164,7 @@ fun AircheckApp(viewModel: StudioViewModel) {
                     onAddBeat = viewModel::addBeat,
                     onDeleteBeat = viewModel::deleteBeat,
                     onDismissError = viewModel::dismissError,
+                    onOpenClipper = { navigator.openClipper(uiState.activeProject.id) },
                     onPrimaryAction = {
                         val proj = uiState.activeProject
                         val hasPhoto = !proj.stageConfig.activePhotoSha.isNullOrBlank() ||
@@ -213,12 +218,37 @@ fun AircheckApp(viewModel: StudioViewModel) {
                 )
             }
 
+            entry<ScreenKey.ClipperKey> { key ->
+                LaunchedEffect(key.projectId) {
+                    viewModel.loadClipperForProject(key.projectId)
+                }
+                ClipperScreen(
+                    state = uiState.clipperState,
+                    actions = ClipperActions(
+                        onPlayPause = viewModel::toggleClipperPlayPause,
+                        onSeekSample = viewModel::seekClipperSample,
+                        onSwapTake = viewModel::onClipperSwapTake,
+                        onOverrideClauseText = viewModel::onClipperOverrideClauseText,
+                        onGlobalGapScaleChange = viewModel::onClipperGlobalGapScaleChange,
+                        onToggleVideoAnchor = viewModel::onClipperToggleVideoAnchor,
+                        onExportClip = viewModel::onClipperExport,
+                        onOpenOtaSync = { navigator.navigate(ScreenKey.SystemDeckKey) },
+                        onBack = { navigator.goBack() },
+                        onEditingClauseChange = viewModel::setClipperEditingClause
+                    )
+                )
+            }
+
             entry<ScreenKey.SystemDeckKey> {
                 SystemDeckSheet(
                     uiState = uiState,
                     onSelectChannel = viewModel::setBrandChannel,
                     onClearCasCache = viewModel::clearCasCache,
                     onPreviewAudio = viewModel::togglePreviewMasterWav,
+                    onSaveTailscaleRigUrl = viewModel::saveTailscaleRigUrl,
+                    onSyncOtaBundle = viewModel::syncOtaBundleFromRig,
+                    onSyncPreferences = viewModel::syncPreferencesNow,
+                    onRefreshVmRss = viewModel::refreshVmRssTelemetry,
                     onClose = { navigator.goBack() }
                 )
             }

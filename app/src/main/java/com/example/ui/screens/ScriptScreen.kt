@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FactCheck
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.ButtonDefaults
@@ -112,6 +113,7 @@ fun ScriptScreen(
     onDeleteBeat: (String) -> Unit,
     onDismissError: () -> Unit,
     onPrimaryAction: () -> Unit,
+    onOpenClipper: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
@@ -380,6 +382,31 @@ fun ScriptScreen(
                             )
                         }
                     }
+                }
+            }
+
+            // Direct jump from Script -> VoiceStudio Hairline Clipper (dedicated row, <= 2 adjacent labels)
+            item(key = "script_clipper_entry") {
+                OutlinedButton(
+                    onClick = onOpenClipper,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, tokens.channelAccent.copy(alpha = 0.65f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = tokens.channelAccent),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("open_clipper_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.GraphicEq,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Hairline Clipper",
+                        style = MaterialTheme.typography.labelLarge
+                    )
                 }
             }
         }

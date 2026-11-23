@@ -16,6 +16,8 @@ import androidx.room.Relation
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.AlignedWord
 import com.example.data.ClipCardRow
 import com.example.data.ClipRecord
@@ -26,11 +28,17 @@ import com.example.data.ScriptBeat
 import com.example.data.ScriptProject
 import com.example.data.Stage4Mode
 import com.example.data.VoiceSource
+import com.voicestudio.edl.PreferenceTelemetryRecord
+import com.voicestudio.edl.VoiceProjectManifest
+import com.voicestudio.sync.ScriptSynthesisDraft
+import com.voicestudio.sync.SyncPreferenceStore
+import com.voicestudio.sync.SyncProjectStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicLong
 
 @Entity(
     tableName = "scripts",
@@ -219,6 +227,30 @@ data class CasEntryEntity(
     val lastAccessedMillis: Long
 )
 
+@Entity(
+    tableName = "voice_project_manifests",
+    indices = [Index(value = ["updatedAtMillis"])]
+)
+data class VoiceProjectManifestEntity(
+    @PrimaryKey val projectId: String,
+    val manifestJson: String,
+    val activeLoraVersion: Int,
+    val globalGapScale: Float,
+    val updatedAtMillis: Long
+)
+
+@Entity(
+    tableName = "voice_preferences",
+    indices = [Index(value = ["synced", "timestamp"])]
+)
+data class VoicePreferenceEntity(
+    @PrimaryKey val timestamp: Long,
+    val clauseId: String,
+    val userAction: String,
+    val recordJson: String,
+    val synced: Boolean = false
+)
+
 @Dao
 interface ScriptDao {
     @Transaction
@@ -324,15 +356,50 @@ interface CasDao {
     suspend fun clearAll()
 }
 
+@Dao
+interface VoiceProjectManifestDao {
+    @Query("SELECT * FROM voice_project_manifests WHERE projectId = :projectId LIMIT 1")
+    fun observeByProjectId(projectId: String): Flow<VoiceProjectManifestEntity?>
+
+    @Query("SELECT * FROM voice_project_manifests WHERE projectId = :projectId LIMIT 1")
+    suspend fun getByProjectId(projectId: String): VoiceProjectManifestEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: VoiceProjectManifestEntity)
+
+    @Query("DELETE FROM voice_project_manifests WHERE projectId = :projectId")
+    suspend fun deleteByProjectId(projectId: String)
+}
+
+@Dao
+interface VoicePreferenceDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(entity: VoicePreferenceEntity)
+
+    @Query("SELECT * FROM voice_preferences WHERE synced = 0 ORDER BY timestamp ASC LIMIT :limit")
+    suspend fun listUnsynced(limit: Int): List<VoicePreferenceEntity>
+
+    @Query("UPDATE voice_preferences SET synced = 1 WHERE timestamp IN (:timestamps)")
+    suspend fun markSynced(timestamps: List<Long>)
+
+    @Query("SELECT COUNT(*) FROM voice_preferences WHERE synced = 0")
+    fun observeUnsyncedCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM voice_preferences WHERE synced = 0")
+    suspend fun getUnsyncedCount(): Int
+}
+
 @Database(
     entities = [
         ScriptEntity::class,
         ScriptBeatEntity::class,
         ClipEntity::class,
         OutboxOpEntity::class,
-        CasEntryEntity::class
+        CasEntryEntity::class,
+        VoiceProjectManifestEntity::class,
+        VoicePreferenceEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AircheckDatabase : RoomDatabase() {
@@ -340,10 +407,49 @@ abstract class AircheckDatabase : RoomDatabase() {
     abstract fun clipDao(): ClipDao
     abstract fun outboxDao(): OutboxDao
     abstract fun casDao(): CasDao
+    abstract fun voiceProjectManifestDao(): VoiceProjectManifestDao
+    abstract fun voicePreferenceDao(): VoicePreferenceDao
 
     companion object {
         @Volatile
         private var INSTANCE: AircheckDatabase? = null
+
+        val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `voice_project_manifests` (
+                        `projectId` TEXT NOT NULL,
+                        `manifestJson` TEXT NOT NULL,
+                        `activeLoraVersion` INTEGER NOT NULL,
+                        `globalGapScale` REAL NOT NULL,
+                        `updatedAtMillis` INTEGER NOT NULL,
+                        PRIMARY KEY(`projectId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_voice_project_manifests_updatedAtMillis` " +
+                        "ON `voice_project_manifests` (`updatedAtMillis`)"
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `voice_preferences` (
+                        `timestamp` INTEGER NOT NULL,
+                        `clauseId` TEXT NOT NULL,
+                        `userAction` TEXT NOT NULL,
+                        `recordJson` TEXT NOT NULL,
+                        `synced` INTEGER NOT NULL,
+                        PRIMARY KEY(`timestamp`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_voice_preferences_synced_timestamp` " +
+                        "ON `voice_preferences` (`synced`, `timestamp`)"
+                )
+            }
+        }
 
         fun getInstance(context: Context): AircheckDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -353,6 +459,7 @@ abstract class AircheckDatabase : RoomDatabase() {
                     "aircheck_v2.db"
                 )
                     .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
+                    .addMigrations(MIGRATION_2_3)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }
@@ -377,8 +484,14 @@ object WaveformBlobCodec {
     }
 }
 
-class AircheckLocalRepository(private val db: AircheckDatabase) {
-    private val json = Json { ignoreUnknownKeys = true }
+class AircheckLocalRepository(private val db: AircheckDatabase) :
+    SyncPreferenceStore,
+    SyncProjectStore {
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+    }
+    private val lastPreferenceTimestamp = AtomicLong(0L)
 
     val scripts: Flow<List<ScriptProject>> = db.scriptDao().observeAllWithBeats().map { list ->
         list.map { it.toDomain(json) }
@@ -389,6 +502,94 @@ class AircheckLocalRepository(private val db: AircheckDatabase) {
     }
 
     val pendingOutboxCount: Flow<Int> = db.outboxDao().observePendingCount()
+
+    val unsyncedPreferenceCount: Flow<Int> = db.voicePreferenceDao().observeUnsyncedCount()
+
+    fun observeVoiceManifest(projectId: String): Flow<VoiceProjectManifest?> =
+        db.voiceProjectManifestDao().observeByProjectId(projectId).map { entity ->
+            entity?.let { decodeVoiceManifestOrNull(it.manifestJson) }
+        }
+
+    override suspend fun getProjectManifest(projectId: String): VoiceProjectManifest? {
+        val entity = db.voiceProjectManifestDao().getByProjectId(projectId) ?: return null
+        return decodeVoiceManifestOrNull(entity.manifestJson)
+    }
+
+    override suspend fun getScriptDraftForSynthesis(projectId: String): ScriptSynthesisDraft? {
+        val script = getScriptById(projectId) ?: return null
+        val activeBeats = script.activeBeats
+        val draftText = activeBeats.joinToString(" ") { it.spokenText.trim() }.trim()
+        if (draftText.isEmpty()) return null
+        val overrides = linkedMapOf<String, String>()
+        for (beat in activeBeats) {
+            val raw = beat.phoneticOverride.trim()
+            if (raw.isEmpty()) continue
+            raw.split(";", "\n").forEach { entry ->
+                val pair = entry.trim()
+                val sepIdx = pair.indexOf('=').takeIf { it > 0 } ?: pair.indexOf(':').takeIf { it > 0 }
+                if (sepIdx != null && sepIdx < pair.lastIndex) {
+                    val key = pair.substring(0, sepIdx).trim()
+                    val ipa = pair.substring(sepIdx + 1).trim()
+                    if (key.isNotEmpty() && ipa.isNotEmpty()) {
+                        overrides[key] = ipa
+                    }
+                }
+            }
+        }
+        return ScriptSynthesisDraft(
+            projectId = projectId,
+            rawDraftText = draftText,
+            phoneticOverrides = overrides
+        )
+    }
+
+    override suspend fun saveProjectManifest(manifest: VoiceProjectManifest) {
+        val encoded = json.encodeToString(VoiceProjectManifest.serializer(), manifest)
+        db.voiceProjectManifestDao().upsert(
+            VoiceProjectManifestEntity(
+                projectId = manifest.projectId,
+                manifestJson = encoded,
+                activeLoraVersion = manifest.activeLoraVersion,
+                globalGapScale = manifest.globalGapScale,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
+    }
+
+    override suspend fun appendPreference(record: PreferenceTelemetryRecord) {
+        val uniqueTs = lastPreferenceTimestamp.updateAndGet { prev ->
+            if (record.timestamp > prev) record.timestamp else prev + 1L
+        }
+        val stamped = if (uniqueTs == record.timestamp) record else record.copy(timestamp = uniqueTs)
+        val encoded = json.encodeToString(PreferenceTelemetryRecord.serializer(), stamped)
+        db.voicePreferenceDao().insert(
+            VoicePreferenceEntity(
+                timestamp = stamped.timestamp,
+                clauseId = stamped.clauseId,
+                userAction = stamped.userAction.name,
+                recordJson = encoded,
+                synced = false
+            )
+        )
+    }
+
+    override suspend fun listUnsyncedPreferences(limit: Int): List<PreferenceTelemetryRecord> {
+        return db.voicePreferenceDao().listUnsynced(limit).mapNotNull { entity ->
+            runCatching {
+                json.decodeFromString(PreferenceTelemetryRecord.serializer(), entity.recordJson)
+            }.getOrNull()
+        }
+    }
+
+    override suspend fun markPreferencesSynced(timestamps: List<Long>) {
+        if (timestamps.isEmpty()) return
+        db.voicePreferenceDao().markSynced(timestamps)
+    }
+
+    private fun decodeVoiceManifestOrNull(rawJson: String): VoiceProjectManifest? =
+        runCatching {
+            json.decodeFromString(VoiceProjectManifest.serializer(), rawJson)
+        }.getOrNull()
 
     fun observeClip(clipId: String): Flow<ClipRecord?> =
         db.clipDao().observeClipById(clipId).map { it?.toDomain(json) }
