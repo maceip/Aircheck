@@ -518,6 +518,44 @@ class TestRenderBridgeHttpServer(unittest.TestCase):
         self.assertIsNone(failed["video_url"])
         self.assertFalse((self.renders_dir / f"{job_id}.mp4").exists())
 
+    def test_default_avatar_renders_list_and_ai_assist_validation(self) -> None:
+        self.renders_dir.mkdir(parents=True, exist_ok=True)
+        (self.renders_dir / "breaking_demo.mp4").write_bytes(_sample_mp4_bytes(4096))
+        port = self._start_server(lambda *_: {"output_mp4": None})
+
+        # Default avatar serves exact bytes as image/jpeg
+        status, hdrs, body = self._request(port, "GET", "/v1/default-avatar")
+        self.assertEqual(status, 200)
+        self.assertEqual(hdrs["content-type"], "image/jpeg")
+        self.assertEqual(body, self.default_avatar.read_bytes())
+
+        # /v1/renders lists existing MP4s with real URLs
+        status, _, body = self._request(port, "GET", "/v1/renders")
+        self.assertEqual(status, 200)
+        listed = json.loads(body.decode("utf-8"))["renders"]
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["id"], "breaking_demo")
+        self.assertEqual(listed[0]["video_url"], "/v1/renders/breaking_demo.mp4")
+        self.assertEqual(listed[0]["thumb_url"], "/v1/render-thumbs/breaking_demo.jpg")
+
+        # /v1/ai-assist rejects invalid mode or empty text honestly with 400
+        status, _, _ = self._request(
+            port,
+            "POST",
+            "/v1/ai-assist",
+            body=json.dumps({"mode": "invalid_mode", "text": "hello"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 400)
+        status, _, _ = self._request(
+            port,
+            "POST",
+            "/v1/ai-assist",
+            body=json.dumps({"mode": "flesh_out_story", "text": "   "}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 400)
+
 
 if __name__ == "__main__":
     unittest.main()
