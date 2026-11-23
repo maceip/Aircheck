@@ -1054,7 +1054,16 @@ def _prepare_high_purity_anchor_sequences(
                 "dnsmos_p808": clip["dnsmos_p808"],
                 "purity_score": clip["purity_score"],
                 "sample_weight": round(
-                    max(0.5, min(2.0, 0.5 + 2.0 * (clip["purity_score"] - 1.55))), 4
+                    max(
+                        0.4,
+                        min(
+                            2.2,
+                            0.6
+                            + 2.5 * max(0.0, clip["master_wespeaker_cos"] - 0.80)
+                            + 1.8 * max(0.0, clip["dnsmos_p808"] - 3.60),
+                        ),
+                    ),
+                    4,
                 ),
                 "semantic_codes": codes,
                 **sft,
@@ -1071,8 +1080,8 @@ def _prepare_high_purity_anchor_sequences(
                 "master_wespeaker_cos": scos,
                 "dnsmos_p808": sdns,
                 "purity_score": round(1.5 * scos + 0.5 * (sdns / 5.0), 5),
-                # Gentle weight for lower-DNSMOS seed refs so identity anchors without dragging MOS
-                "sample_weight": 0.45,
+                # Gentle weight for lower-DNSMOS (3.02) seed refs so identity anchors without dragging MOS
+                "sample_weight": 0.15,
                 "semantic_codes": codes,
                 **sft,
             }
@@ -1169,15 +1178,15 @@ def run_phase2_grpo_opsd_training(
     device: str = "mps",
     beta: float = DEFAULT_KL_COEF,
     kl_coef: float = DEFAULT_KL_COEF,
-    learning_rate: float = 2.5e-5,
-    total_steps: int = 24,
+    learning_rate: float = 1.2e-5,
+    total_steps: int = 12,
     weight_decay: float = 0.01,
-    w_dpo: float = 1.0,
-    w_gate_fail: float = 1.5,
-    w_grpo: float = 0.4,
-    w_opsd_kl: float = 0.25,
-    w_chosen_nll: float = 0.35,
-    w_purity_anchor: float = 0.55,
+    w_dpo: float = 0.65,
+    w_gate_fail: float = 1.0,
+    w_grpo: float = 0.30,
+    w_opsd_kl: float = 0.35,
+    w_chosen_nll: float = 0.25,
+    w_purity_anchor: float = 1.10,
     max_target_tokens: int = 256,
     opsd_topk: int = 32,
     seed: int = 2026,
@@ -1414,6 +1423,7 @@ def run_phase2_grpo_opsd_training(
                 {
                     "clause_id": rec.clause_id,
                     "raw_text": rec.raw_text,
+                    "user_gap_scale": float(rec.user_gap_scale),
                     "student_prompt_ids": student_prompt_ids,
                     "chosen_target": chosen_target,
                     "rejected_target": rejected_target,
@@ -1598,8 +1608,10 @@ def run_phase2_grpo_opsd_training(
                     pol_cands, old_cands, ref_cands, rew_cands, kl_coef=kl_coef
                 )
 
+            # Down-weight DPO margin on pace-edited (slow chosen) pairs so cadence stays brisk
+            cadence_dpo_scale = 0.5 if float(grp.get("user_gap_scale", 1.0)) < 0.95 else 1.0
             pref_total = (
-                w_dpo * dpo_loss
+                (w_dpo * cadence_dpo_scale) * dpo_loss
                 + w_gate_fail * gf_loss
                 + w_grpo * grpo_loss
                 + w_opsd_kl * opsd_kl
@@ -2300,6 +2312,146 @@ def run_phase3_ab_and_hotswap(
         device=device,
     )
 
+    # Optional combined v002 stack evaluation: re-decode the exact same v002 held-out codes
+    # through bundles/v002/codec_decoder_fp16.tflite (if exported by dac-finetune-v2)
+    dac_v2_path = DEFAULT_V002_BUNDLE_DIR / "codec_decoder_fp16.tflite"
+    eval_v2_full_stack: dict[str, Any] | None = None
+    deltas_full_stack_all: dict[str, Any] | None = None
+    deltas_full_stack_best: dict[str, Any] | None = None
+    if dac_v2_path.is_file() and dac_v2_path.resolve() != Path(codec_tflite).resolve():
+        print(
+            f"=== [Phase 3] Bonus Full v002 Stack Eval: decoding exact v002 codes via {dac_v2_path.name} ===",
+            flush=True,
+        )
+        v2_codes_list = [np.load(t["codes_npy"]) for t in eval_v2["takes"]]
+        decoded_v2_dac = s2_pro_infer.decode_codes_batch_tflite(
+            v2_codes_list, tflite_path=dac_v2_path
+        )
+        full_dir = ab_dir / "v002_with_dac_v002"
+        full_dir.mkdir(parents=True, exist_ok=True)
+        full_takes: list[dict[str, Any]] = []
+        full_by_prompt: dict[str, list[dict[str, Any]]] = {}
+        for orig_take, (pcm44k, dec_meta) in zip(eval_v2["takes"], decoded_v2_dac):
+            wav_p = full_dir / f"v002_dacv2_{orig_take['clause_id']}_seed{orig_take['seed']}.wav"
+            sf.write(str(wav_p), np.clip(pcm44k, -1.0, 1.0), sar.SAMPLE_RATE_HZ, subtype="PCM_16")
+            gates = sar.evaluate_candidate_4gates(
+                pcm44k,
+                orig_take["raw_text"],
+                master_centroid=master_centroid,
+                wespeaker=wespeaker,
+                dnsmos=dnsmos,
+                whisper_bin=whisper_bin,
+                whisper_model=whisper_model,
+            )
+            rew = score_rollout_reward(gates, human_chosen=False)
+            rec = {
+                **orig_take,
+                "wav_path": str(wav_p),
+                "decode_ms": dec_meta["decode_ms"],
+                "gates": gates,
+                "spec_reward": round(rew, 5),
+            }
+            full_takes.append(rec)
+            full_by_prompt.setdefault(orig_take["clause_id"], []).append(rec)
+            print(
+                f"  [Full v002+DACv2] {orig_take['clause_id']} seed={orig_take['seed']}: "
+                f"CER={gates['cer']:.4f} WeSpeaker={gates['wespeaker_cosine']:.4f} "
+                f"DNSMOS={gates['dnsmos_p808']:.3f} cadence={gates['syllables_per_sec']:.2f} "
+                f"tail={gates['tail_rms_dbfs']:.1f} rew={rew:+.4f}",
+                flush=True,
+            )
+        full_best = [
+            max(cands, key=lambda r: compute_rollout_selection_score(r["gates"]))
+            for _, cands in sorted(full_by_prompt.items())
+        ]
+
+        def _agg_full(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
+            return {
+                "count": len(items),
+                "cer_zero_count": sum(1 for x in items if float(x["gates"]["cer"]) == 0.0),
+                "mean_cer": round(float(np.mean([x["gates"]["cer"] for x in items])), 5),
+                "mean_wespeaker": round(
+                    float(np.mean([x["gates"]["wespeaker_cosine"] for x in items])), 5
+                ),
+                "max_wespeaker": round(
+                    float(np.max([x["gates"]["wespeaker_cosine"] for x in items])), 5
+                ),
+                "mean_dnsmos": round(
+                    float(np.mean([x["gates"]["dnsmos_p808"] for x in items])), 4
+                ),
+                "max_dnsmos": round(
+                    float(np.max([x["gates"]["dnsmos_p808"] for x in items])), 4
+                ),
+                "mean_cadence": round(
+                    float(np.mean([x["gates"]["syllables_per_sec"] for x in items])), 3
+                ),
+                "in_band_cadence_count": sum(
+                    1
+                    for x in items
+                    if sar.GATE_MIN_SYLLABLES_PER_SEC
+                    <= float(x["gates"]["syllables_per_sec"])
+                    <= sar.GATE_MAX_SYLLABLES_PER_SEC
+                ),
+                "tail_pass_count": sum(
+                    1
+                    for x in items
+                    if float(x["gates"]["tail_rms_dbfs"]) <= sar.GATE_MAX_TAIL_RMS_DBFS
+                ),
+                "mean_spec_reward": round(float(np.mean([x["spec_reward"] for x in items])), 5),
+            }
+
+        sf_all = _agg_full(full_takes)
+        sf_best = _agg_full(full_best)
+        eval_v2_full_stack = {
+            "label": "v002_lora_plus_v002_dac",
+            "codec_tflite": str(dac_v2_path),
+            "all_takes_summary": sf_all,
+            "best_of_n_summary": sf_best,
+            "best_per_prompt": [
+                {
+                    "clause_id": b["clause_id"],
+                    "seed": b["seed"],
+                    "gates": b["gates"],
+                    "spec_reward": b["spec_reward"],
+                    "wav_path": b["wav_path"],
+                }
+                for b in full_best
+            ],
+            "takes": full_takes,
+        }
+        deltas_full_stack_all = {
+            "mean_cer_delta": round(sf_all["mean_cer"] - eval_v1["all_takes_summary"]["mean_cer"], 5),
+            "mean_wespeaker_delta": round(
+                sf_all["mean_wespeaker"] - eval_v1["all_takes_summary"]["mean_wespeaker"], 5
+            ),
+            "mean_dnsmos_delta": round(
+                sf_all["mean_dnsmos"] - eval_v1["all_takes_summary"]["mean_dnsmos"], 4
+            ),
+            "mean_cadence_delta": round(
+                sf_all["mean_cadence"] - eval_v1["all_takes_summary"]["mean_cadence"], 3
+            ),
+            "mean_spec_reward_delta": round(
+                sf_all["mean_spec_reward"] - eval_v1["all_takes_summary"]["mean_spec_reward"], 5
+            ),
+        }
+        deltas_full_stack_best = {
+            "mean_cer_delta": round(
+                sf_best["mean_cer"] - eval_v1["best_of_n_summary"]["mean_cer"], 5
+            ),
+            "mean_wespeaker_delta": round(
+                sf_best["mean_wespeaker"] - eval_v1["best_of_n_summary"]["mean_wespeaker"], 5
+            ),
+            "mean_dnsmos_delta": round(
+                sf_best["mean_dnsmos"] - eval_v1["best_of_n_summary"]["mean_dnsmos"], 4
+            ),
+            "mean_cadence_delta": round(
+                sf_best["mean_cadence"] - eval_v1["best_of_n_summary"]["mean_cadence"], 3
+            ),
+            "mean_spec_reward_delta": round(
+                sf_best["mean_spec_reward"] - eval_v1["best_of_n_summary"]["mean_spec_reward"], 5
+            ),
+        }
+
     # Measure exact chosen-token log-prob delta (`logp_v2 - logp_v1`) on Phase 1 chosen rollouts
     # AND on held-out winning takes
     p1_path = work_dir / "phase1_rollouts.json"
@@ -2413,8 +2565,11 @@ def run_phase3_ab_and_hotswap(
         "heldout_ab": {
             "v001": eval_v1,
             "v002": eval_v2,
+            "v002_with_dac_v002": eval_v2_full_stack,
             "delta_v2_minus_v1_all_takes": deltas_all,
             "delta_v2_minus_v1_best_of_n": deltas_best,
+            "delta_full_v002_stack_minus_v001_all_takes": deltas_full_stack_all,
+            "delta_full_v002_stack_minus_v001_best_of_n": deltas_full_stack_best,
         },
         "chosen_logp_delta": {
             "on_policy_chosen_rollouts": logp_delta_on_policy,
@@ -2455,14 +2610,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--codec-tflite", type=Path, default=DEFAULT_CODEC_TFLITE)
     parser.add_argument("--beta", type=float, default=DEFAULT_KL_COEF)
     parser.add_argument("--kl-coef", type=float, default=DEFAULT_KL_COEF)
-    parser.add_argument("--lr", type=float, default=2.5e-5)
-    parser.add_argument("--steps", type=int, default=24)
-    parser.add_argument("--w-dpo", type=float, default=1.0)
-    parser.add_argument("--w-gate-fail", type=float, default=1.5)
-    parser.add_argument("--w-grpo", type=float, default=0.4)
-    parser.add_argument("--w-opsd-kl", type=float, default=0.25)
-    parser.add_argument("--w-chosen-nll", type=float, default=0.35)
-    parser.add_argument("--w-purity-anchor", type=float, default=0.55)
+    parser.add_argument("--lr", type=float, default=1.2e-5)
+    parser.add_argument("--steps", type=int, default=12)
+    parser.add_argument("--w-dpo", type=float, default=0.65)
+    parser.add_argument("--w-gate-fail", type=float, default=1.0)
+    parser.add_argument("--w-grpo", type=float, default=0.30)
+    parser.add_argument("--w-opsd-kl", type=float, default=0.35)
+    parser.add_argument("--w-chosen-nll", type=float, default=0.25)
+    parser.add_argument("--w-purity-anchor", type=float, default=1.10)
     parser.add_argument("--skip-upload", action="store_true")
     return parser.parse_args(argv)
 
