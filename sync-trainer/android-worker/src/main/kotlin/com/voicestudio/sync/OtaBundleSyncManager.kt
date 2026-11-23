@@ -378,8 +378,10 @@ class OtaBundleSyncManager(
                     }
                 }
 
-                persistActiveBundlePointer(targetDir, remoteManifest)
                 val fullBytes = remoteManifest.artifacts.sumOf { it.sizeBytes }
+                if (allStaticReady) {
+                    persistActiveBundlePointer(targetDir, remoteManifest)
+                }
                 val finalStatus = if (allStaticReady) OtaBundleStatus.READY else OtaBundleStatus.NOT_INSTALLED
                 _bundleState.value = OtaBundleState(
                     status = finalStatus,

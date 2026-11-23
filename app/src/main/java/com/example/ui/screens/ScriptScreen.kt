@@ -76,6 +76,7 @@ import com.example.ui.theme.OnAirCrimson
 import com.example.ui.theme.StudioCrisp
 import com.example.ui.theme.TelemetryMuted
 import com.example.ui.theme.TelemetryTimecodeStyle
+import com.voicestudio.edl.OtaBundleStatus
 
 private val DURATION_TARGETS = listOf(10, 15, 30, 45)
 
@@ -373,26 +374,28 @@ fun ScriptScreen(
                         )
                     }
 
-                    OutlinedButton(
-                        onClick = onOpenClipper,
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, tokens.channelAccent.copy(alpha = 0.65f)),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = tokens.channelAccent),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("open_clipper_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.GraphicEq,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Clipper",
-                            style = MaterialTheme.typography.labelLarge
-                        )
+                    if (uiState.otaBundleState.status == OtaBundleStatus.READY) {
+                        OutlinedButton(
+                            onClick = onOpenClipper,
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, tokens.channelAccent.copy(alpha = 0.65f)),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = tokens.channelAccent),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("open_clipper_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.GraphicEq,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Clipper",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
                     }
                 }
             }

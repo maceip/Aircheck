@@ -174,16 +174,14 @@ class AircheckRunningAppE2ETest {
         captureScreenshot(screenshotDir, "e2e_04_system_deck_online.png")
         composeRule.onNodeWithTag("close_system_deck_button").performClick()
 
-        // 6. Hairline Clipper launch & back navigation.
+        // 6. Verify Clipper dead-end is hidden when offline OTA bundle isn't preloaded.
         composeRule.onNodeWithTag("dock_tab_script").performClick()
-        scrollListTo("script_lazy_list", "open_clipper_button")
-        composeRule.onNodeWithTag("open_clipper_button").performClick()
-        composeRule.waitForIdle()
-        Espresso.pressBack()
-        composeRule.waitUntil(timeoutMillis = 5_000L) {
-            composeRule.onAllNodesWithTag("script_primary_cta").fetchSemanticsNodes().isNotEmpty()
-        }
-        assertNoErrorBanner("clipper roundtrip")
+        assertEquals(
+            "Clipper button must stay hidden when offline OTA bundle is not preloaded",
+            0,
+            composeRule.onAllNodesWithTag("open_clipper_button").fetchSemanticsNodes().size
+        )
+        assertNoErrorBanner("script clean state")
 
         // 7. REAL talking-head video render from running Android app -> live Mac :8443 -> ExoPlayer!
         // Switch to Local Voice Clone so a real spoken voice is synthesized on Mac :8443 even if

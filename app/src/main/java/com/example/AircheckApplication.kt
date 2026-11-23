@@ -53,7 +53,14 @@ class AircheckContainer(context: Context) {
 
     // VoiceStudio Local Synthesis, Wait-Free Oboe EDL & Mac Rig OTA Sync
     val otaBundleSyncManager: OtaBundleSyncManager by lazy {
-        OtaBundleSyncManager(appContext, okHttpClient)
+        OtaBundleSyncManager(
+            appContext,
+            okHttpClient.newBuilder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(0, TimeUnit.SECONDS)
+                .callTimeout(0, TimeUnit.SECONDS)
+                .build()
+        )
     }
     val edlController: EdlController by lazy { EdlController() }
     val voiceStudioCoordinator: VoiceStudioSyncCoordinator by lazy {
