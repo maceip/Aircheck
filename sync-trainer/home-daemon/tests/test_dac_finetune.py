@@ -29,6 +29,7 @@ if str(HOME_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(HOME_DAEMON_DIR))
 
 from enroll_voice_assets import (  # noqa: E402
+    WeSpeakerEngine,
     compute_log_mel_filterbank,
     load_audio_mono,
     resample_44k_to_16k_android_exact,
@@ -53,6 +54,8 @@ from finetune_dac_decoder import (  # noqa: E402
     CachedEncodedClip,
     ClipEvalMetrics,
     DecoderEMA,
+    FrozenWeSpeakerResNet34,
+    MultiPeriodDiscriminator,
     MultiResolutionSTFTLoss,
     MultiScaleMelLoss,
     SpeechBand16kMelLoss,
@@ -60,6 +63,8 @@ from finetune_dac_decoder import (  # noqa: E402
     build_train_eval_split,
     compute_cosine_lr,
     compute_early_stopping_score,
+    compute_hinge_disc_loss,
+    compute_hinge_gen_and_fm_loss,
     compute_si_snr_db,
     freeze_encoder_and_quantizer,
     sample_causal_crop_batch,
@@ -129,9 +134,9 @@ def test_acoustic_losses_parity_and_gradients():
 
     # Exact parity of differentiable 16 kHz resampler & CMN log-mel vs Android/enroll_voice_assets
     ref_16 = resample_44k_to_16k_android_exact(seg)
-    ref_mel = compute_log_mel_filterbank(ref_16, log_floor=1e-7)
+    ref_mel = compute_log_mel_filterbank(ref_16, log_floor=1e-10)
 
-    sb = SpeechBand16kMelLoss()
+    sb = SpeechBand16kMelLoss(log_floor=1e-10)
     x_t = torch.from_numpy(seg).unsqueeze(0).requires_grad_(True)
     pt_16 = sb.resample_44k_to_16k(x_t)
     assert np.max(np.abs(pt_16[0].detach().numpy() - ref_16)) < 1e-6
@@ -166,6 +171,41 @@ def test_acoustic_losses_parity_and_gradients():
     assert compute_si_snr_db(seg, seg) > 60.0
     assert compute_si_snr_db(seg * 0.5, seg) > 60.0  # scale-invariant
     assert compute_si_snr_db(pert.detach().numpy()[0], seg) < 30.0
+
+
+def test_frozen_wespeaker_resnet34_parity_and_mpd_losses():
+    wav_44k, _ = load_audio_mono(DEFAULT_VOICE_REF_ALT, target_sr=SAMPLE_RATE_HZ)
+    seg = wav_44k[:32768].copy()
+
+    ws_ort = WeSpeakerEngine()
+    ort_emb = ws_ort.extract_embedding(resample_44k_to_16k_android_exact(seg))
+
+    sb = SpeechBand16kMelLoss(log_floor=1e-10)
+    ws_pt = FrozenWeSpeakerResNet34()
+    assert all(not p.requires_grad for p in ws_pt.parameters())
+
+    x_t = torch.from_numpy(seg).unsqueeze(0).requires_grad_(True)
+    _, cmn = sb.compute_features(x_t)
+    pt_emb, feats = ws_pt.forward_with_features(cmn)
+    assert len(feats) == 4
+    max_diff = float(np.max(np.abs(pt_emb[0].detach().numpy() - ort_emb)))
+    cos = float(np.dot(pt_emb[0].detach().numpy(), ort_emb))
+    assert max_diff < 1e-5, f"WeSpeaker PyTorch vs ORT drift too high: {max_diff}"
+    assert cos > 0.999999
+
+    loss_ws = (1.0 - pt_emb.sum()) + sum(f.abs().mean() for f in feats)
+    loss_ws.backward()
+    assert x_t.grad is not None and torch.isfinite(x_t.grad).all()
+
+    mpd = MultiPeriodDiscriminator(periods=(2, 3, 5))
+    real = torch.from_numpy(seg).view(1, 1, -1)
+    fake = (real + 0.01 * torch.randn_like(real)).detach().requires_grad_(True)
+    r_outs, f_outs, r_fmaps, f_fmaps = mpd(real, fake)
+    d_loss = compute_hinge_disc_loss(r_outs, f_outs)
+    g_adv, g_fm = compute_hinge_gen_and_fm_loss(f_outs, r_fmaps, f_fmaps)
+    assert torch.isfinite(d_loss) and torch.isfinite(g_adv) and torch.isfinite(g_fm)
+    (g_adv + g_fm).backward()
+    assert fake.grad is not None and torch.isfinite(fake.grad).all()
 
 
 def test_freeze_encoder_and_quantizer_exact_param_counts():

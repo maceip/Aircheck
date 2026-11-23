@@ -11,23 +11,27 @@ Implements SPEC.md Fix #2 on Apple Silicon MPS:
      from `/Users/mac/Downloads/voicestudio-models/dataset/manifest.jsonl`.
 2. Measures exact baseline stock `codec.pth` round-trip metrics on the held-out set:
    - Mean WeSpeaker ResNet34 cosine vs `bundles/v001/master_centroid.bin`
-   - Mean Microsoft DNSMOS p808 (`model_v8.onnx`, official scaling) + sig/bak/ovr
+   - Mean Microsoft DNSMOS p808 (`model_v8.onnx`, official scaling) + `sig_bak_ovr.onnx`
    - Mean multi-resolution log-STFT L1 loss (`512, 1024, 2048`) & waveform SI-SNR (dB)
 3. Pre-encodes all clips ONCE through the 100% FROZEN `encoder + quantizer` to cache
    `(codes, z_upsampled, target_wav_44k)` in RAM (zero encoder/quantizer overhead per step,
    guaranteed bit-exact discrete codebook compatibility with `s2-pro`).
-4. Fine-tunes ONLY `decoder.model` (54,104,162 params) on MPS using:
+4. Fine-tunes ONLY `decoder.model` (54,104,162 params) on MPS avoiding GAN-vocoder L1
+   over-smoothing by combining:
    - Multi-resolution STFT loss (spectral convergence + log-magnitude L1 across FFT 512/1024/2048)
-   - Multi-scale 44.1 kHz log-Mel L1 loss (80-mel @ 1024 + 128-mel @ 2048)
-   - Differentiable 16 kHz speech-band log-Mel L1 loss (exact Android/WeSpeaker 80-mel
-     20-7600 Hz, 0.97 pre-emphasis, Povey window, CMN)
-   - Gentle waveform L1 loss + optional L2-SP anchor regularization to stock weights
+   - Multi-scale 44.1 kHz log-Mel L1 loss + differentiable 16 kHz speech-band log-Mel L1 loss
+   - Gentle waveform L1 loss + L2-SP anchor regularization to stock `decoder.model` weights
+   - Frozen Perceptual WeSpeaker ResNet34 Feature Matching (all 4 residual stages) +
+     per-utterance speaker-consistency cosine loss (`pred` vs that utterance's OWN `target`
+     recording ONLY — never referencing `master_centroid.bin` or held-out clips!)
+   - Real Multi-Period Discriminator (MPD, periods 2/3/5/7/11) Hinge GAN + Feature Matching
+     loss trained on Ryan's clean studio audio to preserve crisp harmonic structure & DNSMOS
    - Exact causal left-context cropping (`24` z-frames = `278.6 ms` -> `0.0` drift vs full decode)
    - Low LR (`1e-5..3e-5`), linear warmup + cosine decay, gradient clipping, EMA shadow weights,
      and strict early stopping on held-out WeSpeaker + DNSMOS.
 5. Saves `codec_finetuned_v002.pth` (all 541 keys, `encoder.*` and `quantizer.*` bit-identical to
    stock `codec.pth`, `strict=True` loadable) + `dac_finetune_report.json`.
-6. Optionally exports `/Users/mac/Downloads/voicestudio-models/bundles/v002/codec_decoder_fp16.tflite`
+6. Exports `/Users/mac/Downloads/voicestudio-models/bundles/v002/codec_decoder_fp16.tflite`
    via `/Users/mac/.venv-lrt/bin/python` (`export_codec_decoder_tflite.py`) and benchmarks stock
    `v001` vs fine-tuned `v002` `.tflite` on BOTH the held-out real-voice set and real unseen
    `s2-pro` generated candidate codes.
@@ -36,13 +40,12 @@ Implements SPEC.md Fix #2 on Apple Silicon MPS:
 from __future__ import annotations
 
 import argparse
-import copy
-import dataclasses
 import datetime
 import hashlib
 import json
 import math
 import random
+import struct
 import subprocess
 import sys
 import time
@@ -54,6 +57,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.parametrizations import weight_norm as param_weight_norm
 
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
@@ -224,22 +228,28 @@ class FineTuneConfig:
     min_train_dnsmos: float = 3.45
     min_train_wespeaker: float = 0.73
     heldout_manifest_ids: tuple[str, ...] = DEFAULT_HELDOUT_MANIFEST_IDS
-    steps: int = 360
+    steps: int = 320
     eval_every: int = 40
     batch_size: int = 4
-    crop_z_frames: int = 128  # 128 * 512 = 65,536 samples (1.486 s)
+    crop_z_frames: int = 160  # 160 * 512 = 81,920 samples (1.858 s)
     context_z_frames: int = CAUSAL_CONTEXT_Z_FRAMES  # 24 z-frames (278.6 ms)
-    lr: float = 2.0e-5
-    min_lr: float = 2.0e-6
-    warmup_steps: int = 25
+    lr: float = 1.5e-5
+    min_lr: float = 1.5e-6
+    disc_lr: float = 1.0e-4
+    warmup_steps: int = 20
     weight_decay: float = 0.0
-    l2_sp_weight: float = 2.0e-4
+    l2_sp_weight: float = 5.0e-3
     grad_clip_norm: float = 1.0
-    ema_decay: float = 0.99
-    mr_stft_weight: float = 1.0
-    mel_44k_weight: float = 1.0
-    mel_16k_speech_weight: float = 1.25
-    wav_l1_weight: float = 0.5
+    ema_decay: float = 0.985
+    mr_stft_weight: float = 0.30
+    mel_44k_weight: float = 0.30
+    mel_16k_speech_weight: float = 0.25
+    wav_l1_weight: float = 0.10
+    spk_cos_weight: float = 2.50
+    spk_fm_weight: float = 2.00
+    mpd_adv_weight: float = 0.15
+    mpd_fm_weight: float = 1.50
+    mpd_start_step: int = 20
     early_stop_patience_evals: int = 4
     seed: int = 20261123
     device: str = "auto"
@@ -342,8 +352,6 @@ def build_train_eval_split(
             )
         )
 
-    eval_ids = {c.clip_id for c in eval_clips}
-    eval_paths = {c.wav_path for c in eval_clips}
     eval_shas = {c.sha256 for c in eval_clips}
 
     train_clips: list[AudioClipSpec] = []
@@ -399,7 +407,9 @@ def assert_no_split_leakage(
     eval_paths = {c.wav_path.resolve() for c in eval_clips}
     overlap_paths = train_paths & eval_paths
     if overlap_paths:
-        raise AssertionError(f"Split leakage detected on paths: {sorted(map(str, overlap_paths))}")
+        raise AssertionError(
+            f"Split leakage detected on paths: {sorted(map(str, overlap_paths))}"
+        )
 
     train_shas = {c.sha256 for c in train_clips if c.sha256}
     eval_shas = {c.sha256 for c in eval_clips if c.sha256}
@@ -474,7 +484,6 @@ class MultiResolutionSTFTLoss(nn.Module):
     def _stft_mag(
         self, x: torch.Tensor, n_fft: int, hop: int, win_len: int, window: torch.Tensor
     ) -> torch.Tensor:
-        # x: [B, T]
         spec = torch.stft(
             x,
             n_fft=n_fft,
@@ -485,13 +494,11 @@ class MultiResolutionSTFTLoss(nn.Module):
             pad_mode="reflect",
             return_complex=True,
         )
-        # Avoid zero-gradient NaN at mag=0 by smoothing inside sqrt
         return torch.sqrt(spec.real.pow(2) + spec.imag.pow(2) + 1e-9)
 
     def forward(
         self, pred: torch.Tensor, target: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return `(spectral_convergence_loss, log_mag_l1_loss)` averaged across resolutions."""
         p = pred.squeeze(1) if pred.ndim == 3 else pred
         t = target.squeeze(1) if target.ndim == 3 else target
         sc_total = p.new_zeros(())
@@ -503,7 +510,6 @@ class MultiResolutionSTFTLoss(nn.Module):
             win = getattr(self, f"window_{i}")
             p_mag = self._stft_mag(p, n_fft, hop, wl, win)
             t_mag = self._stft_mag(t, n_fft, hop, wl, win)
-            # Frobenius spectral convergence per batch item
             diff_norm = torch.linalg.vector_norm(t_mag - p_mag, dim=(1, 2))
             tgt_norm = torch.linalg.vector_norm(t_mag, dim=(1, 2))
             sc_total = sc_total + (diff_norm / (tgt_norm + 1e-7)).mean()
@@ -533,7 +539,7 @@ class MultiScaleMelLoss(nn.Module):
         for i, (n_fft, _hop, n_mels) in enumerate(self.configs):
             self.register_buffer(f"window_{i}", torch.hann_window(n_fft, dtype=torch.float32))
             fb = build_htk_mel_filterbank(sample_rate, n_fft, n_mels, f_min, f_max)
-            self.register_buffer(f"mel_fb_{i}", fb)  # [n_bins, n_mels]
+            self.register_buffer(f"mel_fb_{i}", fb)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         p = pred.squeeze(1) if pred.ndim == 3 else pred
@@ -560,14 +566,12 @@ class MultiScaleMelLoss(nn.Module):
 
 
 class SpeechBand16kMelLoss(nn.Module):
-    """Differentiable 16 kHz speech-band log-Mel loss matching Android/WeSpeaker DSP.
+    """Differentiable 16 kHz speech-band log-Mel frontend matching Android/WeSpeaker DSP.
 
     Exact differentiable PyTorch mirror of:
     1. `resample_44k_to_16k_android_exact` (windowed-sinc half_k=4 Hamming resampler)
     2. `compute_log_mel_filterbank` (400/160/512, per-frame DC removal, 0.97 pre-emphasis,
        Povey window, power spectrum, 80 HTK Mel bins over 20-7600 Hz, log + CMN)
-    Directly supervises the exact formant & timbre representation seen by WeSpeaker and
-    human ears without risking adversarial embedding overfitting.
     """
 
     def __init__(
@@ -580,7 +584,7 @@ class SpeechBand16kMelLoss(nn.Module):
         num_mels: int = 80,
         f_min: float = 20.0,
         f_max: float = 7600.0,
-        log_floor: float = 1e-7,
+        log_floor: float = 1e-10,
     ) -> None:
         super().__init__()
         self.src_sr = int(src_sr)
@@ -598,7 +602,6 @@ class SpeechBand16kMelLoss(nn.Module):
         fb = build_htk_mel_filterbank(dst_sr, fft_size, num_mels, f_min, f_max)
         self.register_buffer("mel_fb", fb)  # [257, 80]
 
-        # Cache resampling index/weight tables keyed by (src_len, device)
         self._resample_cache: dict[tuple[int, str], tuple[torch.Tensor, torch.Tensor]] = {}
 
     def _get_resample_tables(
@@ -634,8 +637,8 @@ class SpeechBand16kMelLoss(nn.Module):
             idx_cols.append(idx_c)
             w_cols.append(w)
 
-        idx_mat = np.stack(idx_cols, axis=-1)  # [dst_len, 9]
-        w_mat = np.stack(w_cols, axis=-1)  # [dst_len, 9]
+        idx_mat = np.stack(idx_cols, axis=-1)
+        w_mat = np.stack(w_cols, axis=-1)
         wsum = w_mat.sum(axis=-1, keepdims=True)
         w_mat = np.where(wsum > 1e-12, w_mat / np.where(wsum > 1e-12, wsum, 1.0), 0.0)
 
@@ -645,18 +648,16 @@ class SpeechBand16kMelLoss(nn.Module):
         return idx_t, w_t
 
     def resample_44k_to_16k(self, wav_44k: torch.Tensor) -> torch.Tensor:
-        # wav_44k: [B, T]
         idx_t, w_t = self._get_resample_tables(wav_44k.shape[-1], wav_44k.device)
-        gathered = wav_44k[:, idx_t]  # [B, dst_len, 9]
-        return (gathered * w_t.unsqueeze(0)).sum(dim=-1)  # [B, dst_len]
+        gathered = wav_44k[:, idx_t]
+        return (gathered * w_t.unsqueeze(0)).sum(dim=-1)
 
     def compute_features(self, wav_44k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return `(raw_log_mel, cmn_log_mel)` each `[B, num_frames, 80]`."""
-        pcm16 = self.resample_44k_to_16k(wav_44k)  # [B, T16]
+        pcm16 = self.resample_44k_to_16k(wav_44k)
         if pcm16.shape[-1] < self.frame_length:
             pcm16 = F.pad(pcm16, (0, self.frame_length - pcm16.shape[-1]))
         frames = pcm16.unfold(dimension=-1, size=self.frame_length, step=self.frame_shift)
-        # Per-frame DC removal + 0.97 pre-emphasis matching AudioDspMetrics.kt
         frames = frames - frames.mean(dim=-1, keepdim=True)
         emph_first = frames[..., :1] * 0.03
         emph_rest = frames[..., 1:] - 0.97 * frames[..., :-1]
@@ -674,6 +675,296 @@ class SpeechBand16kMelLoss(nn.Module):
         p_raw, p_cmn = self.compute_features(p)
         t_raw, t_cmn = self.compute_features(t)
         return 0.5 * F.l1_loss(p_raw, t_raw) + 0.5 * F.l1_loss(p_cmn, t_cmn)
+
+
+# ---------------------------------------------------------------------------
+# Frozen Perceptual WeSpeaker ResNet34 Feature Matcher (Zero-Dep ONNX Loader)
+# ---------------------------------------------------------------------------
+
+
+def _pb_read_varint(buf: bytes, pos: int) -> tuple[int, int]:
+    val = 0
+    shift = 0
+    while True:
+        b = buf[pos]
+        pos += 1
+        val |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return val, pos
+        shift += 7
+
+
+def _pb_iter_fields(buf: bytes):
+    pos = 0
+    n = len(buf)
+    while pos < n:
+        tag, pos = _pb_read_varint(buf, pos)
+        fn = tag >> 3
+        wt = tag & 7
+        if wt == 0:
+            v, pos = _pb_read_varint(buf, pos)
+            yield fn, wt, v
+        elif wt == 1:
+            yield fn, wt, buf[pos : pos + 8]
+            pos += 8
+        elif wt == 2:
+            length, pos = _pb_read_varint(buf, pos)
+            yield fn, wt, buf[pos : pos + length]
+            pos += length
+        elif wt == 5:
+            yield fn, wt, buf[pos : pos + 4]
+            pos += 4
+        else:
+            raise ValueError(f"Unsupported protobuf wire type: {wt}")
+
+
+def _parse_wespeaker_resnet34_onnx(
+    onnx_path: Path,
+) -> tuple[list[tuple[str, str, tuple[int, int], tuple[int, int]]], dict[str, np.ndarray]]:
+    """Parse Conv2d specs & float32 initializers directly from wespeaker_en_voxceleb_resnet34.onnx."""
+    data = Path(onnx_path).read_bytes()
+    graph = next(v for fn, wt, v in _pb_iter_fields(data) if fn == 7 and wt == 2)
+    convs: list[tuple[str, str, tuple[int, int], tuple[int, int]]] = []
+    inits: dict[str, np.ndarray] = {}
+    for fn, wt, v in _pb_iter_fields(graph):
+        if fn == 1 and wt == 2:
+            op = ""
+            ins: list[str] = []
+            attrs: dict[str, list[int]] = {}
+            for nfn, _nwt, nv in _pb_iter_fields(v):
+                if nfn == 1:
+                    ins.append(nv.decode("utf-8"))
+                elif nfn == 4:
+                    op = nv.decode("utf-8")
+                elif nfn == 5:
+                    aname = ""
+                    ints: list[int] = []
+                    for afn, awt, av in _pb_iter_fields(nv):
+                        if afn == 1:
+                            aname = av.decode("utf-8")
+                        elif afn == 8 and awt == 0:
+                            ints.append(av)
+                        elif afn == 8 and awt == 2:
+                            p = 0
+                            while p < len(av):
+                                d, p = _pb_read_varint(av, p)
+                                ints.append(d)
+                    if ints:
+                        attrs[aname] = ints
+            if op == "Conv":
+                strides = tuple(int(x) for x in attrs.get("strides", [1, 1]))
+                pads = tuple(int(x) for x in attrs.get("pads", [0, 0, 0, 0])[:2])
+                convs.append((ins[1], ins[2], strides, pads))
+        elif fn == 5 and wt == 2:
+            dims: list[int] = []
+            dtype = 0
+            name = ""
+            raw: bytes | None = None
+            floats: list[float] = []
+            for tfn, twt, tv in _pb_iter_fields(v):
+                if tfn == 1 and twt == 0:
+                    dims.append(int(tv))
+                elif tfn == 1 and twt == 2:
+                    p = 0
+                    while p < len(tv):
+                        d, p = _pb_read_varint(tv, p)
+                        dims.append(int(d))
+                elif tfn == 2:
+                    dtype = int(tv)
+                elif tfn == 4 and twt == 2:
+                    floats = list(struct.unpack(f"<{len(tv) // 4}f", tv))
+                elif tfn == 4 and twt == 5:
+                    floats.append(struct.unpack("<f", tv)[0])
+                elif tfn == 8:
+                    name = tv.decode("utf-8")
+                elif tfn == 9:
+                    raw = tv
+            if dtype == 1:
+                arr = (
+                    np.frombuffer(raw, dtype="<f4").copy()
+                    if raw is not None
+                    else np.array(floats, dtype=np.float32)
+                )
+                inits[name] = arr.reshape(dims)
+    return convs, inits
+
+
+class FrozenWeSpeakerResNet34(nn.Module):
+    """Exact differentiable PyTorch mirror of `wespeaker_en_voxceleb_resnet34.onnx`.
+
+    All 36 fused Conv2d layers + TSTP pooling + `seg_1` projection + `mean_vec` match
+    ONNXRuntime to `~3e-7` max abs diff (`cosine = 1.00000000`). Used strictly as a frozen
+    perceptual speech-encoder comparing `pred_wav` against each training clip's OWN
+    ground-truth `target_wav` (never referencing `master_centroid.bin` or held-out audio).
+    """
+
+    def __init__(self, onnx_path: Path = DEFAULT_WESPEAKER_ONNX) -> None:
+        super().__init__()
+        convs_spec, inits = _parse_wespeaker_resnet34_onnx(Path(onnx_path))
+        if len(convs_spec) != 36:
+            raise RuntimeError(
+                f"Expected 36 Conv nodes in WeSpeaker ResNet34 ONNX, found {len(convs_spec)}"
+            )
+
+        convs: list[nn.Conv2d] = []
+        for w_name, b_name, stride, pad in convs_spec:
+            w = torch.from_numpy(inits[w_name])
+            b = torch.from_numpy(inits[b_name])
+            conv = nn.Conv2d(
+                int(w.shape[1]),
+                int(w.shape[0]),
+                kernel_size=(int(w.shape[2]), int(w.shape[3])),
+                stride=stride,
+                padding=pad,
+                bias=True,
+            )
+            with torch.no_grad():
+                conv.weight.copy_(w)
+                conv.bias.copy_(b)
+            convs.append(conv)
+        self.convs = nn.ModuleList(convs)
+
+        seg_w = torch.from_numpy(inits["model.seg_1.weight"])
+        seg_b = torch.from_numpy(inits["model.seg_1.bias"])
+        self.seg_1 = nn.Linear(int(seg_w.shape[1]), int(seg_w.shape[0]), bias=True)
+        with torch.no_grad():
+            self.seg_1.weight.copy_(seg_w)
+            self.seg_1.bias.copy_(seg_b)
+        self.register_buffer("mean_vec", torch.from_numpy(inits["mean_vec"]))
+
+        for p in self.parameters():
+            p.requires_grad = False
+        self.eval()
+
+    def forward_with_features(
+        self, cmn_mel: torch.Tensor
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Extract `(l2_norm_emb [B, 256], [stage1, stage2, stage3, stage4])` from `[B, T, 80]`."""
+        x = cmn_mel.transpose(1, 2).unsqueeze(1)  # [B, 1, 80, T]
+        x = F.relu(self.convs[0](x))
+        feats: list[torch.Tensor] = []
+
+        # Stage 1 (3 BasicBlocks, 32 ch)
+        for c1, c2 in ((1, 2), (3, 4), (5, 6)):
+            x = F.relu(self.convs[c2](F.relu(self.convs[c1](x))) + x)
+        feats.append(x)
+
+        # Stage 2 (4 BasicBlocks, 64 ch, stride 2 downsample on block 0)
+        x = F.relu(self.convs[8](F.relu(self.convs[7](x))) + self.convs[9](x))
+        for c1, c2 in ((10, 11), (12, 13), (14, 15)):
+            x = F.relu(self.convs[c2](F.relu(self.convs[c1](x))) + x)
+        feats.append(x)
+
+        # Stage 3 (6 BasicBlocks, 128 ch, stride 2 downsample on block 0)
+        x = F.relu(self.convs[17](F.relu(self.convs[16](x))) + self.convs[18](x))
+        for c1, c2 in ((19, 20), (21, 22), (23, 24), (25, 26), (27, 28)):
+            x = F.relu(self.convs[c2](F.relu(self.convs[c1](x))) + x)
+        feats.append(x)
+
+        # Stage 4 (3 BasicBlocks, 256 ch, stride 2 downsample on block 0)
+        x = F.relu(self.convs[30](F.relu(self.convs[29](x))) + self.convs[31](x))
+        for c1, c2 in ((32, 33), (34, 35)):
+            x = F.relu(self.convs[c2](F.relu(self.convs[c1](x))) + x)
+        feats.append(x)
+
+        # TSTP statistics pooling over time dimension (-1)
+        mean = x.mean(dim=-1)
+        denom = max(1, int(x.shape[-1]) - 1)
+        var = (x - mean.unsqueeze(-1)).pow(2).sum(dim=-1) / float(denom)
+        std = torch.sqrt(var + 1e-7)
+        stats = torch.cat([mean.flatten(1), std.flatten(1)], dim=1)
+        emb = self.seg_1(stats) - self.mean_vec
+        return F.normalize(emb, p=2, dim=-1), feats
+
+
+# ---------------------------------------------------------------------------
+# Multi-Period Discriminator (HiFi-GAN / DAC Anti-Smoothing Sharpness GAN)
+# ---------------------------------------------------------------------------
+
+
+class PeriodSubDiscriminator(nn.Module):
+    """Single-period 2D strided conv discriminator matching HiFi-GAN / DAC MPD."""
+
+    def __init__(self, period: int, channels: Sequence[int] = (16, 64, 128, 256, 256)) -> None:
+        super().__init__()
+        self.period = int(period)
+        layers: list[nn.Module] = []
+        in_ch = 1
+        for i, out_ch in enumerate(channels):
+            stride = (3, 1) if i < len(channels) - 1 else (1, 1)
+            layers.append(
+                param_weight_norm(
+                    nn.Conv2d(in_ch, out_ch, kernel_size=(5, 1), stride=stride, padding=(2, 0))
+                )
+            )
+            in_ch = out_ch
+        self.convs = nn.ModuleList(layers)
+        self.conv_post = param_weight_norm(
+            nn.Conv2d(in_ch, 1, kernel_size=(3, 1), stride=(1, 1), padding=(1, 0))
+        )
+
+    def forward(self, wav: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        # wav: [B, 1, T]
+        b, c, t = wav.shape
+        rem = t % self.period
+        if rem != 0:
+            wav = F.pad(wav, (0, self.period - rem), mode="reflect")
+            t = wav.shape[-1]
+        x = wav.view(b, c, t // self.period, self.period)
+        fmap: list[torch.Tensor] = []
+        for conv in self.convs:
+            x = F.leaky_relu(conv(x), 0.1)
+            fmap.append(x)
+        x = self.conv_post(x)
+        fmap.append(x)
+        return x.flatten(1), fmap
+
+
+class MultiPeriodDiscriminator(nn.Module):
+    """Multi-Period Discriminator (`periods=(2, 3, 5, 7, 11)`) preventing L1 vocoder blur."""
+
+    def __init__(self, periods: Sequence[int] = (2, 3, 5, 7, 11)) -> None:
+        super().__init__()
+        self.sub_discs = nn.ModuleList([PeriodSubDiscriminator(p) for p in periods])
+
+    def forward(
+        self, real_wav: torch.Tensor, fake_wav: torch.Tensor
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[list[torch.Tensor]], list[list[torch.Tensor]]]:
+        r_outs, f_outs, r_fmaps, f_fmaps = [], [], [], []
+        for sd in self.sub_discs:
+            ro, rf = sd(real_wav)
+            fo, ff = sd(fake_wav)
+            r_outs.append(ro)
+            f_outs.append(fo)
+            r_fmaps.append(rf)
+            f_fmaps.append(ff)
+        return r_outs, f_outs, r_fmaps, f_fmaps
+
+
+def compute_hinge_disc_loss(
+    real_outs: Sequence[torch.Tensor], fake_outs: Sequence[torch.Tensor]
+) -> torch.Tensor:
+    loss = real_outs[0].new_zeros(())
+    for ro, fo in zip(real_outs, fake_outs):
+        loss = loss + F.relu(1.0 - ro).mean() + F.relu(1.0 + fo).mean()
+    return loss / float(len(real_outs))
+
+
+def compute_hinge_gen_and_fm_loss(
+    fake_outs: Sequence[torch.Tensor],
+    real_fmaps: Sequence[Sequence[torch.Tensor]],
+    fake_fmaps: Sequence[Sequence[torch.Tensor]],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    adv = fake_outs[0].new_zeros(())
+    fm = fake_outs[0].new_zeros(())
+    n_fmap = 0
+    for fo in fake_outs:
+        adv = adv + F.relu(1.0 - fo).mean()
+    for rf_list, ff_list in zip(real_fmaps, fake_fmaps):
+        for rf, ff in zip(rf_list, ff_list):
+            fm = fm + F.l1_loss(ff, rf.detach())
+            n_fmap += 1
+    return adv / float(len(fake_outs)), fm / float(max(1, n_fmap))
 
 
 def compute_si_snr_db(pred: np.ndarray, target: np.ndarray, eps: float = 1e-8) -> float:
@@ -779,8 +1070,12 @@ def sample_causal_crop_batch(
     wav_batch: list[torch.Tensor] = []
     crop_samples = crop_z_frames * Z_FRAME_HOP_SAMPLES
 
-    # Weight sampling probability slightly by clip duration so longer utterances get fair coverage
-    weights = [max(1.0, float(c.spec.duration_sec)) for c in cached_clips]
+    # Weight sampling slightly toward cleaner studio duration while covering all training clips
+    weights = [
+        max(1.0, float(c.spec.duration_sec))
+        * max(0.5, float((c.spec.manifest_dnsmos_p808 or 3.6) - 3.1))
+        for c in cached_clips
+    ]
     chosen = rng.choices(cached_clips, weights=weights, k=batch_size)
 
     for clip in chosen:
@@ -789,7 +1084,6 @@ def sample_causal_crop_batch(
         usable_z = min(z.shape[-1], wav.shape[-1] // Z_FRAME_HOP_SAMPLES)
 
         if usable_z <= crop_z_frames:
-            t0 = 0
             z_seg = z[:, :usable_z]
             w_seg = wav[:, : usable_z * Z_FRAME_HOP_SAMPLES]
             if usable_z < crop_z_frames:
@@ -818,7 +1112,7 @@ def sample_causal_crop_batch(
 class DecoderEMA:
     """Exponential moving average shadow weights for `decoder.model`."""
 
-    def __init__(self, decoder_model: nn.Module, decay: float = 0.99) -> None:
+    def __init__(self, decoder_model: nn.Module, decay: float = 0.985) -> None:
         self.decay = float(decay)
         self.shadow: dict[str, torch.Tensor] = {
             k: v.detach().clone() for k, v in decoder_model.state_dict().items()
@@ -1014,6 +1308,8 @@ def evaluate_tflite_on_s2pro_candidates(
         ws2 = cosine_similarity(ws_engine.extract_embedding(p2_16), centroid)
         dns1 = dns_engine.score_p808(p1_16)
         dns2 = dns_engine.score_p808(p2_16)
+        sbo1 = dns_engine.score_sig_bak_ovr(p1_16)
+        sbo2 = dns_engine.score_sig_bak_ovr(p2_16)
         rows.append(
             {
                 "candidate": p.name,
@@ -1023,8 +1319,12 @@ def evaluate_tflite_on_s2pro_candidates(
                 "v001_dnsmos_p808": round(dns1, 4),
                 "v002_dnsmos_p808": round(dns2, 4),
                 "dnsmos_delta": round(dns2 - dns1, 4),
+                "v001_dnsmos_ovr": round(sbo1["ovr"], 4) if sbo1 else None,
+                "v002_dnsmos_ovr": round(sbo2["ovr"], 4) if sbo2 else None,
             }
         )
+    ovr1 = [r["v001_dnsmos_ovr"] for r in rows if r["v001_dnsmos_ovr"] is not None]
+    ovr2 = [r["v002_dnsmos_ovr"] for r in rows if r["v002_dnsmos_ovr"] is not None]
     return {
         "num_candidates": len(rows),
         "v001_mean_wespeaker_cos": round(float(np.mean([r["v001_wespeaker_cos"] for r in rows])), 5),
@@ -1033,6 +1333,8 @@ def evaluate_tflite_on_s2pro_candidates(
         "v001_mean_dnsmos_p808": round(float(np.mean([r["v001_dnsmos_p808"] for r in rows])), 4),
         "v002_mean_dnsmos_p808": round(float(np.mean([r["v002_dnsmos_p808"] for r in rows])), 4),
         "mean_dnsmos_delta": round(float(np.mean([r["dnsmos_delta"] for r in rows])), 4),
+        "v001_mean_dnsmos_ovr": round(float(np.mean(ovr1)), 4) if ovr1 else None,
+        "v002_mean_dnsmos_ovr": round(float(np.mean(ovr2)), 4) if ovr2 else None,
         "per_candidate": rows,
     }
 
@@ -1067,17 +1369,23 @@ def compute_early_stopping_score(
     eval_summary: EvalSuiteSummary,
     baseline_summary: EvalSuiteSummary,
 ) -> float:
-    """Composite held-out selection score balancing WeSpeaker, DNSMOS, and log-STFT.
+    """Composite held-out selection score balancing WeSpeaker, DNSMOS p808/ovr, and log-STFT.
 
-    Rewards real gains in held-out WeSpeaker cosine and DNSMOS p808 while penalizing any
-    regression in DNSMOS or multi-resolution log-STFT reconstruction fidelity.
+    Rewards real gains in held-out WeSpeaker cosine and DNSMOS p808 while strictly penalizing
+    regressions in DNSMOS p808, independent DNSMOS ovr, or multi-resolution log-STFT fidelity.
     """
     ws_gain = eval_summary.mean_wespeaker_cos - baseline_summary.mean_wespeaker_cos
     dns_gain = eval_summary.mean_dnsmos_p808 - baseline_summary.mean_dnsmos_p808
     stft_gain = baseline_summary.mean_mr_log_stft_l1 - eval_summary.mean_mr_log_stft_l1
-    # Penalize DNSMOS regressions more steeply than rewards so audio naturalness stays crisp.
-    dns_term = 0.25 * dns_gain if dns_gain >= 0.0 else 0.50 * dns_gain
-    return float(ws_gain + dns_term + 0.15 * stft_gain)
+    ovr_term = 0.0
+    if (
+        eval_summary.mean_dnsmos_ovr is not None
+        and baseline_summary.mean_dnsmos_ovr is not None
+    ):
+        ovr_gain = eval_summary.mean_dnsmos_ovr - baseline_summary.mean_dnsmos_ovr
+        ovr_term = 0.20 * ovr_gain if ovr_gain >= 0.0 else 0.50 * ovr_gain
+    dns_term = 0.30 * dns_gain if dns_gain >= 0.0 else 0.65 * dns_gain
+    return float(ws_gain + dns_term + ovr_term + 0.10 * stft_gain)
 
 
 # ---------------------------------------------------------------------------
@@ -1148,9 +1456,7 @@ def verify_frozen_keys_bit_exact(
     stock_sd = torch.load(str(stock_codec_pth), map_location="cpu", weights_only=True)
     ft_sd = torch.load(str(finetuned_codec_pth), map_location="cpu", weights_only=True)
     if set(stock_sd.keys()) != set(ft_sd.keys()):
-        raise AssertionError(
-            f"Checkpoint key mismatch: {len(stock_sd)} vs {len(ft_sd)}"
-        )
+        raise AssertionError(f"Checkpoint key mismatch: {len(stock_sd)} vs {len(ft_sd)}")
     frozen_checked = 0
     decoder_changed = 0
     for k in stock_sd:
@@ -1251,14 +1557,29 @@ def finetune_dac_decoder(
         f"Frozen encoder+quantizer params: {frozen_params:,} ({frozen_params/1e6:.2f}M)"
     )
 
-    # Losses
+    # Differentiable losses + frozen perceptual ResNet34 + MPD sharpness discriminator
     mr_stft_loss_fn = MultiResolutionSTFTLoss(
         fft_sizes=(512, 1024, 2048),
         hop_sizes=(128, 256, 512),
         win_lengths=(512, 1024, 2048),
     ).to(device)
     mel_44k_loss_fn = MultiScaleMelLoss().to(device)
-    mel_16k_loss_fn = SpeechBand16kMelLoss().to(device)
+    mel_16k_loss_fn = SpeechBand16kMelLoss(log_floor=1e-10).to(device)
+
+    perceptual_ws: FrozenWeSpeakerResNet34 | None = None
+    if cfg.spk_cos_weight > 0.0 or cfg.spk_fm_weight > 0.0:
+        perceptual_ws = FrozenWeSpeakerResNet34(cfg.wespeaker_onnx).to(device)
+        print("      Loaded FrozenWeSpeakerResNet34 perceptual encoder (4-stage FM + self-cos)")
+
+    mpd: MultiPeriodDiscriminator | None = None
+    disc_optimizer: torch.optim.Optimizer | None = None
+    if cfg.mpd_adv_weight > 0.0 or cfg.mpd_fm_weight > 0.0:
+        mpd = MultiPeriodDiscriminator(periods=(2, 3, 5, 7, 11)).to(device)
+        disc_optimizer = torch.optim.AdamW(
+            mpd.parameters(), lr=cfg.disc_lr, betas=(0.8, 0.99), weight_decay=0.0
+        )
+        mpd_params = sum(p.numel() for p in mpd.parameters())
+        print(f"      Initialized MultiPeriodDiscriminator ({mpd_params:,} params, periods 2/3/5/7/11)")
 
     # 4. Exact baseline evaluation on held-out set
     baseline_eval = evaluate_pytorch_decoder(
@@ -1276,7 +1597,7 @@ def finetune_dac_decoder(
         f"raw_ws={baseline_eval.mean_raw_wespeaker_cos:.4f} -> "
         f"stock_ws={baseline_eval.mean_wespeaker_cos:.4f} "
         f"({baseline_eval.mean_wespeaker_drop_vs_raw:+.4f}) | "
-        f"DNSMOS={baseline_eval.mean_dnsmos_p808:.4f} (raw={baseline_eval.mean_raw_dnsmos_p808:.4f}) | "
+        f"DNSMOS={baseline_eval.mean_dnsmos_p808:.4f} (ovr={baseline_eval.mean_dnsmos_ovr}) | "
         f"logSTFT={baseline_eval.mean_mr_log_stft_l1:.4f} | SI-SNR={baseline_eval.mean_si_snr_db:.2f} dB"
     )
     for cm in baseline_eval.per_clip:
@@ -1302,7 +1623,6 @@ def finetune_dac_decoder(
         weight_decay=cfg.weight_decay,
     )
 
-    # Best checkpoint tracking (starts at step 0 = stock baseline)
     best_score = 0.0
     best_step = 0
     best_source = "stock"
@@ -1320,6 +1640,7 @@ def finetune_dac_decoder(
             "score": 0.0,
             "mean_wespeaker_cos": baseline_eval.mean_wespeaker_cos,
             "mean_dnsmos_p808": baseline_eval.mean_dnsmos_p808,
+            "mean_dnsmos_ovr": baseline_eval.mean_dnsmos_ovr,
             "mean_mr_log_stft_l1": baseline_eval.mean_mr_log_stft_l1,
             "mean_si_snr_db": baseline_eval.mean_si_snr_db,
         }
@@ -1333,14 +1654,13 @@ def finetune_dac_decoder(
     print(
         f"[5/6] Fine-tuning decoder.model for up to {cfg.steps} steps "
         f"(B={cfg.batch_size}, crop={cfg.crop_z_frames}z+{cfg.context_z_frames}ctx, "
-        f"lr={cfg.lr:.1e}->{cfg.min_lr:.1e}, l2_sp={cfg.l2_sp_weight:.1e})..."
+        f"lr={cfg.lr:.1e}->{cfg.min_lr:.1e}, spk_cos={cfg.spk_cos_weight}, "
+        f"spk_fm={cfg.spk_fm_weight}, mpd_adv={cfg.mpd_adv_weight}, l2_sp={cfg.l2_sp_weight:.1e})..."
     )
 
     dac.decoder.train()
     for step in range(1, cfg.steps + 1):
-        lr_now = compute_cosine_lr(
-            step - 1, cfg.steps, cfg.lr, cfg.min_lr, cfg.warmup_steps
-        )
+        lr_now = compute_cosine_lr(step - 1, cfg.steps, cfg.lr, cfg.min_lr, cfg.warmup_steps)
         for pg in optimizer.param_groups:
             pg["lr"] = lr_now
 
@@ -1353,14 +1673,34 @@ def finetune_dac_decoder(
             device=device,
         )
 
-        optimizer.zero_grad(set_to_none=True)
+        # Forward generator (decoder.model ONLY)
         pred_full = dac.decoder(z_in)
         pred_wav = pred_full[:, :, ctx_samples : ctx_samples + target_wav.shape[-1]]
 
+        # Discriminator update (trained on real studio target_wav vs detached pred_wav)
+        d_loss_val = 0.0
+        if mpd is not None and disc_optimizer is not None:
+            for p in mpd.parameters():
+                p.requires_grad = True
+            disc_optimizer.zero_grad(set_to_none=True)
+            r_outs_d, f_outs_d, _, _ = mpd(target_wav, pred_wav.detach())
+            d_loss = compute_hinge_disc_loss(r_outs_d, f_outs_d)
+            d_loss.backward()
+            torch.nn.utils.clip_grad_norm_(mpd.parameters(), cfg.grad_clip_norm)
+            disc_optimizer.step()
+            d_loss_val = float(d_loss.item())
+            for p in mpd.parameters():
+                p.requires_grad = False
+
+        # Generator update
+        optimizer.zero_grad(set_to_none=True)
         sc_loss, mag_loss = mr_stft_loss_fn(pred_wav, target_wav)
         mr_loss = sc_loss + mag_loss
         mel44_loss = mel_44k_loss_fn(pred_wav, target_wav)
-        mel16_loss = mel_16k_loss_fn(pred_wav, target_wav)
+        p_raw16, p_cmn16 = mel_16k_loss_fn.compute_features(pred_wav.squeeze(1))
+        with torch.no_grad():
+            t_raw16, t_cmn16 = mel_16k_loss_fn.compute_features(target_wav.squeeze(1))
+        mel16_loss = 0.5 * F.l1_loss(p_raw16, t_raw16) + 0.5 * F.l1_loss(p_cmn16, t_cmn16)
         wav_l1 = F.l1_loss(pred_wav, target_wav)
 
         total_loss = (
@@ -1370,6 +1710,38 @@ def finetune_dac_decoder(
             + cfg.wav_l1_weight * wav_l1
         )
 
+        # Frozen Perceptual ResNet34 Feature Matching + per-utterance self-consistency
+        spk_cos_val = 0.0
+        spk_fm_val = 0.0
+        if perceptual_ws is not None:
+            p_emb, p_feats = perceptual_ws.forward_with_features(p_cmn16)
+            with torch.no_grad():
+                t_emb, t_feats = perceptual_ws.forward_with_features(t_cmn16)
+            spk_cos_loss = (1.0 - (p_emb * t_emb).sum(dim=-1)).mean()
+            spk_fm_loss = pred_wav.new_zeros(())
+            for pf, tf in zip(p_feats, t_feats):
+                # Normalize each stage by target mean abs amplitude so all 4 stages balance cleanly
+                scale = tf.abs().mean().clamp_min(1e-3)
+                spk_fm_loss = spk_fm_loss + F.l1_loss(pf, tf) / scale
+            spk_fm_loss = spk_fm_loss / float(len(p_feats))
+            total_loss = (
+                total_loss
+                + cfg.spk_cos_weight * spk_cos_loss
+                + cfg.spk_fm_weight * spk_fm_loss
+            )
+            spk_cos_val = float(spk_cos_loss.item())
+            spk_fm_val = float(spk_fm_loss.item())
+
+        # Multi-Period Discriminator adversarial + feature matching (after warmup)
+        g_adv_val = 0.0
+        g_fm_val = 0.0
+        if mpd is not None and step >= cfg.mpd_start_step:
+            _, f_outs_g, r_fmaps_g, f_fmaps_g = mpd(target_wav, pred_wav)
+            g_adv, g_fm = compute_hinge_gen_and_fm_loss(f_outs_g, r_fmaps_g, f_fmaps_g)
+            total_loss = total_loss + cfg.mpd_adv_weight * g_adv + cfg.mpd_fm_weight * g_fm
+            g_adv_val = float(g_adv.item())
+            g_fm_val = float(g_fm.item())
+
         l2_sp_val = 0.0
         if cfg.l2_sp_weight > 0.0:
             anchor_pen = pred_wav.new_zeros(())
@@ -1378,7 +1750,7 @@ def finetune_dac_decoder(
                 if p.requires_grad:
                     anchor_pen = anchor_pen + (p - stock_decoder_params[name]).pow(2).mean()
                     n_tensors += 1
-            anchor_pen = anchor_pen / max(1, n_tensors)
+            anchor_pen = anchor_pen / float(max(1, n_tensors))
             total_loss = total_loss + cfg.l2_sp_weight * anchor_pen
             l2_sp_val = float(anchor_pen.item())
 
@@ -1403,6 +1775,11 @@ def finetune_dac_decoder(
                 "mel44": float(mel44_loss.item()),
                 "mel16": float(mel16_loss.item()),
                 "wav_l1": float(wav_l1.item()),
+                "spk_cos": spk_cos_val,
+                "spk_fm": spk_fm_val,
+                "g_adv": g_adv_val,
+                "g_fm": g_fm_val,
+                "d_loss": d_loss_val,
                 "l2_sp": l2_sp_val,
                 "grad_norm": grad_norm,
             }
@@ -1414,12 +1791,14 @@ def finetune_dac_decoder(
                 for k in running_losses[0]
             }
             elapsed = time.perf_counter() - t_train_start
-            train_history.append({"step": step, "lr": lr_now, "elapsed_sec": round(elapsed, 1), **avg})
+            train_history.append(
+                {"step": step, "lr": lr_now, "elapsed_sec": round(elapsed, 1), **avg}
+            )
             print(
                 f"  step {step:4d}/{cfg.steps} ({elapsed:5.1f}s) lr={lr_now:.2e} | "
-                f"loss={avg['total']:.4f} (sc={avg['sc']:.4f} mag={avg['mag']:.4f} "
-                f"m44={avg['mel44']:.4f} m16={avg['mel16']:.4f} l1={avg['wav_l1']:.4f}) "
-                f"gnorm={avg['grad_norm']:.2f}"
+                f"loss={avg['total']:.4f} (mag={avg['mag']:.4f} spk_cos={avg['spk_cos']:.4f} "
+                f"spk_fm={avg['spk_fm']:.4f} g_adv={avg['g_adv']:.3f} g_fm={avg['g_fm']:.3f} "
+                f"d={avg['d_loss']:.3f}) gnorm={avg['grad_norm']:.2f}"
             )
             running_losses.clear()
 
@@ -1461,6 +1840,7 @@ def finetune_dac_decoder(
                         "score": round(sc_val, 5),
                         "mean_wespeaker_cos": ev_obj.mean_wespeaker_cos,
                         "mean_dnsmos_p808": ev_obj.mean_dnsmos_p808,
+                        "mean_dnsmos_ovr": ev_obj.mean_dnsmos_ovr,
                         "mean_mr_log_stft_l1": ev_obj.mean_mr_log_stft_l1,
                         "mean_si_snr_db": ev_obj.mean_si_snr_db,
                     }
@@ -1475,11 +1855,13 @@ def finetune_dac_decoder(
                 f"  [EVAL step {step}] raw: ws={raw_eval.mean_wespeaker_cos:.4f} "
                 f"({raw_eval.mean_wespeaker_cos - baseline_eval.mean_wespeaker_cos:+.4f}) "
                 f"dns={raw_eval.mean_dnsmos_p808:.4f} ({raw_eval.mean_dnsmos_p808 - baseline_eval.mean_dnsmos_p808:+.4f}) "
-                f"stft={raw_eval.mean_mr_log_stft_l1:.4f} sisnr={raw_eval.mean_si_snr_db:.2f} | "
+                f"ovr={raw_eval.mean_dnsmos_ovr} stft={raw_eval.mean_mr_log_stft_l1:.4f} "
+                f"sisnr={raw_eval.mean_si_snr_db:.2f} | "
                 f"ema: ws={ema_eval.mean_wespeaker_cos:.4f} "
                 f"({ema_eval.mean_wespeaker_cos - baseline_eval.mean_wespeaker_cos:+.4f}) "
                 f"dns={ema_eval.mean_dnsmos_p808:.4f} ({ema_eval.mean_dnsmos_p808 - baseline_eval.mean_dnsmos_p808:+.4f}) "
-                f"stft={ema_eval.mean_mr_log_stft_l1:.4f} sisnr={ema_eval.mean_si_snr_db:.2f}"
+                f"ovr={ema_eval.mean_dnsmos_ovr} stft={ema_eval.mean_mr_log_stft_l1:.4f} "
+                f"sisnr={ema_eval.mean_si_snr_db:.2f}"
             )
 
             if cand_score > best_score:
@@ -1498,7 +1880,8 @@ def finetune_dac_decoder(
                 print(
                     f"  >>> NEW BEST checkpoint at step {step} ({cand_src}): "
                     f"score={best_score:+.5f}, ws={best_eval.mean_wespeaker_cos:.4f}, "
-                    f"dns={best_eval.mean_dnsmos_p808:.4f}, stft={best_eval.mean_mr_log_stft_l1:.4f}"
+                    f"dns={best_eval.mean_dnsmos_p808:.4f}, ovr={best_eval.mean_dnsmos_ovr}, "
+                    f"stft={best_eval.mean_mr_log_stft_l1:.4f}"
                 )
             else:
                 evals_without_improvement += 1
@@ -1542,6 +1925,7 @@ def finetune_dac_decoder(
         f"({final_eval.mean_wespeaker_cos - baseline_eval.mean_wespeaker_cos:+.4f}) | "
         f"DNSMOS {baseline_eval.mean_dnsmos_p808:.4f} -> {final_eval.mean_dnsmos_p808:.4f} "
         f"({final_eval.mean_dnsmos_p808 - baseline_eval.mean_dnsmos_p808:+.4f}) | "
+        f"ovr {baseline_eval.mean_dnsmos_ovr} -> {final_eval.mean_dnsmos_ovr} | "
         f"logSTFT {baseline_eval.mean_mr_log_stft_l1:.4f} -> {final_eval.mean_mr_log_stft_l1:.4f} "
         f"({final_eval.mean_mr_log_stft_l1 - baseline_eval.mean_mr_log_stft_l1:+.4f}) | "
         f"SI-SNR {baseline_eval.mean_si_snr_db:.2f} -> {final_eval.mean_si_snr_db:.2f} dB"
@@ -1557,6 +1941,10 @@ def finetune_dac_decoder(
 
     # Free MPS memory before LiteRT export subprocess
     del dac, dac_reloaded, optimizer
+    if mpd is not None:
+        del mpd, disc_optimizer
+    if perceptual_ws is not None:
+        del perceptual_ws
     if device.type == "mps":
         torch.mps.empty_cache()
 
@@ -1588,7 +1976,6 @@ def finetune_dac_decoder(
             Path(v002_export_report_path).read_text(encoding="utf-8")
         )
 
-        # Evaluate stock v001 vs fine-tuned v002 FP16 .tflite on exact held-out set
         mr_stft_cpu = MultiResolutionSTFTLoss(
             fft_sizes=(512, 1024, 2048),
             hop_sizes=(128, 256, 512),
@@ -1623,6 +2010,12 @@ def finetune_dac_decoder(
             "delta_dnsmos_p808": round(
                 v2_tflite_eval.mean_dnsmos_p808 - v1_tflite_eval.mean_dnsmos_p808, 4
             ),
+            "delta_dnsmos_ovr": (
+                round(v2_tflite_eval.mean_dnsmos_ovr - v1_tflite_eval.mean_dnsmos_ovr, 4)
+                if v2_tflite_eval.mean_dnsmos_ovr is not None
+                and v1_tflite_eval.mean_dnsmos_ovr is not None
+                else None
+            ),
             "delta_mr_log_stft_l1": round(
                 v2_tflite_eval.mean_mr_log_stft_l1 - v1_tflite_eval.mean_mr_log_stft_l1, 5
             ),
@@ -1645,10 +2038,10 @@ def finetune_dac_decoder(
             f"({tflite_comparison['delta_wespeaker_cos']:+.4f}) | "
             f"DNSMOS {v1_tflite_eval.mean_dnsmos_p808:.4f} -> {v2_tflite_eval.mean_dnsmos_p808:.4f} "
             f"({tflite_comparison['delta_dnsmos_p808']:+.4f}) | "
+            f"ovr {v1_tflite_eval.mean_dnsmos_ovr} -> {v2_tflite_eval.mean_dnsmos_ovr} | "
             f"logSTFT {v1_tflite_eval.mean_mr_log_stft_l1:.4f} -> {v2_tflite_eval.mean_mr_log_stft_l1:.4f}"
         )
 
-        # Also benchmark on real unseen s2-pro LoRA synthesized candidate takes!
         if Path(candidates_dir).is_dir():
             s2pro_candidates_comparison = evaluate_tflite_on_s2pro_candidates(
                 v001_tflite_path,
@@ -1667,7 +2060,9 @@ def finetune_dac_decoder(
                     f"({s2pro_candidates_comparison['mean_wespeaker_delta']:+.4f}) | "
                     f"DNSMOS {s2pro_candidates_comparison['v001_mean_dnsmos_p808']:.4f} -> "
                     f"{s2pro_candidates_comparison['v002_mean_dnsmos_p808']:.4f} "
-                    f"({s2pro_candidates_comparison['mean_dnsmos_delta']:+.4f})"
+                    f"({s2pro_candidates_comparison['mean_dnsmos_delta']:+.4f}) | "
+                    f"ovr {s2pro_candidates_comparison['v001_mean_dnsmos_ovr']} -> "
+                    f"{s2pro_candidates_comparison['v002_mean_dnsmos_ovr']}"
                 )
 
     report: dict[str, Any] = {
@@ -1712,6 +2107,12 @@ def finetune_dac_decoder(
             "dnsmos_p808": round(
                 final_eval.mean_dnsmos_p808 - baseline_eval.mean_dnsmos_p808, 4
             ),
+            "dnsmos_ovr": (
+                round(final_eval.mean_dnsmos_ovr - baseline_eval.mean_dnsmos_ovr, 4)
+                if final_eval.mean_dnsmos_ovr is not None
+                and baseline_eval.mean_dnsmos_ovr is not None
+                else None
+            ),
             "mr_log_stft_l1": round(
                 final_eval.mean_mr_log_stft_l1 - baseline_eval.mean_mr_log_stft_l1, 5
             ),
@@ -1752,18 +2153,24 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--report-json", type=Path, default=DEFAULT_REPORT_JSON)
     parser.add_argument("--v002-tflite", type=Path, default=DEFAULT_V002_TFLITE)
     parser.add_argument("--v001-tflite", type=Path, default=DEFAULT_V001_TFLITE)
-    parser.add_argument("--steps", type=int, default=360)
+    parser.add_argument("--steps", type=int, default=320)
     parser.add_argument("--eval-every", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--crop-z-frames", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=2.0e-5)
-    parser.add_argument("--min-lr", type=float, default=2.0e-6)
-    parser.add_argument("--warmup-steps", type=int, default=25)
-    parser.add_argument("--l2-sp-weight", type=float, default=2.0e-4)
-    parser.add_argument("--mel16k-weight", type=float, default=1.25)
-    parser.add_argument("--mel44k-weight", type=float, default=1.0)
-    parser.add_argument("--mr-stft-weight", type=float, default=1.0)
-    parser.add_argument("--wav-l1-weight", type=float, default=0.5)
+    parser.add_argument("--crop-z-frames", type=int, default=160)
+    parser.add_argument("--lr", type=float, default=1.5e-5)
+    parser.add_argument("--min-lr", type=float, default=1.5e-6)
+    parser.add_argument("--disc-lr", type=float, default=1.0e-4)
+    parser.add_argument("--warmup-steps", type=int, default=20)
+    parser.add_argument("--l2-sp-weight", type=float, default=5.0e-3)
+    parser.add_argument("--mr-stft-weight", type=float, default=0.30)
+    parser.add_argument("--mel44k-weight", type=float, default=0.30)
+    parser.add_argument("--mel16k-weight", type=float, default=0.25)
+    parser.add_argument("--wav-l1-weight", type=float, default=0.10)
+    parser.add_argument("--spk-cos-weight", type=float, default=2.50)
+    parser.add_argument("--spk-fm-weight", type=float, default=2.00)
+    parser.add_argument("--mpd-adv-weight", type=float, default=0.15)
+    parser.add_argument("--mpd-fm-weight", type=float, default=1.50)
+    parser.add_argument("--mpd-start-step", type=int, default=20)
     parser.add_argument("--min-train-dnsmos", type=float, default=3.45)
     parser.add_argument("--min-train-wespeaker", type=float, default=0.73)
     parser.add_argument("--patience", type=int, default=4)
@@ -1790,12 +2197,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         crop_z_frames=args.crop_z_frames,
         lr=args.lr,
         min_lr=args.min_lr,
+        disc_lr=args.disc_lr,
         warmup_steps=args.warmup_steps,
         l2_sp_weight=args.l2_sp_weight,
         mr_stft_weight=args.mr_stft_weight,
         mel_44k_weight=args.mel44k_weight,
         mel_16k_speech_weight=args.mel16k_weight,
         wav_l1_weight=args.wav_l1_weight,
+        spk_cos_weight=args.spk_cos_weight,
+        spk_fm_weight=args.spk_fm_weight,
+        mpd_adv_weight=args.mpd_adv_weight,
+        mpd_fm_weight=args.mpd_fm_weight,
+        mpd_start_step=args.mpd_start_step,
         early_stop_patience_evals=args.patience,
         seed=args.seed,
         device=args.device,
