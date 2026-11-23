@@ -28,6 +28,8 @@ import numpy as np
 import soundfile as sf
 import torch
 
+from PIL import Image, ImageDraw, ImageFont
+
 HOME_DAEMON = Path("/Users/mac/Aircheck/sync-trainer/home-daemon")
 sys.path.insert(0, str(HOME_DAEMON))
 
@@ -89,91 +91,127 @@ def probe_duration(path: Path) -> float:
     return float(out)
 
 
-def render_wan_beat(beat: dict, wav_path: Path, out_raw_mp4: Path, out_mux_mp4: Path) -> dict:
+def build_chyron_overlay_png(headline: str, subline: str, out_png: Path) -> None:
+    img = Image.new("RGBA", (720, 1280), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    font_bold_path = "/Users/mac/Aircheck/app/src/main/res/font/space_grotesk.ttf"
+    font_mono_path = "/Users/mac/Aircheck/app/src/main/res/font/jetbrains_mono.ttf"
+    f_live = ImageFont.truetype(font_mono_path, 22)
+    f_loc = ImageFont.truetype(font_mono_path, 20)
+    f_tag = ImageFont.truetype(font_mono_path, 20)
+    f_head = ImageFont.truetype(font_bold_path, 30)
+    f_sub = ImageFont.truetype(font_mono_path, 20)
+
+    # Top-left LIVE bug + location strip
+    draw.rectangle([28, 46, 152, 88], fill=(217, 4, 41, 245))
+    draw.ellipse([42, 60, 56, 74], fill=(255, 255, 255, 255))
+    draw.text((64, 54), "LIVE", font=f_live, fill=(255, 255, 255, 255))
+    draw.rectangle([152, 46, 434, 88], fill=(10, 12, 16, 224))
+    draw.text((168, 55), "SF · 2:33 PM", font=f_loc, fill=(232, 238, 245, 255))
+
+    # Lower-third BREAKING NEWS chyron deck
+    draw.rectangle([24, 1040, 260, 1080], fill=(217, 4, 41, 245))
+    draw.text((40, 1048), "BREAKING NEWS", font=f_tag, fill=(255, 255, 255, 255))
+    draw.rectangle([24, 1080, 696, 1204], fill=(9, 12, 18, 232))
+    draw.rectangle([24, 1080, 32, 1204], fill=(184, 255, 0, 255))
+    draw.text((48, 1096), headline, font=f_head, fill=(255, 255, 255, 255))
+    draw.text((48, 1148), subline, font=f_sub, fill=(184, 255, 0, 255))
+
+    img.save(out_png)
+
+
+def composite_broadcast_beat(beat: dict, wav_path: Path, raw_mp4: Path, out_mux_mp4: Path, *, use_wan_audio: bool = False) -> dict:
     dur = probe_duration(wav_path)
-    wan_dur = max(4, min(10, int(math.ceil(dur))))
+    target_dur = dur + 0.12
+    overlay_png = out_mux_mp4.with_suffix(".chyron.png")
+    build_chyron_overlay_png(beat["headline"], beat["subline"], overlay_png)
 
-    with tempfile.TemporaryDirectory(prefix=f"wan_{beat['id']}_") as td:
-        mp3_path = Path(td) / "beat.mp3"
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", str(wav_path), "-ac", "1", "-ar", "44100", "-b:a", "160k", str(mp3_path)],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        img_b64 = base64.b64encode(AVATAR_PATH.read_bytes()).decode("ascii")
-        mp3_b64 = base64.b64encode(mp3_path.read_bytes()).decode("ascii")
-
-        prompt = (
-            "Image 1 is a deadpan, overly serious breaking-news television anchor reporting live from "
-            "a sleek dark obsidian cable-news broadcast desk with softly blurred crimson and electric-blue "
-            "breaking-news screens behind him. Locked medium close-up camera, crisp newsroom studio key "
-            "lighting, natural blinking, stern serious news anchor expression, accurate lip-sync matching Audio 1. "
-            f'Spoken dialogue: "{beat["visual_spoken"]}"'
-        )
-
+    if use_wan_audio:
+        filter_complex = "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30[bg];[bg][1:v]overlay=0:0:shortest=1[v]"
         cmd = [
-            str(BL_BIN), "video", "ref",
-            "--model", "wan3.0-video",
-            "--image", f"data:image/jpeg;base64,{img_b64}",
-            "--image-voice", f"data:audio/mpeg;base64,{mp3_b64}",
-            "--prompt", prompt,
-            "--resolution", "720P",
-            "--ratio", "9:16",
-            "--duration", str(wan_dur),
-            "--watermark", "false",
-            "--download", str(out_raw_mp4),
-            "--output", "json",
-        ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0 or not out_raw_mp4.exists():
-            raise RuntimeError(f"wan3.0 failed on {beat['id']}: rc={proc.returncode} {proc.stderr} {proc.stdout}")
-
-    target_dur = dur + 0.10
-    headline = beat["headline"].replace(":", "\\:").replace("'", "")
-    subline = beat["subline"].replace(":", "\\:").replace("'", "")
-
-    font_bold = "/Users/mac/Aircheck/app/src/main/res/font/space_grotesk.ttf"
-    font_mono = "/Users/mac/Aircheck/app/src/main/res/font/jetbrains_mono.ttf"
-    if not Path(font_bold).exists():
-        font_bold = "/System/Library/Fonts/HelveticaNeue.ttc"
-    if not Path(font_mono).exists():
-        font_mono = font_bold
-
-    vf = (
-        f"scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30,"
-        f"tpad=stop_mode=clone:stop_duration=2,"
-        f"drawbox=x=28:y=46:w=132:h=42:color=0xD90429@0.96:t=fill,"
-        f"drawbox=x=160:y=46:w=274:h=42:color=0x0A0C10@0.88:t=fill,"
-        f"drawtext=fontfile='{font_mono}':text='LIVE':x=48:y=56:fontsize=22:fontcolor=white,"
-        f"drawtext=fontfile='{font_mono}':text='SF · 2\\:33 PM':x=178:y=57:fontsize=20:fontcolor=0xE8EEF5,"
-        f"drawbox=x=24:y=1044:w=228:h=38:color=0xD90429@0.96:t=fill,"
-        f"drawtext=fontfile='{font_mono}':text='BREAKING NEWS':x=38:y=1054:fontsize=20:fontcolor=white,"
-        f"drawbox=x=24:y=1082:w=672:h=118:color=0x090C12@0.90:t=fill,"
-        f"drawbox=x=24:y=1082:w=8:h=118:color=0xB8FF00@1.0:t=fill,"
-        f"drawtext=fontfile='{font_bold}':text='{headline}':x=48:y=1098:fontsize=30:fontcolor=white,"
-        f"drawtext=fontfile='{font_mono}':text='{subline}':x=48:y=1150:fontsize=20:fontcolor=0xB8FF00"
-    )
-
-    subprocess.run(
-        [
             "ffmpeg", "-y",
-            "-i", str(out_raw_mp4),
+            "-i", str(raw_mp4),
+            "-loop", "1", "-i", str(overlay_png),
+            "-filter_complex", filter_complex,
+            "-map", "[v]", "-map", "0:a:0",
+            "-t", f"{probe_duration(raw_mp4):.3f}",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "1",
+            str(out_mux_mp4),
+        ]
+    else:
+        filter_complex = (
+            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30,"
+            "tpad=stop_mode=clone:stop_duration=3[bg];"
+            "[bg][2:v]overlay=0:0:shortest=0[v];"
+            "[1:a]apad=pad_dur=0.14[a]"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(raw_mp4),
             "-i", str(wav_path),
-            "-filter_complex", f"[0:v]{vf}[v];[1:a]apad=pad_dur=0.12[a]",
+            "-loop", "1", "-i", str(overlay_png),
+            "-filter_complex", filter_complex,
             "-map", "[v]", "-map", "[a]",
             "-t", f"{target_dur:.3f}",
             "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "1",
             str(out_mux_mp4),
-        ],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+        ]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg composite failed for {beat['id']}: {proc.stderr}")
     return {
         "id": beat["id"],
         "audio_dur": dur,
         "clip_dur": probe_duration(out_mux_mp4),
-        "raw_mp4": str(out_raw_mp4),
+        "raw_mp4": str(raw_mp4),
         "mux_mp4": str(out_mux_mp4),
     }
+
+
+def render_wan_beat(beat: dict, wav_path: Path, out_raw_mp4: Path, out_mux_mp4: Path) -> dict:
+    dur = probe_duration(wav_path)
+    wan_dur = max(4, min(10, int(math.ceil(dur))))
+
+    if not out_raw_mp4.exists() or out_raw_mp4.stat().st_size == 0:
+        with tempfile.TemporaryDirectory(prefix=f"wan_{beat['id']}_") as td:
+            mp3_path = Path(td) / "beat.mp3"
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(wav_path), "-ac", "1", "-ar", "44100", "-b:a", "160k", str(mp3_path)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            img_b64 = base64.b64encode(AVATAR_PATH.read_bytes()).decode("ascii")
+            mp3_b64 = base64.b64encode(mp3_path.read_bytes()).decode("ascii")
+
+            prompt = (
+                "Image 1 is a deadpan, overly serious breaking-news television anchor reporting live from "
+                "a sleek dark obsidian cable-news broadcast desk with softly blurred crimson and electric-blue "
+                "breaking-news screens behind him. Locked medium close-up camera, crisp newsroom studio key "
+                "lighting, natural blinking, stern serious news anchor expression, accurate lip-sync matching Audio 1. "
+                f'Spoken dialogue: "{beat["visual_spoken"]}"'
+            )
+
+            cmd = [
+                str(BL_BIN), "video", "ref",
+                "--model", "wan3.0-video",
+                "--image", f"data:image/jpeg;base64,{img_b64}",
+                "--image-voice", f"data:audio/mpeg;base64,{mp3_b64}",
+                "--prompt", prompt,
+                "--resolution", "720P",
+                "--ratio", "9:16",
+                "--duration", str(wan_dur),
+                "--watermark", "false",
+                "--download", str(out_raw_mp4),
+                "--output", "json",
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0 or not out_raw_mp4.exists():
+                raise RuntimeError(f"wan3.0 failed on {beat['id']}: rc={proc.returncode} {proc.stderr} {proc.stdout}")
+
+    return composite_broadcast_beat(beat, wav_path, out_raw_mp4, out_mux_mp4, use_wan_audio=False)
 
 
 def main() -> int:
