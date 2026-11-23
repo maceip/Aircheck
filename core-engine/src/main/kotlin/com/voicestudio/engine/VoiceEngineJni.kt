@@ -115,6 +115,19 @@ object VoiceEngineJni {
         newLoraGgufPath: String
     ): Boolean
 
+    external fun nativeSynthesizeClause(
+        engineHandle: Long,
+        normalizedText: String,
+        prefixPcmPath: String?,
+        seed: Long,
+        temperature: Float,
+        topP: Float,
+        topK: Int,
+        maxAudioTokens: Int
+    ): NativeCandidateTokens?
+
+    external fun nativeGetResolvedLlamaLibPath(engineHandle: Long): String
+
     external fun nativeSynthesizeCandidates(
         engineHandle: Long,
         normalizedText: String,
@@ -163,15 +176,78 @@ object VoiceEngineJni {
             )
         }
 
+    /**
+     * Resolves `libllama.so` from an explicit OTA path/directory, the app's `nativeLibraryDir`,
+     * or OTA bundle-relative `android-libs[/arm64-v8a]/libllama.so` directories.
+     * Returns null if none exist on disk so native `dlopen` performs standard linker lookup
+     * and fails explicitly if unavailable (Constitutional Law 2).
+     */
+    fun resolveLlamaLibraryPath(
+        baseGgufPath: String,
+        nativeLibraryDir: String? = null,
+        explicitLlamaLibPath: String? = null
+    ): String? {
+        fun resolveFileOrDir(candidatePath: String?): String? {
+            val trimmed = candidatePath?.trim().orEmpty()
+            if (trimmed.isEmpty()) return null
+            val f = File(trimmed)
+            if (f.isFile) return f.absolutePath
+            if (f.isDirectory) {
+                val names = listOf(
+                    "libllama.so",
+                    "arm64-v8a/libllama.so",
+                    "libllama.dylib"
+                )
+                for (name in names) {
+                    val nested = File(f, name)
+                    if (nested.isFile) return nested.absolutePath
+                }
+            }
+            return null
+        }
+
+        // Explicit path/dir takes strict priority.
+        if (!explicitLlamaLibPath.isNullOrBlank()) {
+            return resolveFileOrDir(explicitLlamaLibPath) ?: explicitLlamaLibPath.trim()
+        }
+
+        // App nativeLibraryDir (e.g. context.applicationInfo.nativeLibraryDir).
+        resolveFileOrDir(nativeLibraryDir)?.let { return it }
+
+        // OTA bundle-relative android-libs directories next to baseGgufPath.
+        val bundleDir = File(baseGgufPath).parentFile
+        if (bundleDir != null) {
+            val otaCandidates = listOf(
+                File(bundleDir, "android-libs/libllama.so"),
+                File(bundleDir, "android-libs/arm64-v8a/libllama.so"),
+                File(bundleDir, "libllama.so"),
+                bundleDir.parentFile?.let { File(it, "android-libs/libllama.so") },
+                bundleDir.parentFile?.let { File(it, "android-libs/arm64-v8a/libllama.so") }
+            )
+            for (cand in otaCandidates) {
+                if (cand != null && cand.isFile) {
+                    return cand.absolutePath
+                }
+            }
+        }
+        return null
+    }
+
     fun initEngine(
         baseGgufPath: String,
         loraGgufPath: String,
         vocoderTflitePath: String,
         roomIrPcmPath: String,
-        llamaLibPath: String? = null
+        llamaLibPath: String? = null,
+        nativeLibraryDir: String? = null
     ): Result<Long> {
         requireNativeLoaded().onFailure { return Result.failure(it) }
-        val handle = if (llamaLibPath.isNullOrBlank()) {
+        val resolvedLlamaPath = resolveLlamaLibraryPath(
+            baseGgufPath = baseGgufPath,
+            nativeLibraryDir = nativeLibraryDir,
+            explicitLlamaLibPath = llamaLibPath
+        )
+        val handle = if (resolvedLlamaPath.isNullOrBlank()) {
             nativeInit(baseGgufPath, loraGgufPath, vocoderTflitePath, roomIrPcmPath)
         } else {
             nativeInitWithLlamaLib(
@@ -179,13 +255,53 @@ object VoiceEngineJni {
                 loraGgufPath,
                 vocoderTflitePath,
                 roomIrPcmPath,
-                llamaLibPath
+                resolvedLlamaPath
             )
         }
         return if (handle != 0L) {
             Result.success(handle)
         } else {
             val detail = nativeGetLastError().ifBlank { "VoiceEngine nativeInit returned 0" }
+            Result.failure(IllegalStateException(detail))
+        }
+    }
+
+    fun getResolvedLlamaLibPath(engineHandle: Long): Result<String> {
+        requireNativeLoaded().onFailure { return Result.failure(it) }
+        if (engineHandle == 0L) {
+            return Result.failure(IllegalStateException("Invalid VoiceEngine handle (0)"))
+        }
+        return Result.success(nativeGetResolvedLlamaLibPath(engineHandle))
+    }
+
+    fun synthesizeClause(
+        engineHandle: Long,
+        normalizedText: String,
+        prefixPcmPath: String? = null,
+        seed: Long = 1001L,
+        temperature: Float = 0.72f,
+        topP: Float = 0.80f,
+        topK: Int = 30,
+        maxAudioTokens: Int = 2048
+    ): Result<NativeCandidateTokens> {
+        requireNativeLoaded().onFailure { return Result.failure(it) }
+        if (engineHandle == 0L) {
+            return Result.failure(IllegalStateException("Invalid VoiceEngine handle (0)"))
+        }
+        val candidate = nativeSynthesizeClause(
+            engineHandle = engineHandle,
+            normalizedText = normalizedText,
+            prefixPcmPath = prefixPcmPath,
+            seed = seed,
+            temperature = temperature,
+            topP = topP,
+            topK = topK,
+            maxAudioTokens = maxAudioTokens
+        )
+        return if (candidate != null) {
+            Result.success(candidate)
+        } else {
+            val detail = nativeGetLastError().ifBlank { "VoiceEngine nativeSynthesizeClause failed" }
             Result.failure(IllegalStateException(detail))
         }
     }
@@ -326,7 +442,9 @@ class VoiceEnginePipeline(
         roomIrPcmPath: String,
         roomTonePcmPath: String? = null,
         cacheVersion: String = "v1",
-        preferredAccelerator: Accelerator = Accelerator.GPU
+        preferredAccelerator: Accelerator = Accelerator.GPU,
+        llamaLibPath: String? = null,
+        nativeLibraryDir: String? = null
     ): Result<Long> {
         val decoderResult = codecDecoder.load(
             modelFile = File(vocoderTflitePath),
@@ -339,7 +457,9 @@ class VoiceEnginePipeline(
             baseGgufPath = baseGgufPath,
             loraGgufPath = loraGgufPath,
             vocoderTflitePath = vocoderTflitePath,
-            roomIrPcmPath = roomIrPcmPath
+            roomIrPcmPath = roomIrPcmPath,
+            llamaLibPath = llamaLibPath,
+            nativeLibraryDir = nativeLibraryDir
         )
         return nativeResult.onSuccess { handle ->
             val previous = engineHandle

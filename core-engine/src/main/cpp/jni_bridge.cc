@@ -119,6 +119,98 @@ Java_com_voicestudio_engine_VoiceEngineJni_nativeHotSwapLora(
     return JNI_TRUE;
 }
 
+JNIEXPORT jobject JNICALL
+Java_com_voicestudio_engine_VoiceEngineJni_nativeSynthesizeClause(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jlong engine_handle,
+    jstring normalized_text,
+    jstring prefix_pcm_path,
+    jlong seed,
+    jfloat temperature,
+    jfloat top_p,
+    jint top_k,
+    jint max_audio_tokens) {
+    if (engine_handle == 0L) {
+        SetLastError("Invalid VoiceEngine handle (0)");
+        return nullptr;
+    }
+    auto* engine = reinterpret_cast<voicestudio::engine::VoiceEngine*>(engine_handle);
+
+    voicestudio::engine::ClauseSamplingParams sampling;
+    sampling.seed = static_cast<int64_t>(seed);
+    sampling.temperature = static_cast<float>(temperature);
+    sampling.top_p = static_cast<float>(top_p);
+    sampling.top_k = static_cast<int32_t>(top_k);
+    sampling.max_audio_tokens = static_cast<int32_t>(max_audio_tokens);
+
+    voicestudio::engine::SynthesizedCandidate candidate;
+    const auto status = engine->SynthesizeClause(
+        JStringToStdString(env, normalized_text),
+        JStringToStdString(env, prefix_pcm_path),
+        sampling,
+        candidate);
+    if (!status.ok) {
+        SetLastError(status.error_message);
+        return nullptr;
+    }
+
+    jclass candidate_cls = env->FindClass("com/voicestudio/engine/NativeCandidateTokens");
+    if (candidate_cls == nullptr) {
+        SetLastError("Failed to find JNI class com/voicestudio/engine/NativeCandidateTokens");
+        return nullptr;
+    }
+    jmethodID ctor = env->GetMethodID(candidate_cls, "<init>", "([IJF)V");
+    if (ctor == nullptr) {
+        SetLastError("Failed to find NativeCandidateTokens([IJF)V constructor");
+        env->DeleteLocalRef(candidate_cls);
+        return nullptr;
+    }
+
+    jintArray tokens_arr =
+        env->NewIntArray(static_cast<jsize>(candidate.discrete_audio_tokens.size()));
+    if (tokens_arr == nullptr) {
+        SetLastError("Failed to allocate discreteAudioTokens jintArray");
+        env->DeleteLocalRef(candidate_cls);
+        return nullptr;
+    }
+    if (!candidate.discrete_audio_tokens.empty()) {
+        env->SetIntArrayRegion(
+            tokens_arr,
+            0,
+            static_cast<jsize>(candidate.discrete_audio_tokens.size()),
+            reinterpret_cast<const jint*>(candidate.discrete_audio_tokens.data()));
+    }
+
+    jobject item = env->NewObject(
+        candidate_cls,
+        ctor,
+        tokens_arr,
+        static_cast<jlong>(candidate.seed),
+        static_cast<jfloat>(candidate.temperature));
+    env->DeleteLocalRef(tokens_arr);
+    env->DeleteLocalRef(candidate_cls);
+    if (item == nullptr || env->ExceptionCheck()) {
+        SetLastError("Failed to construct NativeCandidateTokens object");
+        return nullptr;
+    }
+
+    SetLastError("");
+    return item;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_voicestudio_engine_VoiceEngineJni_nativeGetResolvedLlamaLibPath(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jlong engine_handle) {
+    if (engine_handle == 0L) {
+        return env->NewStringUTF("");
+    }
+    auto* engine = reinterpret_cast<voicestudio::engine::VoiceEngine*>(engine_handle);
+    return env->NewStringUTF(engine->ResolvedLlamaLibraryPath().c_str());
+}
+
 JNIEXPORT jobjectArray JNICALL
 Java_com_voicestudio_engine_VoiceEngineJni_nativeSynthesizeCandidates(
     JNIEnv* env,
