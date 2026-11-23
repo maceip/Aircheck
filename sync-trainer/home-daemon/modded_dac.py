@@ -110,18 +110,23 @@ def precompute_freqs_cis(
 
 
 def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
-    """Real-valued rotary embedding matching fish-speech apply_rotary_emb."""
-    x_float = x.float()
-    xshaped = x_float.reshape(*x_float.shape[:-1], -1, 2)
-    fc = freqs_cis.float().view(1, xshaped.size(1), 1, xshaped.size(3), 2)
-    x0 = xshaped[..., 0]
-    x1 = xshaped[..., 1]
-    cos_val = fc[..., 0]
-    sin_val = fc[..., 1]
+    """Real-valued 4D-only rotary embedding matching fish-speech apply_rotary_emb.
+
+    Avoids 5D intermediate tensors so LiteRT GPU delegates (OpenCL/Vulkan/Metal)
+    can accelerate all attention blocks without falling back to CPU.
+    """
+    bsz, seqlen, n_head, head_dim = x.shape
+    half_dim = head_dim // 2
+    x_4d = x.float().reshape(bsz * seqlen, n_head, half_dim, 2)
+    x0, x1 = x_4d.split(1, dim=-1)  # [B*T, H, D/2, 1]
+    fc_4d = freqs_cis.float().reshape(seqlen, 1, half_dim, 2)
+    if bsz > 1:
+        fc_4d = fc_4d.repeat(bsz, 1, 1, 1)
+    cos_val, sin_val = fc_4d.split(1, dim=-1)  # [B*T, 1, D/2, 1]
     out0 = x0 * cos_val - x1 * sin_val
     out1 = x1 * cos_val + x0 * sin_val
-    x_out2 = torch.stack([out0, out1], dim=-1)
-    return x_out2.flatten(3).type_as(x)
+    x_out = torch.cat([out0, out1], dim=-1).reshape(bsz, seqlen, n_head, head_dim)
+    return x_out.type_as(x)
 
 
 class RMSNorm(nn.Module):
@@ -1129,49 +1134,92 @@ class ExportableModdedDACDecoder(nn.Module):
         self.semantic_codebook_size = dac_model.quantizer.semantic_quantizer.codebook_size
         self.residual_codebook_size = dac_model.quantizer.quantizer.codebook_size
 
-        # Deep-copy decoder-side submodules only so caller's model is never mutated.
-        q_sem = copy.deepcopy(dac_model.quantizer.semantic_quantizer).eval().cpu()
-        q_res = copy.deepcopy(dac_model.quantizer.quantizer).eval().cpu()
-        post_module = copy.deepcopy(dac_model.quantizer.post_module).eval().cpu()
-        upsample = copy.deepcopy(dac_model.quantizer.upsample).eval().cpu()
-        decoder = copy.deepcopy(dac_model.decoder).eval().cpu()
+        # Deep-copy decoder-side submodules and replace every weight-normed
+        # Conv1d/ConvTranspose1d with a clean unparametrized Conv module so
+        # caller's ParametrizedConv1d classes are never mutated (PyTorch 2.12 safe).
+        with torch.no_grad():
+            q_sem = dac_model.quantizer.semantic_quantizer
+            q_res = dac_model.quantizer.quantizer
+            post_module = copy.deepcopy(dac_model.quantizer.post_module).eval().cpu()
+            upsample = copy.deepcopy(dac_model.quantizer.upsample).eval().cpu()
+            decoder = copy.deepcopy(dac_model.decoder).eval().cpu()
 
-        # Fuse all weight_norm hooks into plain Conv weights.
-        for q_group in (q_sem, q_res):
-            for vq in q_group.quantizers:
-                if hasattr(vq.out_proj, "weight_g"):
-                    legacy_remove_weight_norm(vq.out_proj)
-                # Drop unused encoder-only in_proj from exported decoder graph.
-                vq.in_proj = nn.Identity()
+            def _materialize_plain_convs(root: nn.Module) -> None:
+                for m in root.modules():
+                    if isinstance(m, CausalConvNet):
+                        src = m.conv
+                        w = src.weight.detach().float().cpu().clone()
+                        b = src.bias.detach().float().cpu().clone() if src.bias is not None else None
+                        plain = nn.Conv1d(
+                            src.in_channels,
+                            src.out_channels,
+                            src.kernel_size,
+                            stride=src.stride,
+                            padding=src.padding,
+                            dilation=src.dilation,
+                            groups=src.groups,
+                            bias=b is not None,
+                        )
+                        plain.weight.copy_(w)
+                        if b is not None and plain.bias is not None:
+                            plain.bias.copy_(b)
+                        m.conv = plain
+                    elif isinstance(m, CausalTransConvNet):
+                        src = m.conv
+                        w = src.weight.detach().float().cpu().clone()
+                        b = src.bias.detach().float().cpu().clone() if src.bias is not None else None
+                        plain = nn.ConvTranspose1d(
+                            src.in_channels,
+                            src.out_channels,
+                            src.kernel_size,
+                            stride=src.stride,
+                            padding=src.padding,
+                            output_padding=src.output_padding,
+                            dilation=src.dilation,
+                            groups=src.groups,
+                            bias=b is not None,
+                        )
+                        plain.weight.copy_(w)
+                        if b is not None and plain.bias is not None:
+                            plain.bias.copy_(b)
+                        m.conv = plain
 
-        for sub in (upsample, decoder):
-            for m in sub.modules():
-                if isinstance(m, (CausalConvNet, CausalTransConvNet)):
-                    m.remove_weight_norm()
+            _materialize_plain_convs(upsample)
+            _materialize_plain_convs(decoder)
 
-        # Pre-compute fused [codebook_size, 1024] embedding tables for each of the 10
-        # codebooks: out_proj(embedding(code)) == F.embedding(code, W_fused) + bias.
-        # Note out_proj is a 1x1 Conv1d (8 -> 1024) with weight [1024, 8, 1] and bias [1024].
-        # Summing biases across all 10 codebooks into a single constant bias avoids 10 redundant
-        # Conv1d(8->1024) ops AND is mathematically identical to float32 precision!
-        fused_tables: List[Tensor] = []
-        total_bias = torch.zeros(1, 1024, 1, dtype=torch.float32)
+            # Keep compact 8-dim codebook tables + fused weight_norm 8->1024 linear
+            # projections (0.36 MB vs 27 MB if pre-multiplied) and combine the 10
+            # out_proj biases into a single constant [1, 1, 1024] bias.
+            sem_vq = q_sem.quantizers[0]
+            self.semantic_codebook = nn.Embedding(
+                self.semantic_codebook_size, sem_vq.codebook_dim
+            )
+            self.semantic_codebook.weight.copy_(sem_vq.codebook.weight.detach().float().cpu())
+            self.semantic_out_proj = nn.Linear(sem_vq.codebook_dim, 1024, bias=False)
+            self.semantic_out_proj.weight.copy_(
+                sem_vq.out_proj.weight.detach().squeeze(-1).float().cpu()
+            )
 
-        all_vqs = list(q_sem.quantizers) + list(q_res.quantizers)
-        for vq in all_vqs:
-            # codebook: [K, 8], out_proj.weight: [1024, 8, 1], out_proj.bias: [1024]
-            w_out = vq.out_proj.weight.squeeze(-1).float()  # [1024, 8]
-            cb = vq.codebook.weight.float()  # [K, 8]
-            fused = cb @ w_out.t()  # [K, 1024]
-            fused_tables.append(fused)
-            if vq.out_proj.bias is not None:
-                total_bias = total_bias + vq.out_proj.bias.float().view(1, 1024, 1)
+            self.residual_codebooks = nn.ModuleList()
+            self.residual_out_projs = nn.ModuleList()
+            total_bias = torch.zeros(1, 1, 1024, dtype=torch.float32)
+            if sem_vq.out_proj.bias is not None:
+                total_bias = total_bias + sem_vq.out_proj.bias.detach().float().cpu().view(
+                    1, 1, 1024
+                )
+            for vq in q_res.quantizers:
+                emb = nn.Embedding(self.residual_codebook_size, vq.codebook_dim)
+                emb.weight.copy_(vq.codebook.weight.detach().float().cpu())
+                proj = nn.Linear(vq.codebook_dim, 1024, bias=False)
+                proj.weight.copy_(vq.out_proj.weight.detach().squeeze(-1).float().cpu())
+                self.residual_codebooks.append(emb)
+                self.residual_out_projs.append(proj)
+                if vq.out_proj.bias is not None:
+                    total_bias = total_bias + vq.out_proj.bias.detach().float().cpu().view(
+                        1, 1, 1024
+                    )
 
-        self.register_buffer("semantic_table", fused_tables[0])  # [4096, 1024]
-        self.register_buffer(
-            "residual_tables", torch.stack(fused_tables[1:], dim=0)
-        )  # [9, 1024, 1024]
-        self.register_buffer("quantizer_bias", total_bias)  # [1, 1024, 1]
+        self.register_buffer("quantizer_bias", total_bias)  # [1, 1, 1024]
 
         # Extract static float32 RoPE freqs_cis and additive causal window mask for seq_len.
         self.post_layers = post_module.layers
@@ -1194,18 +1242,17 @@ class ExportableModdedDACDecoder(nn.Module):
 
     def forward(self, codes: Tensor) -> Tensor:
         # codes: [1, 10, T] int32 (or int64)
-        codes_i64 = codes.to(torch.int64)
-        sem_idx = torch.clamp(codes_i64[:, 0, :], 0, self.semantic_codebook_size - 1)
-        z = F.embedding(sem_idx, self.semantic_table)  # [B, T, 1024]
+        codes_i32 = codes.to(torch.int32)
+        sem_idx = torch.clamp(codes_i32[:, 0, :], 0, self.semantic_codebook_size - 1)
+        z = self.semantic_out_proj(self.semantic_codebook(sem_idx))  # [B, T, 1024]
 
         for i in range(9):
             res_idx = torch.clamp(
-                codes_i64[:, i + 1, :], 0, self.residual_codebook_size - 1
+                codes_i32[:, i + 1, :], 0, self.residual_codebook_size - 1
             )
-            z = z + F.embedding(res_idx, self.residual_tables[i])
+            z = z + self.residual_out_projs[i](self.residual_codebooks[i](res_idx))
 
-        # Add combined out_proj bias in channels-last [B, T, 1024] directly before transformer.
-        z = z + self.quantizer_bias.transpose(1, 2)
+        z = z + self.quantizer_bias
 
         for layer in self.post_layers:
             z = layer(
