@@ -154,10 +154,30 @@ class OrtDnsmosP808Engine private constructor(
                     fMaxHz = 8000.0f,
                     applyCmn = false
                 )
+                val targetFrames = if (shape[1] > 0) shape[1].toInt() else numFrames
+                val finalMel = if (targetFrames == numFrames) {
+                    mel
+                } else {
+                    val sized = FloatArray(targetFrames * melBins)
+                    if (numFrames > 0) {
+                        var dstFrame = 0
+                        while (dstFrame < targetFrames) {
+                            val copyFrames = minOf(numFrames, targetFrames - dstFrame)
+                            mel.copyInto(
+                                destination = sized,
+                                destinationOffset = dstFrame * melBins,
+                                startIndex = 0,
+                                endIndex = copyFrames * melBins
+                            )
+                            dstFrame += copyFrames
+                        }
+                    }
+                    sized
+                }
                 OnnxTensor.createTensor(
                     env,
-                    FloatBuffer.wrap(mel),
-                    longArrayOf(1L, numFrames.toLong(), melBins.toLong())
+                    FloatBuffer.wrap(finalMel),
+                    longArrayOf(1L, targetFrames.toLong(), melBins.toLong())
                 )
             }
             2 -> {
@@ -245,7 +265,12 @@ class OrtCtcAlignerEngine private constructor(
 
             val primaryTensor = when (shape.size) {
                 3 -> {
-                    val featDim = if (shape[2] > 0) shape[2].toInt() else 80
+                    val isChannelsFirstNemo = shape[1] > 0L && shape[2] <= 0L
+                    val featDim = when {
+                        isChannelsFirstNemo -> shape[1].toInt()
+                        shape[2] > 0L -> shape[2].toInt()
+                        else -> 80
+                    }
                     val (fbank, frames) = AudioDspMetrics.computeLogMelFilterbank(
                         pcm16k = pcm16k,
                         numMelBins = featDim,
@@ -257,11 +282,27 @@ class OrtCtcAlignerEngine private constructor(
                         applyCmn = true
                     )
                     numInputFrames = frames
-                    OnnxTensor.createTensor(
-                        env,
-                        FloatBuffer.wrap(fbank),
-                        longArrayOf(1L, frames.toLong(), featDim.toLong())
-                    )
+                    if (isChannelsFirstNemo) {
+                        // NeMo Citrinet / Conformer CTC expects [B, featDim, T].
+                        val transposed = FloatArray(featDim * frames)
+                        for (t in 0 until frames) {
+                            val srcBase = t * featDim
+                            for (f in 0 until featDim) {
+                                transposed[f * frames + t] = fbank[srcBase + f]
+                            }
+                        }
+                        OnnxTensor.createTensor(
+                            env,
+                            FloatBuffer.wrap(transposed),
+                            longArrayOf(1L, featDim.toLong(), frames.toLong())
+                        )
+                    } else {
+                        OnnxTensor.createTensor(
+                            env,
+                            FloatBuffer.wrap(fbank),
+                            longArrayOf(1L, frames.toLong(), featDim.toLong())
+                        )
+                    }
                 }
                 2 -> OnnxTensor.createTensor(
                     env,
@@ -342,6 +383,35 @@ class OrtCtcAlignerEngine private constructor(
     private fun encodeTextToTokenIds(expectedText: String): IntArray {
         val norm = AudioDspMetrics.normalizeTranscript(expectedText)
         if (norm.isEmpty()) return IntArray(0)
+        val hasSentencePiecePieces = tokenToId.keys.any { it.startsWith("▁") && it.length > 1 }
+        if (hasSentencePiecePieces) {
+            val ids = mutableListOf<Int>()
+            for (word in norm.split(' ')) {
+                if (word.isEmpty()) continue
+                val prefixed = "▁$word"
+                var pos = 0
+                while (pos < prefixed.length) {
+                    var matchedId: Int? = null
+                    var matchedEnd = pos
+                    for (end in prefixed.length downTo pos + 1) {
+                        val sub = prefixed.substring(pos, end)
+                        val id = tokenToId[sub] ?: tokenToId[sub.uppercase()]
+                        if (id != null && id != blankId) {
+                            matchedId = id
+                            matchedEnd = end
+                            break
+                        }
+                    }
+                    if (matchedId != null) {
+                        ids.add(matchedId)
+                        pos = matchedEnd
+                    } else {
+                        pos += 1
+                    }
+                }
+            }
+            if (ids.isNotEmpty()) return ids.toIntArray()
+        }
         val spaceId = tokenToId["|"] ?: tokenToId[" "] ?: tokenToId["▁"]
         val ids = mutableListOf<Int>()
         for (ch in norm) {

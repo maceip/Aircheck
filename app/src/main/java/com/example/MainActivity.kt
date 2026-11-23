@@ -127,6 +127,9 @@ fun AircheckApp(viewModel: StudioViewModel) {
     }
 
     val currentRoute = navigationState.currentRoute
+    LaunchedEffect(currentRoute) {
+        snackbarHostState.currentSnackbarData?.dismiss()
+    }
     val isFullScreenOverlay = currentRoute is ScreenKey.SettingsKey ||
         currentRoute is ScreenKey.SystemDeckKey ||
         currentRoute is ScreenKey.ClipperKey

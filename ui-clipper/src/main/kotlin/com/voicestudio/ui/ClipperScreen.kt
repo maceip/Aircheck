@@ -119,7 +119,7 @@ fun ClipperScreen(
     val projection = remember(manifest) {
         ClipperTimelineProjection.fromManifest(manifest)
     }
-    val editableManifest = if (state.otaReady && manifest != null && manifest.clauses.isNotEmpty()) {
+    val editableManifest = if (manifest != null && manifest.clauses.isNotEmpty()) {
         manifest
     } else {
         null

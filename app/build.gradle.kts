@@ -21,10 +21,6 @@ android {
     versionName = "2.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-    ndk {
-      abiFilters += "arm64-v8a"
-    }
   }
 
   signingConfigs {
@@ -53,6 +49,9 @@ android {
 
   buildTypes {
     release {
+      ndk {
+        abiFilters += "arm64-v8a"
+      }
       isCrunchPngs = true
       isMinifyEnabled = true
       isShrinkResources = true
@@ -63,6 +62,9 @@ android {
       }
     }
     debug {
+      ndk {
+        abiFilters += listOf("arm64-v8a", "x86_64")
+      }
       val debugKs = signingConfigs.getByName("debugConfig").storeFile
       if (debugKs != null && debugKs.exists()) {
         signingConfig = signingConfigs.getByName("debugConfig")

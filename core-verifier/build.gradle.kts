@@ -12,10 +12,6 @@ android {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        ndk {
-            abiFilters += "arm64-v8a"
-        }
-
         externalNativeBuild {
             cmake {
                 cppFlags += listOf("-std=c++20", "-O3")
@@ -23,6 +19,19 @@ android {
                     "-DANDROID_STL=c++_shared",
                     "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
                 )
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            ndk {
+                abiFilters += listOf("arm64-v8a", "x86_64")
+            }
+        }
+        release {
+            ndk {
+                abiFilters += "arm64-v8a"
             }
         }
     }
