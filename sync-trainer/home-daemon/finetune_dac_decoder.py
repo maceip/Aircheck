@@ -53,6 +53,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import librosa
 import numpy as np
 import torch
 import torch.nn as nn
@@ -225,10 +226,10 @@ class FineTuneConfig:
     dnsmos_sig_bak_ovr_onnx: Path = DEFAULT_DNSMOS_SIG_BAK_OVR_ONNX
     output_pth: Path = DEFAULT_OUTPUT_PTH
     report_json: Path = DEFAULT_REPORT_JSON
-    min_train_dnsmos: float = 3.45
+    min_train_dnsmos: float = 3.55
     min_train_wespeaker: float = 0.73
     heldout_manifest_ids: tuple[str, ...] = DEFAULT_HELDOUT_MANIFEST_IDS
-    steps: int = 320
+    steps: int = 280
     eval_every: int = 40
     batch_size: int = 4
     crop_z_frames: int = 160  # 160 * 512 = 81,920 samples (1.858 s)
@@ -247,8 +248,10 @@ class FineTuneConfig:
     wav_l1_weight: float = 0.10
     spk_cos_weight: float = 2.50
     spk_fm_weight: float = 2.00
-    mpd_adv_weight: float = 0.15
-    mpd_fm_weight: float = 1.50
+    dnsmos_weight: float = 0.25
+    dnsmos_target_mos: float = 4.25
+    mpd_adv_weight: float = 0.0
+    mpd_fm_weight: float = 0.0
     mpd_start_step: int = 20
     early_stop_patience_evals: int = 4
     seed: int = 20261123
@@ -875,6 +878,136 @@ class FrozenWeSpeakerResNet34(nn.Module):
         stats = torch.cat([mean.flatten(1), std.flatten(1)], dim=1)
         emb = self.seg_1(stats) - self.mean_vec
         return F.normalize(emb, p=2, dim=-1), feats
+
+
+class FrozenDnsmosP808(nn.Module):
+    """Exact differentiable PyTorch mirror of Microsoft DNSMOS p808 (`model_v8.onnx`).
+
+    Matches ONNXRuntime `DnsmosP808Engine.score_p808` to `~1.4e-4` using exact librosa
+    Slaney 120-mel filterbank (`n_fft=321, hop=160, sr=16000`) and `(power_to_db+40)/40`.
+    Used gently as a MetricGAN+ perceptual speech-quality prior (audited strictly against
+    the completely independent unseen `sig_bak_ovr.onnx` model & held-out STFT/SI-SNR).
+    """
+
+    def __init__(self, onnx_path: Path = DEFAULT_DNSMOS_P808_ONNX) -> None:
+        super().__init__()
+        data = Path(onnx_path).read_bytes()
+        graph = next(v for fn, wt, v in _pb_iter_fields(data) if fn == 7 and wt == 2)
+        inits: dict[str, np.ndarray] = {}
+        for fn, wt, v in _pb_iter_fields(graph):
+            if fn == 5 and wt == 2:
+                dims: list[int] = []
+                dtype = 0
+                name = ""
+                raw: bytes | None = None
+                floats: list[float] = []
+                for tfn, twt, tv in _pb_iter_fields(v):
+                    if tfn == 1 and twt == 0:
+                        dims.append(int(tv))
+                    elif tfn == 1 and twt == 2:
+                        p = 0
+                        while p < len(tv):
+                            d, p = _pb_read_varint(tv, p)
+                            dims.append(int(d))
+                    elif tfn == 2:
+                        dtype = int(tv)
+                    elif tfn == 4 and twt == 2:
+                        floats = list(struct.unpack(f"<{len(tv) // 4}f", tv))
+                    elif tfn == 4 and twt == 5:
+                        floats.append(struct.unpack("<f", tv)[0])
+                    elif tfn == 8:
+                        name = tv.decode("utf-8")
+                    elif tfn == 9:
+                        raw = tv
+                if dtype == 1:
+                    arr = (
+                        np.frombuffer(raw, dtype="<f4").copy()
+                        if raw is not None
+                        else np.array(floats, dtype=np.float32)
+                    )
+                    inits[name] = arr.reshape(dims)
+
+        def _mk_conv(w_key: str, b_key: str) -> nn.Conv2d:
+            w = torch.from_numpy(inits[w_key])
+            b = torch.from_numpy(inits[b_key])
+            c = nn.Conv2d(
+                int(w.shape[1]),
+                int(w.shape[0]),
+                kernel_size=(int(w.shape[2]), int(w.shape[3])),
+                stride=1,
+                padding=1,
+                bias=True,
+            )
+            with torch.no_grad():
+                c.weight.copy_(w)
+                c.bias.copy_(b)
+            return c
+
+        def _mk_lin(w_key: str, b_key: str) -> nn.Linear:
+            w = torch.from_numpy(inits[w_key]).T
+            b = torch.from_numpy(inits[b_key])
+            lin = nn.Linear(int(w.shape[1]), int(w.shape[0]), bias=True)
+            with torch.no_grad():
+                lin.weight.copy_(w)
+                lin.bias.copy_(b)
+            return lin
+
+        self.c5 = _mk_conv("conv2d_5/kernel:0", "conv2d_5/bias:0")
+        self.c6 = _mk_conv("conv2d_6/kernel:0", "conv2d_6/bias:0")
+        self.c7 = _mk_conv("conv2d_7/kernel:0", "conv2d_7/bias:0")
+        self.c8 = _mk_conv("conv2d_8/kernel:0", "conv2d_8/bias:0")
+        self.c9 = _mk_conv("conv2d_9/kernel:0", "conv2d_9/bias:0")
+        self.d3 = _mk_lin(
+            "mos_estimator_small_1/dense_3/MatMul/ReadVariableOp/resource:0",
+            "mos_estimator_small_1/dense_3/BiasAdd/ReadVariableOp/resource:0",
+        )
+        self.d4 = _mk_lin(
+            "mos_estimator_small_1/dense_4/MatMul/ReadVariableOp/resource:0",
+            "mos_estimator_small_1/dense_4/BiasAdd/ReadVariableOp/resource:0",
+        )
+        self.d5 = _mk_lin(
+            "mos_estimator_small_1/dense_5/MatMul/ReadVariableOp/resource:0",
+            "mos_estimator_small_1/dense_5/BiasAdd/ReadVariableOp/resource:0",
+        )
+
+        mel_fb = librosa.filters.mel(sr=16000, n_fft=321, n_mels=120).astype(np.float32)
+        self.register_buffer("mel_fb", torch.from_numpy(mel_fb.T))  # [161, 120]
+        self.register_buffer("hann_win", torch.hann_window(321, periodic=True, dtype=torch.float32))
+        for p in self.parameters():
+            p.requires_grad = False
+        self.eval()
+
+    def compute_p808_mel(self, pcm16k: torch.Tensor) -> torch.Tensor:
+        y = pcm16k[:, :-160] if pcm16k.shape[-1] > 480 else pcm16k
+        spec = torch.stft(
+            y,
+            n_fft=321,
+            hop_length=160,
+            win_length=321,
+            window=self.hann_win,
+            center=True,
+            pad_mode="constant",
+            return_complex=True,
+        )
+        power = (spec.real.pow(2) + spec.imag.pow(2)).transpose(1, 2)  # [B, T, 161]
+        mel = torch.matmul(power, self.mel_fb)  # [B, T, 120]
+        ref_max = mel.amax(dim=(1, 2), keepdim=True).clamp_min(1e-10)
+        log_db = 10.0 * torch.log10(mel.clamp_min(1e-10)) - 10.0 * torch.log10(ref_max)
+        log_db = torch.clamp(log_db, min=-80.0)
+        return (log_db + 40.0) / 40.0
+
+    def forward(self, pcm16k: torch.Tensor) -> torch.Tensor:
+        feat = self.compute_p808_mel(pcm16k)
+        x = feat.unsqueeze(1)  # [B, 1, T, 120]
+        x = F.max_pool2d(F.relu(self.c5(x)), 2, 2)
+        x = F.max_pool2d(F.relu(self.c6(x)), 2, 2)
+        x = F.relu(self.c7(x))
+        x = F.max_pool2d(F.relu(self.c8(x)), 2, 2)
+        x = F.relu(self.c9(x))
+        x = x.amax(dim=(2, 3))
+        x = F.relu(self.d3(x))
+        x = F.relu(self.d4(x))
+        return self.d5(x).squeeze(-1)
 
 
 # ---------------------------------------------------------------------------
@@ -1571,6 +1704,14 @@ def finetune_dac_decoder(
         perceptual_ws = FrozenWeSpeakerResNet34(cfg.wespeaker_onnx).to(device)
         print("      Loaded FrozenWeSpeakerResNet34 perceptual encoder (4-stage FM + self-cos)")
 
+    perceptual_dns: FrozenDnsmosP808 | None = None
+    if cfg.dnsmos_weight > 0.0:
+        perceptual_dns = FrozenDnsmosP808(cfg.dnsmos_p808_onnx).to(device)
+        print(
+            f"      Loaded FrozenDnsmosP808 MetricGAN+ quality critic "
+            f"(weight={cfg.dnsmos_weight}, target_mos={cfg.dnsmos_target_mos})"
+        )
+
     mpd: MultiPeriodDiscriminator | None = None
     disc_optimizer: torch.optim.Optimizer | None = None
     if cfg.mpd_adv_weight > 0.0 or cfg.mpd_fm_weight > 0.0:
@@ -1732,6 +1873,15 @@ def finetune_dac_decoder(
             spk_cos_val = float(spk_cos_loss.item())
             spk_fm_val = float(spk_fm_loss.item())
 
+        # Gentle MetricGAN+ DNSMOS speech-quality prior (audited independently via sig_bak_ovr)
+        dns_loss_val = 0.0
+        if perceptual_dns is not None:
+            pred_pcm16 = mel_16k_loss_fn.resample_44k_to_16k(pred_wav.squeeze(1))
+            mos_pred = perceptual_dns(pred_pcm16)
+            dns_loss = F.relu(cfg.dnsmos_target_mos - mos_pred).mean()
+            total_loss = total_loss + cfg.dnsmos_weight * dns_loss
+            dns_loss_val = float(dns_loss.item())
+
         # Multi-Period Discriminator adversarial + feature matching (after warmup)
         g_adv_val = 0.0
         g_fm_val = 0.0
@@ -1777,6 +1927,7 @@ def finetune_dac_decoder(
                 "wav_l1": float(wav_l1.item()),
                 "spk_cos": spk_cos_val,
                 "spk_fm": spk_fm_val,
+                "dns_loss": dns_loss_val,
                 "g_adv": g_adv_val,
                 "g_fm": g_fm_val,
                 "d_loss": d_loss_val,
@@ -1797,8 +1948,8 @@ def finetune_dac_decoder(
             print(
                 f"  step {step:4d}/{cfg.steps} ({elapsed:5.1f}s) lr={lr_now:.2e} | "
                 f"loss={avg['total']:.4f} (mag={avg['mag']:.4f} spk_cos={avg['spk_cos']:.4f} "
-                f"spk_fm={avg['spk_fm']:.4f} g_adv={avg['g_adv']:.3f} g_fm={avg['g_fm']:.3f} "
-                f"d={avg['d_loss']:.3f}) gnorm={avg['grad_norm']:.2f}"
+                f"spk_fm={avg['spk_fm']:.4f} dns_l={avg['dns_loss']:.4f} g_adv={avg['g_adv']:.3f}) "
+                f"gnorm={avg['grad_norm']:.2f}"
             )
             running_losses.clear()
 
@@ -1945,6 +2096,8 @@ def finetune_dac_decoder(
         del mpd, disc_optimizer
     if perceptual_ws is not None:
         del perceptual_ws
+    if perceptual_dns is not None:
+        del perceptual_dns
     if device.type == "mps":
         torch.mps.empty_cache()
 
@@ -2153,7 +2306,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--report-json", type=Path, default=DEFAULT_REPORT_JSON)
     parser.add_argument("--v002-tflite", type=Path, default=DEFAULT_V002_TFLITE)
     parser.add_argument("--v001-tflite", type=Path, default=DEFAULT_V001_TFLITE)
-    parser.add_argument("--steps", type=int, default=320)
+    parser.add_argument("--steps", type=int, default=280)
     parser.add_argument("--eval-every", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--crop-z-frames", type=int, default=160)
@@ -2168,10 +2321,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--wav-l1-weight", type=float, default=0.10)
     parser.add_argument("--spk-cos-weight", type=float, default=2.50)
     parser.add_argument("--spk-fm-weight", type=float, default=2.00)
-    parser.add_argument("--mpd-adv-weight", type=float, default=0.15)
-    parser.add_argument("--mpd-fm-weight", type=float, default=1.50)
+    parser.add_argument("--dnsmos-weight", type=float, default=0.25)
+    parser.add_argument("--dnsmos-target-mos", type=float, default=4.25)
+    parser.add_argument("--mpd-adv-weight", type=float, default=0.0)
+    parser.add_argument("--mpd-fm-weight", type=float, default=0.0)
     parser.add_argument("--mpd-start-step", type=int, default=20)
-    parser.add_argument("--min-train-dnsmos", type=float, default=3.45)
+    parser.add_argument("--min-train-dnsmos", type=float, default=3.55)
     parser.add_argument("--min-train-wespeaker", type=float, default=0.73)
     parser.add_argument("--patience", type=int, default=4)
     parser.add_argument("--seed", type=int, default=20261123)
@@ -2206,6 +2361,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         wav_l1_weight=args.wav_l1_weight,
         spk_cos_weight=args.spk_cos_weight,
         spk_fm_weight=args.spk_fm_weight,
+        dnsmos_weight=args.dnsmos_weight,
+        dnsmos_target_mos=args.dnsmos_target_mos,
         mpd_adv_weight=args.mpd_adv_weight,
         mpd_fm_weight=args.mpd_fm_weight,
         mpd_start_step=args.mpd_start_step,

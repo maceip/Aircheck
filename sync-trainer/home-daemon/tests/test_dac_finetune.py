@@ -29,6 +29,7 @@ if str(HOME_DAEMON_DIR) not in sys.path:
     sys.path.insert(0, str(HOME_DAEMON_DIR))
 
 from enroll_voice_assets import (  # noqa: E402
+    DnsmosP808Engine,
     WeSpeakerEngine,
     compute_log_mel_filterbank,
     load_audio_mono,
@@ -54,6 +55,7 @@ from finetune_dac_decoder import (  # noqa: E402
     CachedEncodedClip,
     ClipEvalMetrics,
     DecoderEMA,
+    FrozenDnsmosP808,
     FrozenWeSpeakerResNet34,
     MultiPeriodDiscriminator,
     MultiResolutionSTFTLoss,
@@ -196,6 +198,19 @@ def test_frozen_wespeaker_resnet34_parity_and_mpd_losses():
     loss_ws = (1.0 - pt_emb.sum()) + sum(f.abs().mean() for f in feats)
     loss_ws.backward()
     assert x_t.grad is not None and torch.isfinite(x_t.grad).all()
+
+    # Exact parity of differentiable FrozenDnsmosP808 vs ONNXRuntime DnsmosP808Engine
+    dns_ort = DnsmosP808Engine()
+    dns_pt = FrozenDnsmosP808()
+    assert all(not p.requires_grad for p in dns_pt.parameters())
+    pcm16_full = resample_44k_to_16k_android_exact(wav_44k)
+    seg_9s = pcm16_full[:144160]
+    ort_mos = dns_ort.score_p808(seg_9s)
+    x16 = torch.from_numpy(seg_9s).unsqueeze(0).requires_grad_(True)
+    pt_mos = dns_pt(x16)
+    assert abs(float(pt_mos.item()) - ort_mos) < 1e-3
+    pt_mos.backward()
+    assert x16.grad is not None and torch.isfinite(x16.grad).all()
 
     mpd = MultiPeriodDiscriminator(periods=(2, 3, 5))
     real = torch.from_numpy(seg).view(1, 1, -1)
