@@ -15,6 +15,12 @@ Endpoints:
   GET  /v1/jobs/{job_id}                    -> Real persisted render job status, metrics, and video_url
   GET  /v1/renders/{filename}               -> Path-traversal-guarded MP4 streaming with RFC 9110 Range
                                                support (206 Partial Content, Content-Type: video/mp4)
+  POST /v1/draft/transcribe                 -> Local whisper-cli WAV transcription
+  POST /v1/draft/angles                     -> 2-3 extracted claims + 3 structural blindspots
+  POST /v1/draft/synthesize                 -> 3-posture draft fanout or 1-slot refresh
+  POST /v1/draft/brush-swap                 -> 2 terse replacement spans + "" clean cut
+  POST /v1/draft/seam-heal                  -> Lock-preserving seam repair
+  POST /v1/draft/density                    -> Lock-preserving density compression/expansion (-25..15)
 """
 
 from __future__ import annotations
@@ -40,6 +46,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from drafting_passes import (
+    MAX_DRAFT_AUDIO_BODY_BYTES,
+    MAX_DRAFT_TEXT_BODY_BYTES,
+    DraftPassEngine,
+)
 from tinker_voice_daemon import (
     SchemaValidationError,
     parse_preferences_ndjson,
@@ -1480,7 +1491,7 @@ def _run_ai_assist(payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) ->
 
 
 class OtaHttpServer(ThreadingHTTPServer):
-    """Multi-threaded stdlib HTTP server holding OtaBundleStore and RenderJobManager."""
+    """Multi-threaded stdlib HTTP server holding OtaBundleStore, RenderJobManager & DraftPassEngine."""
 
     allow_reuse_address = True
     daemon_threads = True
@@ -1491,6 +1502,7 @@ class OtaHttpServer(ThreadingHTTPServer):
         store: OtaBundleStore,
         *,
         render_manager: RenderJobManager | None = None,
+        draft_engine: DraftPassEngine | None = None,
         quiet: bool = False,
     ) -> None:
         self.store = store
@@ -1498,6 +1510,7 @@ class OtaHttpServer(ThreadingHTTPServer):
             renders_dir=store.bundles_root.parent / "renders",
             bundles_root=store.bundles_root,
         )
+        self.draft_engine = draft_engine or DraftPassEngine()
         self.quiet = quiet
         super().__init__(server_address, OtaRequestHandler)
 
@@ -1927,6 +1940,24 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/ai-assist":
             self._handle_post_ai_assist()
             return
+        if parsed.path == "/v1/draft/transcribe":
+            self._handle_post_draft_pass("transcribe", max_bytes=MAX_DRAFT_AUDIO_BODY_BYTES)
+            return
+        if parsed.path == "/v1/draft/angles":
+            self._handle_post_draft_pass("angles", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
+        if parsed.path == "/v1/draft/synthesize":
+            self._handle_post_draft_pass("synthesize", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
+        if parsed.path == "/v1/draft/brush-swap":
+            self._handle_post_draft_pass("brush_swap", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
+        if parsed.path == "/v1/draft/seam-heal":
+            self._handle_post_draft_pass("seam_heal", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
+        if parsed.path == "/v1/draft/density":
+            self._handle_post_draft_pass("density", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
 
         self._send_json(
             HTTPStatus.NOT_FOUND,
@@ -2021,6 +2052,40 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, result)
 
 
+    def _handle_post_draft_pass(self, pass_name: str, *, max_bytes: int) -> None:
+        text_body = self._read_post_utf8_body(
+            max_bytes=max_bytes,
+            empty_detail=f"Empty /v1/draft/{pass_name.replace('_', '-')} request payload",
+        )
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"},
+            )
+            return
+
+        handler = getattr(self.server.draft_engine, pass_name)
+        try:
+            result = handler(decoded)
+        except ValueError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "invalid_draft_request", "detail": str(exc)},
+            )
+            return
+        except Exception as exc:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY,
+                {"error": "draft_pass_failed", "detail": str(exc)},
+            )
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+
 def create_ota_server(
     host: str,
     port: int,
@@ -2033,6 +2098,7 @@ def create_ota_server(
     python_bin: Path | str | None = None,
     default_avatar_path: Path | str = DEFAULT_AVATAR_PATH,
     render_runner: RenderRunnerFn | None = None,
+    draft_engine: DraftPassEngine | None = None,
     quiet: bool = False,
 ) -> OtaHttpServer:
     """Factory creating an OtaHttpServer bound to `(host, port)`."""
@@ -2058,7 +2124,13 @@ def create_ota_server(
         default_avatar_path=default_avatar_path,
         render_runner=render_runner,
     )
-    return OtaHttpServer((host, port), store, render_manager=render_manager, quiet=quiet)
+    return OtaHttpServer(
+        (host, port),
+        store,
+        render_manager=render_manager,
+        draft_engine=draft_engine,
+        quiet=quiet,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
