@@ -1051,16 +1051,13 @@ class RenderJobManager:
             except json.JSONDecodeError:
                 head_meta = {}
 
-        exact_voice_mp4 = raw_out_mp4.with_name(f"{raw_out_mp4.stem}_exact_input_voice.mp4")
-        if head_meta.get("exact_input_voice_mp4"):
-            exact_candidate = Path(str(head_meta["exact_input_voice_mp4"]))
-            if exact_candidate.is_file() and exact_candidate.stat().st_size > 0:
-                exact_voice_mp4 = exact_candidate
-
+        # Prefer wan3.0-video's native frame-accurate lip-locked output (`raw_out_mp4`) over
+        # post-hoc audio replacement (`exact_voice_mp4`), because blind audio replacement shifts
+        # lip timing whenever the input WAV cadence differs from the generated video cadence.
         chosen_mp4 = (
-            exact_voice_mp4
-            if exact_voice_mp4.is_file() and exact_voice_mp4.stat().st_size > 0
-            else raw_out_mp4
+            raw_out_mp4
+            if raw_out_mp4.is_file() and raw_out_mp4.stat().st_size > 0
+            else Path(str(head_meta.get("exact_input_voice_mp4", "")))
         )
         if not chosen_mp4.is_file() or chosen_mp4.stat().st_size == 0:
             raise RuntimeError(

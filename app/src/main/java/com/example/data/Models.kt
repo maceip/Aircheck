@@ -24,13 +24,13 @@ enum class StudioTab(val label: String) {
 }
 
 enum class VoiceSource(val label: String, val subtitle: String) {
-    ENROLLED_VOICE_CLONE("Enrolled Voice ID", "Single-pass cloud TTS with your voice_id"),
-    MIC_VOICEOVER("Mic Voiceover", "Record live 16-bit PCM studio take");
+    MIC_VOICEOVER("Mic Voiceover", "Record live 16-bit PCM take on your phone"),
+    ENROLLED_VOICE_CLONE("Local Voice Clone", "Synthesize on Mac Rig with s2-pro + LoRA");
 
     companion object {
         fun fromRaw(raw: String?): VoiceSource = when (raw) {
-            "MIC_VOICEOVER" -> MIC_VOICEOVER
-            else -> ENROLLED_VOICE_CLONE
+            "ENROLLED_VOICE_CLONE" -> ENROLLED_VOICE_CLONE
+            else -> MIC_VOICEOVER
         }
     }
 }
@@ -276,15 +276,15 @@ data class PersonaProfile(
 }
 
 data class StageProviderSettings(
-    val voiceProviderId: String = "elevenlabs_pvc",
-    val alignProviderId: String = "groq_whisper_v3_turbo",
-    val headProviderId: String = "wan22_s2v_lora",
-    val packageProviderId: String = "cloud_run_remotion",
-    val lanGatewayUrl: String = "",
-    val useLanVoice: Boolean = false,
-    val useLanAlign: Boolean = false,
-    val useLanHead: Boolean = false,
-    val useLanPackage: Boolean = false
+    val voiceProviderId: String = "voicestudio_s2pro_local",
+    val alignProviderId: String = "sherpa_onnx_local",
+    val headProviderId: String = "mac_rig_wan30",
+    val packageProviderId: String = "mac_rig_ffmpeg",
+    val lanGatewayUrl: String = "http://10.0.0.242:8443",
+    val useLanVoice: Boolean = true,
+    val useLanAlign: Boolean = true,
+    val useLanHead: Boolean = true,
+    val useLanPackage: Boolean = true
 )
 
 enum class ExportState {

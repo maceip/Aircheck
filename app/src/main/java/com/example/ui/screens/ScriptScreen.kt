@@ -4,10 +4,8 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,27 +28,21 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.FactCheck
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,82 +57,77 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.R
 import com.example.data.ScriptBeat
+import com.example.data.VoiceSource
 import com.example.data.formatDurationBadge
 import com.example.ui.StudioUiState
 import com.example.ui.components.HazardCutOverlay
 import com.example.ui.components.StudioCard
 import com.example.ui.components.StudioErrorBanner
 import com.example.ui.components.StudioPrimaryCta
+import com.example.ui.components.TelemetryWaveform
 import com.example.ui.theme.ConsoleElevated
 import com.example.ui.theme.LocalAircheckTokens
 import com.example.ui.theme.OledVoid
+import com.example.ui.theme.OnAirCrimson
 import com.example.ui.theme.StudioCrisp
 import com.example.ui.theme.TelemetryMuted
 import com.example.ui.theme.TelemetryTimecodeStyle
 
-private val DURATION_TARGETS = listOf(15, 30, 45, 60)
+private val DURATION_TARGETS = listOf(10, 15, 30, 45)
 
 @Composable
 fun ScriptScreen(
     uiState: StudioUiState,
     onUpdateTitle: (String) -> Unit,
-    onUpdateSpark: (String) -> Unit,
     onSetTargetDuration: (Int) -> Unit,
-    onToggleHoneSpark: () -> Unit,
     onUpdateBeatText: (String, String) -> Unit,
-    onUpdateBeatMetadata: (
-        beatId: String,
-        mentionTag: String?,
-        depthTextTag: String?,
-        anchorWord: String?,
-        evidenceSource: String?,
-        sfxTag: String?,
-        bRollPrompt: String?
-    ) -> Unit,
-    onToggleExpandBeat: (String) -> Unit,
-    onFactCheckBeat: (String) -> Unit,
-    onShorten20Percent: () -> Unit,
-    onAcceptShortProposal: (String) -> Unit,
-    onRejectShortProposal: (String) -> Unit,
     onToggleCutBeat: (String) -> Unit,
-    onToggleBeatMicRecord: (String) -> Unit,
+    onToggleMicRecord: (String?) -> Unit,
+    onTogglePreviewWav: () -> Unit,
+    onSetVoiceSource: (VoiceSource) -> Unit,
     onAddBeat: () -> Unit,
     onDeleteBeat: (String) -> Unit,
     onDismissError: () -> Unit,
-    onPrimaryAction: () -> Unit,
+    onRender: () -> Unit,
     onOpenClipper: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
     val context = LocalContext.current
     val project = uiState.activeProject
-    var expandedBeatId by remember { mutableStateOf<String?>(null) }
     var pendingRecordBeatId by remember { mutableStateOf<String?>(null) }
+    var pendingRecordTriggered by remember { mutableStateOf(false) }
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
+        val shouldStart = pendingRecordTriggered
         val target = pendingRecordBeatId
+        pendingRecordTriggered = false
         pendingRecordBeatId = null
-        if (granted && target != null) {
-            onToggleBeatMicRecord(target)
+        if (granted && shouldStart) {
+            onToggleMicRecord(target)
         }
     }
 
-    fun requestOrToggleMic(beatId: String) {
+    fun requestOrToggleMic(beatId: String?) {
+        if (uiState.isRecordingMic) {
+            onToggleMicRecord(beatId)
+            return
+        }
         val granted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
         if (granted) {
-            onToggleBeatMicRecord(beatId)
+            onToggleMicRecord(beatId)
         } else {
             pendingRecordBeatId = beatId
+            pendingRecordTriggered = true
             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
@@ -175,7 +162,7 @@ fun ScriptScreen(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Unlabeled, clean inline title field + single tabular runtime readout
+            // 1. Clean inline title + duration readout (2 adjacent elements)
             item(key = "script_title_row") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -203,7 +190,6 @@ fun ScriptScreen(
                         }
                     }
 
-                    // Single subtle cycling target duration selector (15s / 30s / 45s / 60s)
                     val nextDuration = remember(project.targetDurationSec) {
                         val idx = DURATION_TARGETS.indexOf(project.targetDurationSec)
                         DURATION_TARGETS[(idx + 1) % DURATION_TARGETS.size]
@@ -236,101 +222,127 @@ fun ScriptScreen(
                 }
             }
 
-            // Primary Spark Card with weightless inline ✨ trigger attached inside the card
-            item(key = "spark_card") {
-                val sparkShimmering = uiState.activeShimmerKey == "spark"
+            // 2. Direct Local Mic Recorder & Voice Source Selector (Zero Firebase)
+            item(key = "voice_recorder_card") {
+                val hasRecordedWav = !project.masterAudioSha.isNullOrBlank()
                 StudioCard(
-                    shimmering = sparkShimmering,
+                    highlighted = uiState.isRecordingMic,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("spark_card")
+                        .testTag("voice_recorder_card")
                 ) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.Top
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .padding(top = 6.dp, end = 6.dp)
-                                    .heightIn(min = 56.dp)
-                            ) {
-                                BasicTextField(
-                                    value = project.ideaSpark,
-                                    onValueChange = onUpdateSpark,
-                                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = StudioCrisp),
-                                    cursorBrush = SolidColor(tokens.channelAccent),
+                            VoiceSource.entries.forEach { source ->
+                                val selected = project.voiceSource == source
+                                Surface(
+                                    color = if (selected) tokens.channelAccentContainer else ConsoleElevated,
+                                    shape = RoundedCornerShape(6.dp),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (selected) tokens.channelAccent else tokens.hairline
+                                    ),
                                     modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("spark_input")
-                                )
-                                if (project.ideaSpark.isEmpty()) {
-                                    Text(
-                                        text = stringResource(R.string.spark_placeholder),
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = TelemetryMuted.copy(alpha = 0.65f)
-                                    )
+                                        .weight(1f)
+                                        .height(40.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable { onSetVoiceSource(source) }
+                                        .testTag("script_voice_mode_${source.name.lowercase()}")
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(
+                                            text = if (source == VoiceSource.MIC_VOICEOVER) "Mic Voice" else "Voice Clone",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = if (selected) tokens.channelAccent else StudioCrisp,
+                                            maxLines = 1
+                                        )
+                                    }
                                 }
                             }
+                        }
 
-                            IconButton(
-                                onClick = onToggleHoneSpark,
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = { requestOrToggleMic(null) },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (uiState.isRecordingMic) OnAirCrimson else tokens.channelAccent,
+                                    contentColor = if (uiState.isRecordingMic) StudioCrisp else tokens.channelAccentInk
+                                ),
                                 modifier = Modifier
-                                    .size(48.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(
-                                        if (sparkShimmering) tokens.channelAccent else tokens.channelAccentContainer
-                                    )
-                                    .testTag("spark_ai_button")
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("record_mic_button")
                             ) {
                                 Icon(
-                                    imageVector = if (sparkShimmering) Icons.Filled.Close else Icons.Filled.AutoAwesome,
-                                    contentDescription = if (sparkShimmering) {
-                                        stringResource(R.string.cd_ai_cancel)
-                                    } else {
-                                        stringResource(R.string.cd_ai_hone_spark)
-                                    },
-                                    tint = if (sparkShimmering) tokens.channelAccentInk else tokens.channelAccent,
-                                    modifier = Modifier.size(20.dp)
+                                    imageVector = if (uiState.isRecordingMic) Icons.Filled.Stop else Icons.Filled.Mic,
+                                    contentDescription = stringResource(R.string.cd_record_mic),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (uiState.isRecordingMic) "Stop Recording" else "Record Voice",
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
+
+                            if (hasRecordedWav && !uiState.isRecordingMic) {
+                                OutlinedButton(
+                                    onClick = onTogglePreviewWav,
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(1.dp, tokens.hairline),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("preview_wav_button")
+                                ) {
+                                    Icon(
+                                        imageVector = if (uiState.isPlayingAudio) Icons.Filled.Stop else Icons.Filled.PlayArrow,
+                                        contentDescription = stringResource(R.string.cd_play_pause),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(if (uiState.isPlayingAudio) "Stop" else "Play")
+                                }
+                            }
+                        }
+
+                        if (uiState.waveformPeaks.isNotEmpty()) {
+                            TelemetryWaveform(
+                                peaks = uiState.waveformPeaks,
+                                progress = if (uiState.isPlayingAudio) uiState.playbackProgress else 1f,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(34.dp)
+                                    .testTag("script_mic_waveform")
+                            )
                         }
                     }
                 }
             }
 
-            // Breathable Script Beat Cards (zero step codes, <= 2 visible pills per beat)
+            // 3. Spoken Script Beat Cards (100% Local Room persistence)
             items(project.beats, key = { it.id }) { beat ->
-                val isShimmering = uiState.activeShimmerKey == "beat_${beat.id}" ||
-                    uiState.activeShimmerKey == "shorten"
-                val isExpanded = expandedBeatId == beat.id
                 val isRecordingThisBeat = uiState.isRecordingMic && uiState.recordingTargetBeatId == beat.id
 
                 BeatEditorCard(
                     beat = beat,
-                    shimmering = isShimmering,
-                    expanded = isExpanded,
                     isRecordingMic = isRecordingThisBeat,
                     onTextChange = { onUpdateBeatText(beat.id, it) },
-                    onToggleAi = { onToggleExpandBeat(beat.id) },
-                    onToggleExpanded = {
-                        expandedBeatId = if (isExpanded) null else beat.id
-                    },
-                    onFactCheck = { onFactCheckBeat(beat.id) },
-                    onShorten20 = onShorten20Percent,
-                    onAcceptShort = { onAcceptShortProposal(beat.id) },
-                    onRejectShort = { onRejectShortProposal(beat.id) },
                     onToggleCut = { onToggleCutBeat(beat.id) },
                     onToggleMic = { requestOrToggleMic(beat.id) },
-                    onDelete = { onDeleteBeat(beat.id) },
-                    onMetadataChange = { mention, depth, anchor, source, sfx, broll ->
-                        onUpdateBeatMetadata(beat.id, mention, depth, anchor, source, sfx, broll)
-                    }
+                    onDelete = { onDeleteBeat(beat.id) }
                 )
             }
 
-            // Lightweight Add Beat + Shorten 20% footer actions inside scroll flow
+            // 4. Add Beat + Hairline Clipper controls
             item(key = "script_list_footer") {
                 Row(
                     modifier = Modifier
@@ -345,6 +357,7 @@ fun ScriptScreen(
                         border = BorderStroke(1.dp, tokens.hairline),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
                         modifier = Modifier
+                            .weight(1f)
                             .height(48.dp)
                             .testTag("add_beat_button")
                     ) {
@@ -360,60 +373,32 @@ fun ScriptScreen(
                         )
                     }
 
-                    if (project.activeBeats.isNotEmpty()) {
-                        val isShortening = uiState.activeShimmerKey == "shorten"
-                        OutlinedButton(
-                            onClick = onShorten20Percent,
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(
-                                1.dp,
-                                if (isShortening) tokens.channelAccent else tokens.hairline
-                            ),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                contentColor = if (isShortening) tokens.channelAccent else TelemetryMuted
-                            ),
-                            modifier = Modifier
-                                .height(48.dp)
-                                .testTag("shorten_20_button")
-                        ) {
-                            Text(
-                                text = if (isShortening) "Cancel" else stringResource(R.string.action_shorten_20),
-                                style = MaterialTheme.typography.labelLarge
-                            )
-                        }
+                    OutlinedButton(
+                        onClick = onOpenClipper,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, tokens.channelAccent.copy(alpha = 0.65f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = tokens.channelAccent),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("open_clipper_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.GraphicEq,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Clipper",
+                            style = MaterialTheme.typography.labelLarge
+                        )
                     }
-                }
-            }
-
-            // Direct jump from Script -> VoiceStudio Hairline Clipper (dedicated row, <= 2 adjacent labels)
-            item(key = "script_clipper_entry") {
-                OutlinedButton(
-                    onClick = onOpenClipper,
-                    shape = RoundedCornerShape(8.dp),
-                    border = BorderStroke(1.dp, tokens.channelAccent.copy(alpha = 0.65f)),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = tokens.channelAccent),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("open_clipper_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.GraphicEq,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Hairline Clipper",
-                        style = MaterialTheme.typography.labelLarge
-                    )
                 }
             }
         }
 
-        // Uniform Pinned Primary CTA Slot directly above the dock
-        val hasPhotoReady = !project.stageConfig.activePhotoSha.isNullOrBlank() ||
-            uiState.settings.persona.defaultPhotoSha.isNotBlank()
+        // Uniform Pinned Primary CTA Slot directly above the dock — always renders directly to Mac :8443
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -421,13 +406,9 @@ fun ScriptScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
             StudioPrimaryCta(
-                text = if (hasPhotoReady && project.activeBeats.isNotEmpty()) {
-                    if (uiState.isEnqueuingRender) "Queueing…" else stringResource(R.string.cta_render_aircheck)
-                } else {
-                    stringResource(R.string.cta_next_photo)
-                },
-                onClick = onPrimaryAction,
-                enabled = !uiState.isEnqueuingRender,
+                text = if (uiState.isEnqueuingRender) "Queueing on Mac Rig…" else stringResource(R.string.cta_render_aircheck),
+                onClick = onRender,
+                enabled = !uiState.isEnqueuingRender && !uiState.isRecordingMic,
                 modifier = Modifier.testTag("script_primary_cta")
             )
         }
@@ -437,32 +418,15 @@ fun ScriptScreen(
 @Composable
 private fun BeatEditorCard(
     beat: ScriptBeat,
-    shimmering: Boolean,
-    expanded: Boolean,
     isRecordingMic: Boolean,
     onTextChange: (String) -> Unit,
-    onToggleAi: () -> Unit,
-    onToggleExpanded: () -> Unit,
-    onFactCheck: () -> Unit,
-    onShorten20: () -> Unit,
-    onAcceptShort: () -> Unit,
-    onRejectShort: () -> Unit,
     onToggleCut: () -> Unit,
     onToggleMic: () -> Unit,
-    onDelete: () -> Unit,
-    onMetadataChange: (
-        mentionTag: String?,
-        depthTextTag: String?,
-        anchorWord: String?,
-        evidenceSource: String?,
-        sfxTag: String?,
-        bRollPrompt: String?
-    ) -> Unit
+    onDelete: () -> Unit
 ) {
     val tokens = LocalAircheckTokens.current
 
     StudioCard(
-        shimmering = shimmering,
         highlighted = isRecordingMic,
         contentPadding = PaddingValues(0.dp),
         modifier = Modifier
@@ -477,250 +441,71 @@ private fun BeatEditorCard(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(14.dp)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.Top
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(top = 4.dp, end = 8.dp)
-                            .heightIn(min = 52.dp)
-                    ) {
-                        BasicTextField(
-                            value = beat.spokenText,
-                            onValueChange = onTextChange,
-                            textStyle = MaterialTheme.typography.bodyLarge.copy(
-                                color = if (beat.cut) TelemetryMuted else StudioCrisp,
-                                textDecoration = if (beat.cut) TextDecoration.LineThrough else TextDecoration.None
-                            ),
-                            cursorBrush = SolidColor(tokens.channelAccent),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("beat_input_${beat.id}")
-                        )
-                        if (beat.spokenText.isEmpty()) {
-                            Text(
-                                text = stringResource(R.string.beat_placeholder),
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = TelemetryMuted.copy(alpha = 0.58f)
-                            )
-                        }
-                    }
-
-                    // Inline weightless ✨ trigger directly on the beat card
-                    IconButton(
-                        onClick = onToggleAi,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(
-                                if (shimmering) tokens.channelAccent else ConsoleElevated
-                            )
-                            .testTag("beat_ai_button_${beat.id}")
-                    ) {
-                        Icon(
-                            imageVector = if (shimmering) Icons.Filled.Close else Icons.Filled.AutoAwesome,
-                            contentDescription = if (shimmering) {
-                                stringResource(R.string.cd_ai_cancel)
-                            } else {
-                                stringResource(R.string.cd_ai_expand_beat)
-                            },
-                            tint = if (shimmering) tokens.channelAccentInk else tokens.channelAccent,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-
-                // Inline Shorten 20% diff card (only when proposal exists)
-                if (!beat.proposedShortText.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Column(
+                    BasicTextField(
+                        value = beat.spokenText,
+                        onValueChange = onTextChange,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = if (beat.cut) TelemetryMuted else StudioCrisp,
+                            textDecoration = if (beat.cut) TextDecoration.LineThrough else TextDecoration.None
+                        ),
+                        cursorBrush = SolidColor(tokens.channelAccent),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(ConsoleElevated)
-                            .border(1.dp, tokens.channelAccent.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-                            .padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+                            .testTag("beat_input_${beat.id}")
+                    )
+                    if (beat.spokenText.isEmpty()) {
                         Text(
-                            text = beat.proposedShortText,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = StudioCrisp
+                            text = stringResource(R.string.beat_placeholder),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = TelemetryMuted.copy(alpha = 0.58f)
                         )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            TextButton(
-                                onClick = onRejectShort,
-                                modifier = Modifier.testTag("keep_original_${beat.id}")
-                            ) {
-                                Text(
-                                    text = stringResource(R.string.action_keep_original),
-                                    color = TelemetryMuted
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(6.dp))
-                            TextButton(
-                                onClick = onAcceptShort,
-                                modifier = Modifier.testTag("use_shorter_${beat.id}")
-                            ) {
-                                Text(
-                                    text = stringResource(R.string.action_use_shorter),
-                                    color = tokens.channelAccent,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Strict <= 2:1 default metadata row: Duration + optional citation, plus quiet expand toggle
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    Text(
+                        text = if (beat.cut) "Cut" else formatDurationBadge(beat.effectiveDurationSec),
+                        style = TelemetryTimecodeStyle,
+                        color = if (beat.cut) tokens.hazardCut else TelemetryMuted,
                         modifier = Modifier.weight(1f)
-                    ) {
-                        Text(
-                            text = if (beat.cut) "Cut" else formatDurationBadge(beat.effectiveDurationSec),
-                            style = TelemetryTimecodeStyle,
-                            color = if (beat.cut) tokens.hazardCut else TelemetryMuted
-                        )
-                        if (beat.hasCitation) {
-                            Text(
-                                text = beat.evidenceSource,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = tokens.evidenceAmber,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-
+                    )
+                    CompactBeatToolButton(
+                        icon = if (isRecordingMic) Icons.Filled.Stop else Icons.Filled.Mic,
+                        label = if (isRecordingMic) "Stop" else "Mic",
+                        active = isRecordingMic || !beat.beatAudioSha.isNullOrBlank(),
+                        onClick = onToggleMic,
+                        modifier = Modifier.testTag("beat_mic_${beat.id}")
+                    )
+                    CompactBeatToolButton(
+                        icon = Icons.Filled.ContentCut,
+                        label = if (beat.cut) "Restore" else "Cut",
+                        active = beat.cut,
+                        onClick = onToggleCut,
+                        modifier = Modifier.testTag("beat_cut_${beat.id}")
+                    )
                     IconButton(
-                        onClick = onToggleExpanded,
+                        onClick = onDelete,
                         modifier = Modifier
-                            .size(48.dp)
-                            .testTag("beat_expand_${beat.id}")
+                            .size(44.dp)
+                            .testTag("beat_delete_${beat.id}")
                     ) {
                         Icon(
-                            imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                            contentDescription = "Beat tools",
+                            imageVector = Icons.Filled.DeleteOutline,
+                            contentDescription = "Delete beat",
                             tint = TelemetryMuted,
                             modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-
-                // On-demand beat tray (collapsed by default to preserve wide-open writing canvas)
-                AnimatedVisibility(visible = expanded) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        HorizontalDivider(color = tokens.hairline)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            CompactBeatToolButton(
-                                icon = Icons.Filled.FactCheck,
-                                label = stringResource(R.string.action_fact_check),
-                                active = beat.hasCitation,
-                                onClick = onFactCheck,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("beat_fact_check_${beat.id}")
-                            )
-                            CompactBeatToolButton(
-                                icon = if (isRecordingMic) Icons.Filled.Stop else Icons.Filled.Mic,
-                                label = if (isRecordingMic) "Stop" else "Mic",
-                                active = isRecordingMic || !beat.beatAudioSha.isNullOrBlank(),
-                                onClick = onToggleMic,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("beat_mic_${beat.id}")
-                            )
-                            CompactBeatToolButton(
-                                icon = Icons.Filled.ContentCut,
-                                label = if (beat.cut) "Restore" else "Cut",
-                                active = beat.cut,
-                                onClick = onToggleCut,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("beat_cut_${beat.id}")
-                            )
-                            IconButton(
-                                onClick = onDelete,
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("beat_delete_${beat.id}")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.DeleteOutline,
-                                    contentDescription = "Delete beat",
-                                    tint = TelemetryMuted,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                        }
-
-                        OutlinedTextField(
-                            value = beat.evidenceSource,
-                            onValueChange = { onMetadataChange(null, null, null, it, null, null) },
-                            placeholder = { Text("Source or citation", color = TelemetryMuted) },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
-                            colors = studioFieldColors(),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedTextField(
-                                value = beat.depthTextTag,
-                                onValueChange = { onMetadataChange(null, it, null, null, null, null) },
-                                placeholder = { Text("On-screen keyword", color = TelemetryMuted) },
-                                singleLine = true,
-                                textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
-                                colors = studioFieldColors(),
-                                modifier = Modifier.weight(1f)
-                            )
-                            OutlinedTextField(
-                                value = beat.anchorWord,
-                                onValueChange = { onMetadataChange(null, null, it, null, null, null) },
-                                placeholder = { Text("Anchor word", color = TelemetryMuted) },
-                                singleLine = true,
-                                textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
-                                colors = studioFieldColors(),
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-
-                        OutlinedTextField(
-                            value = beat.bRollPrompt,
-                            onValueChange = { onMetadataChange(null, null, null, null, null, it) },
-                            placeholder = { Text("B-roll cutaway visual cue", color = TelemetryMuted) },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
-                            colors = studioFieldColors(),
-                            modifier = Modifier.fillMaxWidth()
                         )
                     }
                 }
@@ -743,12 +528,12 @@ private fun CompactBeatToolButton(
         shape = RoundedCornerShape(6.dp),
         border = BorderStroke(1.dp, if (active) tokens.channelAccent else tokens.hairline),
         modifier = modifier
-            .height(48.dp)
+            .height(40.dp)
             .clip(RoundedCornerShape(6.dp))
             .clickable(onClick = onClick)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp),
+            modifier = Modifier.padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {

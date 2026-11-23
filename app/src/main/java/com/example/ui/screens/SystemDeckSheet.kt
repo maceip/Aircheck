@@ -107,13 +107,13 @@ fun SystemDeckSheet(
     onSyncPreferences: (String) -> Unit = {},
     onRefreshVmRss: () -> Unit = {},
     onTestRigConnection: ((String) -> Unit)? = null,
+    onCreateNewProject: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val activeChannel = uiState.settings.brandChannel
-    val persona = uiState.settings.persona
     val otaState = uiState.otaBundleState
 
     var rigUrlDraft by remember(uiState.settings.tailscaleRigUrl) {
@@ -134,13 +134,6 @@ fun SystemDeckSheet(
             return
         }
         val url = rigUrlDraft.trim()
-        if (url.isEmpty()) {
-            localRigHealth = RigHealthUiState(
-                status = RigConnectionStatus.ERROR,
-                errorMessage = "Enter a Mac Rig URL (e.g. http://10.0.0.242:8443) first."
-            )
-            return
-        }
         val app = context.applicationContext as? AircheckApplication
         if (app == null) {
             localRigHealth = RigHealthUiState(
@@ -151,10 +144,11 @@ fun SystemDeckSheet(
         }
         localRigHealth = RigHealthUiState(status = RigConnectionStatus.CHECKING)
         scope.launch {
-            val result = runCatching { app.container.renderJobGateway.checkMacRigHealth(url) }
+            val result = runCatching { app.container.macRigGateway.resolveAndCheckHealth(url) }
             result.onSuccess { health ->
                 localRigHealth = RigHealthUiState(
                     status = RigConnectionStatus.ONLINE,
+                    resolvedUrl = health.resolvedUrl,
                     loraVersion = health.loraVersion,
                     bundleVersion = health.bundleVersion,
                     pendingPreferences = health.pendingPreferences,
@@ -344,32 +338,44 @@ fun SystemDeckSheet(
                             )
                         }
                         Text(
-                            text = "Head: ${persona.headModelId.ifBlank { "Unenrolled" }} · Voice: ${persona.voiceId.ifBlank { "Unenrolled" }}",
+                            text = "Direct Local Rig: ${rigHealth.resolvedUrl}",
                             style = MaterialTheme.typography.bodyMedium,
                             color = TelemetryMuted
                         )
-                        Text(
-                            text = "Script LLM: ${uiState.activeModels.textModelId} (${uiState.activeModels.health.name})",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = TelemetryMuted
-                        )
-                        OutlinedButton(
-                            onClick = onClearCasCache,
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, tokens.hairline),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("clear_cas_cache_button")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Filled.DeleteSweep,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Clear local CAS cache")
+                            OutlinedButton(
+                                onClick = onCreateNewProject,
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, tokens.hairline),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("new_script_button")
+                            ) {
+                                Text("New Script")
+                            }
+                            OutlinedButton(
+                                onClick = onClearCasCache,
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, tokens.hairline),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("clear_cas_cache_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.DeleteSweep,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Clear cache")
+                            }
                         }
                     }
                 }

@@ -28,6 +28,9 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
+const val DEFAULT_MAC_RIG_LAN_URL: String = "http://10.0.0.242:8443"
+const val DEFAULT_MAC_RIG_USB_URL: String = "http://127.0.0.1:8443"
+
 /**
  * Binary Protocol Buffer schema persisted via Jetpack Proto DataStore (aircheck_profile.pb).
  * Preloaded asynchronously off the main thread in Application.onCreate() — zero SharedPreferences.commit().
@@ -40,33 +43,33 @@ data class AircheckProfileProto(
     @ProtoNumber(3) val defaultPhotoSha: String = "",
     @ProtoNumber(4) val brandChannel: String = BrandChannel.VOLT_LIME.name,
     @ProtoNumber(5) val activeScriptId: String = "",
-    @ProtoNumber(6) val voiceSource: String = VoiceSource.ENROLLED_VOICE_CLONE.name,
+    @ProtoNumber(6) val voiceSource: String = VoiceSource.MIC_VOICEOVER.name,
     @ProtoNumber(7) val stage4Mode: String = Stage4Mode.PHOTO_HEAD_LORA.name,
-    @ProtoNumber(8) val voiceProviderId: String = "elevenlabs_pvc",
-    @ProtoNumber(9) val alignProviderId: String = "groq_whisper_v3_turbo",
-    @ProtoNumber(10) val headProviderId: String = "wan22_s2v_lora",
-    @ProtoNumber(11) val packageProviderId: String = "cloud_run_remotion",
-    @ProtoNumber(12) val lanGatewayUrl: String = "",
-    @ProtoNumber(13) val useLanVoice: Boolean = false,
-    @ProtoNumber(14) val useLanAlign: Boolean = false,
-    @ProtoNumber(15) val useLanHead: Boolean = false,
-    @ProtoNumber(16) val useLanPackage: Boolean = false,
+    @ProtoNumber(8) val voiceProviderId: String = "voicestudio_s2pro_local",
+    @ProtoNumber(9) val alignProviderId: String = "sherpa_onnx_local",
+    @ProtoNumber(10) val headProviderId: String = "mac_rig_wan30",
+    @ProtoNumber(11) val packageProviderId: String = "mac_rig_ffmpeg",
+    @ProtoNumber(12) val lanGatewayUrl: String = DEFAULT_MAC_RIG_LAN_URL,
+    @ProtoNumber(13) val useLanVoice: Boolean = true,
+    @ProtoNumber(14) val useLanAlign: Boolean = true,
+    @ProtoNumber(15) val useLanHead: Boolean = true,
+    @ProtoNumber(16) val useLanPackage: Boolean = true,
     @ProtoNumber(17) val trainingJobId: String = "",
     @ProtoNumber(18) val trainingStatus: String = "",
     @ProtoNumber(19) val trainingError: String = "",
     @ProtoNumber(20) val fcmToken: String = "",
-    @ProtoNumber(21) val tailscaleRigUrl: String = ""
+    @ProtoNumber(21) val tailscaleRigUrl: String = DEFAULT_MAC_RIG_LAN_URL
 )
 
 data class StudioSettings(
     val brandChannel: BrandChannel = BrandChannel.VOLT_LIME,
-    val voiceSource: VoiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
+    val voiceSource: VoiceSource = VoiceSource.MIC_VOICEOVER,
     val stage4Mode: Stage4Mode = Stage4Mode.PHOTO_HEAD_LORA,
     val activeScriptId: String = "",
     val persona: PersonaProfile = PersonaProfile(),
     val providers: StageProviderSettings = StageProviderSettings(),
     val fcmToken: String = "",
-    val tailscaleRigUrl: String = ""
+    val tailscaleRigUrl: String = DEFAULT_MAC_RIG_LAN_URL
 )
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -149,26 +152,6 @@ class AircheckProfileStore(
         }
     }
 
-    suspend fun updateProviders(providers: StageProviderSettings) {
-        dataStore.updateData { cur ->
-            cur.copy(
-                voiceProviderId = providers.voiceProviderId.trim(),
-                alignProviderId = providers.alignProviderId.trim(),
-                headProviderId = providers.headProviderId.trim(),
-                packageProviderId = providers.packageProviderId.trim(),
-                lanGatewayUrl = providers.lanGatewayUrl.trim(),
-                useLanVoice = providers.useLanVoice,
-                useLanAlign = providers.useLanAlign,
-                useLanHead = providers.useLanHead,
-                useLanPackage = providers.useLanPackage
-            )
-        }
-    }
-
-    suspend fun setFcmToken(token: String) {
-        dataStore.updateData { it.copy(fcmToken = token.trim()) }
-    }
-
     suspend fun setTailscaleRigUrl(url: String) {
         dataStore.updateData { it.copy(tailscaleRigUrl = url.trim()) }
     }
@@ -187,17 +170,17 @@ class AircheckProfileStore(
             trainingError = trainingError
         ),
         providers = StageProviderSettings(
-            voiceProviderId = voiceProviderId.ifBlank { "elevenlabs_pvc" },
-            alignProviderId = alignProviderId.ifBlank { "groq_whisper_v3_turbo" },
-            headProviderId = headProviderId.ifBlank { "wan22_s2v_lora" },
-            packageProviderId = packageProviderId.ifBlank { "cloud_run_remotion" },
-            lanGatewayUrl = lanGatewayUrl,
+            voiceProviderId = voiceProviderId.ifBlank { "voicestudio_s2pro_local" },
+            alignProviderId = alignProviderId.ifBlank { "sherpa_onnx_local" },
+            headProviderId = headProviderId.ifBlank { "mac_rig_wan30" },
+            packageProviderId = packageProviderId.ifBlank { "mac_rig_ffmpeg" },
+            lanGatewayUrl = lanGatewayUrl.ifBlank { DEFAULT_MAC_RIG_LAN_URL },
             useLanVoice = useLanVoice,
             useLanAlign = useLanAlign,
             useLanHead = useLanHead,
             useLanPackage = useLanPackage
         ),
         fcmToken = fcmToken,
-        tailscaleRigUrl = tailscaleRigUrl
+        tailscaleRigUrl = tailscaleRigUrl.ifBlank { DEFAULT_MAC_RIG_LAN_URL }
     )
 }

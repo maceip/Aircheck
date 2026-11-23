@@ -24,29 +24,23 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.credentials.CredentialManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.ui.NavDisplay
 import com.example.data.StudioTab
-import com.example.data.remote.attemptAutoSignIn
-import com.example.data.remote.configureAppCheck
-import com.example.data.remote.onGoogleSignInClicked
-import com.example.data.remote.signOutFromStudio
 import com.example.navigation.AircheckNavigator
 import com.example.navigation.ScreenKey
 import com.example.navigation.rememberAircheckNavigationState
+import com.example.ui.RigConnectionStatus
 import com.example.ui.StudioViewModel
 import com.example.ui.components.StudioDockBar
 import com.example.ui.components.StudioNavigationRail
 import com.example.ui.components.StudioTopBar
-import com.example.ui.screens.AccountSheet
 import com.example.ui.screens.ClipReviewScreen
 import com.example.ui.screens.ClipsScreen
 import com.example.ui.screens.PhotoStageScreen
@@ -63,9 +57,6 @@ import com.voicestudio.ui.ClipperScreen
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Configure Firebase App Check FIRST before any UI, ViewModel, or Firebase calls.
-        configureAppCheck(this, intent)
-
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK)
@@ -82,23 +73,10 @@ class MainActivity : ComponentActivity() {
 fun AircheckApp(viewModel: StudioViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val credentialManager = remember(context) { CredentialManager.create(context) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     val navigationState = rememberAircheckNavigationState()
     val navigator = remember(navigationState) { AircheckNavigator(navigationState) }
-
-    // Silent auto-sign-in for returning authenticated creators (never blocks instant offline-first boot)
-    LaunchedEffect(Unit) {
-        attemptAutoSignIn(
-            context = context,
-            credentialManager = credentialManager,
-            onAuthSuccess = {},
-            onUnauthenticated = {},
-            scope = scope
-        )
-    }
 
     LaunchedEffect(uiState.statusNotice) {
         val notice = uiState.statusNotice
@@ -130,8 +108,7 @@ fun AircheckApp(viewModel: StudioViewModel) {
     LaunchedEffect(currentRoute) {
         snackbarHostState.currentSnackbarData?.dismiss()
     }
-    val isFullScreenOverlay = currentRoute is ScreenKey.SettingsKey ||
-        currentRoute is ScreenKey.SystemDeckKey ||
+    val isFullScreenOverlay = currentRoute is ScreenKey.SystemDeckKey ||
         currentRoute is ScreenKey.ClipperKey
 
     AircheckTheme(channel = uiState.settings.brandChannel) {
@@ -142,42 +119,17 @@ fun AircheckApp(viewModel: StudioViewModel) {
                 ScriptScreen(
                     uiState = uiState,
                     onUpdateTitle = viewModel::updateTitle,
-                    onUpdateSpark = viewModel::updateSpark,
                     onSetTargetDuration = viewModel::setTargetDuration,
-                    onToggleHoneSpark = viewModel::toggleHoneSpark,
                     onUpdateBeatText = viewModel::updateBeatText,
-                    onUpdateBeatMetadata = { id, mention, depth, anchor, source, sfx, broll ->
-                        viewModel.updateBeatMetadata(
-                            beatId = id,
-                            mentionTag = mention,
-                            depthTextTag = depth,
-                            anchorWord = anchor,
-                            evidenceSource = source,
-                            sfxTag = sfx,
-                            bRollPrompt = broll
-                        )
-                    },
-                    onToggleExpandBeat = viewModel::toggleExpandBeat,
-                    onFactCheckBeat = viewModel::factCheckBeat,
-                    onShorten20Percent = viewModel::toggleShorten20Percent,
-                    onAcceptShortProposal = viewModel::acceptShortProposal,
-                    onRejectShortProposal = viewModel::rejectShortProposal,
                     onToggleCutBeat = viewModel::toggleCutBeat,
-                    onToggleBeatMicRecord = { beatId -> viewModel.toggleMicRecording(beatId) },
+                    onToggleMicRecord = { beatId -> viewModel.toggleMicRecording(beatId) },
+                    onTogglePreviewWav = viewModel::togglePreviewMasterWav,
+                    onSetVoiceSource = viewModel::setVoiceSource,
                     onAddBeat = viewModel::addBeat,
                     onDeleteBeat = viewModel::deleteBeat,
                     onDismissError = viewModel::dismissError,
                     onOpenClipper = { navigator.openClipper(uiState.activeProject.id) },
-                    onPrimaryAction = {
-                        val proj = uiState.activeProject
-                        val hasPhoto = !proj.stageConfig.activePhotoSha.isNullOrBlank() ||
-                            uiState.settings.persona.defaultPhotoSha.isNotBlank()
-                        if (hasPhoto && proj.activeBeats.isNotEmpty()) {
-                            viewModel.enqueueCloudRender()
-                        } else {
-                            navigator.selectTab(StudioTab.PHOTO)
-                        }
-                    }
+                    onRender = { viewModel.renderActiveProject() }
                 )
             }
 
@@ -186,12 +138,9 @@ fun AircheckApp(viewModel: StudioViewModel) {
                     uiState = uiState,
                     casStore = viewModel.casStore,
                     onImportPhoto = viewModel::importPhoto,
-                    onNormalizePose = viewModel::normalizePhotoPose,
                     onUpdateStageConfig = viewModel::updateStageConfig,
-                    onSetStage4Mode = viewModel::setStage4Mode,
                     onSetVoiceSource = viewModel::setVoiceSource,
-                    onGenerateBeatBRoll = viewModel::generateBeatBRoll,
-                    onEnqueueRender = viewModel::enqueueCloudRender,
+                    onEnqueueRender = { viewModel.renderActiveProject() },
                     onDismissError = viewModel::dismissError
                 )
             }
@@ -201,7 +150,7 @@ fun AircheckApp(viewModel: StudioViewModel) {
                     uiState = uiState,
                     casStore = viewModel.casStore,
                     onOpenClip = { clipId -> navigator.openClipReview(clipId) },
-                    onEnqueueRender = viewModel::enqueueCloudRender,
+                    onEnqueueRender = { viewModel.renderActiveProject() },
                     onDismissError = viewModel::dismissError
                 )
             }
@@ -249,39 +198,14 @@ fun AircheckApp(viewModel: StudioViewModel) {
                     onClearCasCache = viewModel::clearCasCache,
                     onPreviewAudio = viewModel::togglePreviewMasterWav,
                     onSaveTailscaleRigUrl = viewModel::saveTailscaleRigUrl,
+                    onTestRigConnection = viewModel::testMacRigConnection,
                     onSyncOtaBundle = viewModel::syncOtaBundleFromRig,
                     onSyncPreferences = viewModel::syncPreferencesNow,
                     onRefreshVmRss = viewModel::refreshVmRssTelemetry,
-                    onClose = { navigator.goBack() }
-                )
-            }
-
-            entry<ScreenKey.SettingsKey> {
-                AccountSheet(
-                    uiState = uiState,
-                    onSignInWithGoogle = {
-                        onGoogleSignInClicked(
-                            context = context,
-                            credentialManager = credentialManager,
-                            onAuthSuccess = { viewModel.triggerManualCloudSync() },
-                            onAuthError = { err -> viewModel.reportError(err) },
-                            scope = scope
-                        )
-                    },
-                    onSignOut = {
-                        signOutFromStudio(
-                            credentialManager = credentialManager,
-                            scope = scope
-                        )
-                    },
-                    onSyncNow = viewModel::triggerManualCloudSync,
                     onCreateNewProject = {
                         viewModel.createNewProject()
-                        navigator.selectTab(StudioTab.SCRIPT)
+                        navigator.goBack()
                     },
-                    onSavePersonaIds = viewModel::savePersonaIds,
-                    onSaveProviders = viewModel::saveProviderSettings,
-                    onStartPersonaTraining = viewModel::startPersonaTraining,
                     onClose = { navigator.goBack() }
                 )
             }
@@ -316,9 +240,8 @@ fun AircheckApp(viewModel: StudioViewModel) {
                                     StudioTab.PHOTO -> "Photo"
                                     StudioTab.CLIPS -> "Clips"
                                 },
-                                isSignedIn = uiState.isSignedIn,
-                                onOpenSystemDeck = { navigator.navigate(ScreenKey.SystemDeckKey) },
-                                onOpenAccount = { navigator.navigate(ScreenKey.SettingsKey) }
+                                isRigOnline = uiState.rigHealth.status == RigConnectionStatus.ONLINE,
+                                onOpenSystemDeck = { navigator.navigate(ScreenKey.SystemDeckKey) }
                             )
                         }
                     },

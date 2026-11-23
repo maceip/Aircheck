@@ -1,12 +1,8 @@
-import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
-
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.kotlin.serialization)
   alias(libs.plugins.google.devtools.ksp)
-  alias(libs.plugins.secrets)
-  alias(libs.plugins.google.services)
 }
 
 android {
@@ -103,15 +99,7 @@ android {
   }
 }
 
-secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
-  ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
-}
-
-googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
-
-// Aircheck + VoiceStudio Rectified Bare-Metal Modules (GGUF+LoRA, LiteRT DAC, 4-Gate ONNX, Oboe EDL, Hairline Clipper, OTA Worker)
+// Aircheck + VoiceStudio Local-First Modules (GGUF+LoRA, LiteRT DAC, 4-Gate ONNX, Oboe EDL, Hairline Clipper, Mac :8443 Bridge)
 dependencies {
   implementation(project(":audio-edl"))
   implementation(project(":core-engine"))
@@ -120,7 +108,6 @@ dependencies {
   implementation(project(":sync-trainer:android-worker"))
 
   implementation(platform(libs.androidx.compose.bom))
-  implementation(platform(libs.firebase.bom))
 
   implementation(libs.androidx.core.ktx)
   implementation(libs.androidx.work.runtime.ktx)
@@ -170,29 +157,8 @@ dependencies {
   // Startup speed multiplier
   implementation(libs.androidx.profileinstaller)
 
-  // Firebase Cloud Pipeline (Auth, Firestore Realtime, Cloud Functions v2, Cloud Storage CAS, FCM, AI Logic, AppCheck)
-  implementation(libs.firebase.ai)
-  implementation(libs.firebase.firestore)
-  implementation(libs.firebase.auth)
-  implementation(libs.firebase.functions)
-  implementation(libs.firebase.storage)
-  implementation(libs.firebase.messaging)
-  implementation(libs.firebase.appcheck.recaptcha)
-  implementation(libs.firebase.appcheck.debug)
-  implementation(libs.androidx.credentials)
-  implementation(libs.androidx.credentials.play.services)
-  implementation(libs.googleid)
-
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.kotlinx.coroutines.android)
-
-  testImplementation(libs.junit)
-  testImplementation(libs.androidx.core)
-  testImplementation(libs.androidx.junit)
-  testImplementation(libs.androidx.compose.ui.test.junit4)
-  testImplementation(libs.androidx.work.testing)
-  testImplementation(libs.kotlinx.coroutines.test)
-  testImplementation(libs.robolectric)
 
   androidTestImplementation(platform(libs.androidx.compose.bom))
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)

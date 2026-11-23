@@ -4,7 +4,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import com.example.data.BrandChannel
 import com.example.data.ClipCardRow
-import com.example.data.PersonaProfile
 import com.example.data.RenderJobStatus
 import com.example.data.ScriptBeat
 import com.example.data.ScriptProject
@@ -20,43 +19,29 @@ fun ScriptScreenPreview() {
         ScriptScreen(
             uiState = StudioUiState(
                 activeProject = ScriptProject(
-                    title = "Cloud GPU Inference Pricing Shift",
-                    ideaSpark = "Serverless H100 video generation just crossed under $1 per 30-second broadcast.",
-                    targetDurationSec = 30,
+                    title = "Breaking Broadcast",
+                    targetDurationSec = 10,
                     beats = listOf(
                         ScriptBeat(
                             id = "p1",
                             index = 0,
-                            spokenText = "Cloud video synthesis just dropped below a dollar per thirty-second news segment.",
-                            durationSec = 6,
-                            evidenceSource = "Q4 GPU Index"
-                        ),
-                        ScriptBeat(
-                            id = "p2",
-                            index = 1,
-                            spokenText = "Every stage now writes immutable SHA-256 artifacts so stale clips can never leak.",
-                            durationSec = 6
+                            spokenText = "Record your voice or type a line and render directly on your Mac Studio.",
+                            durationSec = 5
                         )
                     )
                 )
             ),
             onUpdateTitle = {},
-            onUpdateSpark = {},
             onSetTargetDuration = {},
-            onToggleHoneSpark = {},
             onUpdateBeatText = { _, _ -> },
-            onUpdateBeatMetadata = { _, _, _, _, _, _, _ -> },
-            onToggleExpandBeat = {},
-            onFactCheckBeat = {},
-            onShorten20Percent = {},
-            onAcceptShortProposal = {},
-            onRejectShortProposal = {},
             onToggleCutBeat = {},
-            onToggleBeatMicRecord = {},
+            onToggleMicRecord = {},
+            onTogglePreviewWav = {},
+            onSetVoiceSource = {},
             onAddBeat = {},
             onDeleteBeat = {},
             onDismissError = {},
-            onPrimaryAction = {}
+            onRender = {}
         )
     }
 }
@@ -67,13 +52,7 @@ fun SystemDeckPreview() {
     AircheckTheme(channel = BrandChannel.BROADCAST_COBALT) {
         SystemDeckSheet(
             uiState = StudioUiState(
-                settings = StudioSettings(
-                    brandChannel = BrandChannel.BROADCAST_COBALT,
-                    persona = PersonaProfile(
-                        headModelId = "ryan_head_v1",
-                        voiceId = "ryan_voice_v1"
-                    )
-                ),
+                settings = StudioSettings(brandChannel = BrandChannel.BROADCAST_COBALT),
                 casTotalBytes = 48L * 1024L * 1024L,
                 clipCards = listOf(
                     ClipCardRow(
@@ -87,7 +66,7 @@ fun SystemDeckPreview() {
                         progressFraction = 1f,
                         stageDetail = "Ready",
                         errorMessage = null,
-                        durationMs = 30_000L,
+                        durationMs = 10_000L,
                         thumbHash = null,
                         remoteFinalUrl = null,
                         updatedAtMillis = 0L

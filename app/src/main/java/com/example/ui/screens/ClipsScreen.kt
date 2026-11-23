@@ -121,7 +121,7 @@ fun ClipsScreen(
                             color = StudioCrisp
                         )
                         Text(
-                            text = "Write a script and pick a photo, then queue your cloud Aircheck render.",
+                            text = "Record your voice or write a script, then tap Render Aircheck to generate on your Mac Rig.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = TelemetryMuted
                         )

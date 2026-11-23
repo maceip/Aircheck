@@ -8,22 +8,13 @@ import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.allowHardware
 import coil3.request.bitmapConfig
-import com.example.data.gateway.CloudIngestGateway
-import com.example.data.gateway.CloudPersonaTrainingGateway
-import com.example.data.gateway.CloudPoseGateGateway
-import com.example.data.gateway.CloudRenderJobGateway
-import com.example.data.gateway.CloudScriptGateway
-import com.example.data.gateway.IngestGateway
-import com.example.data.gateway.PersonaTrainingGateway
-import com.example.data.gateway.PoseGateGateway
-import com.example.data.gateway.RenderJobGateway
-import com.example.data.gateway.ScriptGateway
+import com.example.data.gateway.DirectMacRigGateway
+import com.example.data.gateway.MacRigRenderGateway
 import com.example.data.local.AircheckDatabase
 import com.example.data.local.AircheckLocalRepository
 import com.example.data.local.AircheckProfileStore
 import com.example.data.local.CasMediaStore
-import com.example.data.remote.AircheckAiRepository
-import com.example.data.remote.FirestoreSyncRepository
+import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.engine.AircheckPlayerController
 import com.example.engine.AudioEngine
 import com.example.engine.ClipExporter
@@ -46,8 +37,8 @@ class AircheckContainer(context: Context) {
     val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(120, TimeUnit.SECONDS)
             .build()
     }
 
@@ -58,18 +49,9 @@ class AircheckContainer(context: Context) {
     val audioEngine: AudioEngine by lazy { AudioEngine() }
     val playerController: AircheckPlayerController by lazy { AircheckPlayerController(appContext, okHttpClient) }
     val clipExporter: ClipExporter by lazy { ClipExporter(appContext, casStore, okHttpClient) }
-    val firestoreRepo: FirestoreSyncRepository by lazy { FirestoreSyncRepository(appContext) }
+    val macRigGateway: MacRigRenderGateway by lazy { DirectMacRigGateway(casStore, okHttpClient) }
 
-    val aiRepo: AircheckAiRepository by lazy { AircheckAiRepository() }
-    val scriptGateway: ScriptGateway by lazy { CloudScriptGateway(aiRepo) }
-    val ingestGateway: IngestGateway by lazy { CloudIngestGateway(okHttpClient) }
-    val poseGateGateway: PoseGateGateway by lazy { CloudPoseGateGateway(casStore, okHttpClient) }
-    val renderJobGateway: CloudRenderJobGateway by lazy {
-        CloudRenderJobGateway(appContext, casStore, okHttpClient)
-    }
-    val personaTrainingGateway: PersonaTrainingGateway by lazy { CloudPersonaTrainingGateway(appContext) }
-
-    // VoiceStudio Bare-Metal Local Synthesis, Wait-Free Oboe EDL & Tailscale OTA Sync
+    // VoiceStudio Local Synthesis, Wait-Free Oboe EDL & Mac Rig OTA Sync
     val otaBundleSyncManager: OtaBundleSyncManager by lazy {
         OtaBundleSyncManager(appContext, okHttpClient)
     }
@@ -84,7 +66,7 @@ class AircheckContainer(context: Context) {
         VoiceStudioRuntimeRegistry.projectStore = localRepo
         VoiceStudioRuntimeRegistry.configProvider = object : SyncConfigProvider {
             override suspend fun getTailscaleBaseUrl(): String =
-                profileStore.current().tailscaleRigUrl
+                profileStore.current().tailscaleRigUrl.ifBlank { DEFAULT_MAC_RIG_LAN_URL }
         }
     }
 }
@@ -98,10 +80,10 @@ class AircheckApplication : Application(), SingletonImageLoader.Factory {
         super.onCreate()
         container = AircheckContainer(this)
         container.bindVoiceStudioRuntime()
-        // Preload binary Proto DataStore & local OTA bundle state off main thread (<200 ms cold start).
         container.appScope.launch {
             container.profileStore.preload()
-            val rigUrl = runCatching { container.profileStore.current().tailscaleRigUrl }.getOrDefault("")
+            val rigUrl = runCatching { container.profileStore.current().tailscaleRigUrl }
+                .getOrDefault(DEFAULT_MAC_RIG_LAN_URL)
             container.otaBundleSyncManager.refreshLocalState(rigUrl)
         }
     }

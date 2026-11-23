@@ -128,13 +128,17 @@ def composite_broadcast_beat(beat: dict, wav_path: Path, raw_mp4: Path, out_mux_
     build_chyron_overlay_png(beat["headline"], beat["subline"], overlay_png)
 
     if use_wan_audio:
-        filter_complex = "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30[bg];[bg][1:v]overlay=0:0:shortest=1[v]"
+        filter_complex = (
+            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30[bg];"
+            "[bg][1:v]overlay=0:0:shortest=1[v];"
+            "[0:a]loudnorm=I=-16:TP=-1.5:LRA=9[a]"
+        )
         cmd = [
             "ffmpeg", "-y",
             "-i", str(raw_mp4),
             "-loop", "1", "-i", str(overlay_png),
             "-filter_complex", filter_complex,
-            "-map", "[v]", "-map", "0:a:0",
+            "-map", "[v]", "-map", "[a]",
             "-t", f"{probe_duration(raw_mp4):.3f}",
             "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "1",
@@ -211,7 +215,7 @@ def render_wan_beat(beat: dict, wav_path: Path, out_raw_mp4: Path, out_mux_mp4: 
             if proc.returncode != 0 or not out_raw_mp4.exists():
                 raise RuntimeError(f"wan3.0 failed on {beat['id']}: rc={proc.returncode} {proc.stderr} {proc.stdout}")
 
-    return composite_broadcast_beat(beat, wav_path, out_raw_mp4, out_mux_mp4, use_wan_audio=False)
+    return composite_broadcast_beat(beat, wav_path, out_raw_mp4, out_mux_mp4, use_wan_audio=True)
 
 
 def main() -> int:

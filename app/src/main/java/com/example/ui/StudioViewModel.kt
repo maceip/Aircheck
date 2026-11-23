@@ -6,7 +6,6 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.AircheckApplication
-import com.example.data.BackdropPreset
 import com.example.data.BrandChannel
 import com.example.data.ClipCardRow
 import com.example.data.ClipRecord
@@ -16,20 +15,14 @@ import com.example.data.PoseGateResult
 import com.example.data.RenderJobStatus
 import com.example.data.ScriptBeat
 import com.example.data.ScriptProject
-import com.example.data.Stage4Mode
-import com.example.data.StageProviderSettings
 import com.example.data.VoiceSource
 import com.example.data.estimateDurationSeconds
 import com.example.data.gateway.MacRigJobSnapshot
 import com.example.data.local.CasMediaStore
+import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.data.local.StudioSettings
-import com.example.data.remote.ActiveModels
-import com.example.data.remote.ModelRegistry
 import com.example.engine.AircheckPlayerController
 import com.example.engine.AudioEngine
-import com.google.firebase.Firebase
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.auth
 import com.voicestudio.edl.ClauseSynthesisPhase
 import com.voicestudio.edl.ClauseSynthesisProgress
 import com.voicestudio.edl.EdlController
@@ -74,6 +67,7 @@ enum class RigConnectionStatus {
 
 data class RigHealthUiState(
     val status: RigConnectionStatus = RigConnectionStatus.IDLE,
+    val resolvedUrl: String = DEFAULT_MAC_RIG_LAN_URL,
     val loraVersion: Int = 0,
     val bundleVersion: String? = null,
     val pendingPreferences: Int = 0,
@@ -83,16 +77,10 @@ data class RigHealthUiState(
 
 data class StudioUiState(
     val projects: List<ScriptProject> = emptyList(),
-    val activeProject: ScriptProject = ScriptProject(),
+    val activeProject: ScriptProject = ScriptProject(voiceSource = VoiceSource.MIC_VOICEOVER),
     val clipCards: List<ClipCardRow> = emptyList(),
     val settings: StudioSettings = StudioSettings(),
     val casTotalBytes: Long = 0L,
-    val pendingOutboxCount: Int = 0,
-    val activeShimmerKey: String? = null,
-    val shimmerLabel: String = "",
-    val isCheckingPose: Boolean = false,
-    val isNormalizingPose: Boolean = false,
-    val generatingBRollBeatId: String? = null,
     val isEnqueuingRender: Boolean = false,
     val exportState: ExportState = ExportState.IDLE,
     val pendingShareIntent: Intent? = null,
@@ -102,14 +90,8 @@ data class StudioUiState(
     val playbackProgress: Float = 0f,
     val isRecordingMic: Boolean = false,
     val recordingTargetBeatId: String? = null,
-    val isSignedIn: Boolean = false,
-    val userEmail: String? = null,
-    val userDisplayName: String? = null,
-    val isSyncingCloud: Boolean = false,
-    val lastSyncMessage: String? = null,
     val errorMessage: String? = null,
     val statusNotice: String? = null,
-    val activeModels: ActiveModels = ActiveModels(),
     val otaBundleState: OtaBundleState = OtaBundleState(),
     val rigHealth: RigHealthUiState = RigHealthUiState(),
     val synthesisProgress: ClauseSynthesisProgress = ClauseSynthesisProgress(),
@@ -127,12 +109,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     val playerController: AircheckPlayerController = container.playerController
     private val audioEngine: AudioEngine = container.audioEngine
     private val clipExporter = container.clipExporter
-    private val firestoreRepo = container.firestoreRepo
-    private val scriptGateway = container.scriptGateway
-    private val ingestGateway = container.ingestGateway
-    private val poseGateGateway = container.poseGateGateway
-    private val renderJobGateway = container.renderJobGateway
-    private val personaTrainingGateway = container.personaTrainingGateway
+    private val macRigGateway = container.macRigGateway
     private val otaBundleSyncManager: OtaBundleSyncManager = container.otaBundleSyncManager
     private val edlController: EdlController = container.edlController
     private val voiceStudioCoordinator: VoiceStudioSyncCoordinator = container.voiceStudioCoordinator
@@ -140,11 +117,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val _uiState = MutableStateFlow(StudioUiState())
     val uiState: StateFlow<StudioUiState> = _uiState.asStateFlow()
 
-    private var activeAiJob: Job? = null
-    private var preRunProjectSnapshot: ScriptProject? = null
-    private var cloudSyncJob: Job? = null
-    private var jobsObserverJob: Job? = null
-    private var personaObserverJob: Job? = null
     private var voiceManifestObserverJob: Job? = null
     private var rigHealthCheckJob: Job? = null
     private val macRigPollingJobs = mutableMapOf<String, Job>()
@@ -155,36 +127,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private var activeRecordingFile: File? = null
     private var initializedProject = false
 
-    private val authListener = FirebaseAuth.AuthStateListener { auth ->
-        val user = auth.currentUser
-        _uiState.update {
-            it.copy(
-                isSignedIn = user != null,
-                userEmail = user?.email,
-                userDisplayName = user?.displayName
-            )
-        }
-        if (user != null) {
-            startCloudObservations(user.uid)
-        } else {
-            cloudSyncJob?.cancel()
-            jobsObserverJob?.cancel()
-            personaObserverJob?.cancel()
-        }
-    }
-
     init {
-        runCatching { Firebase.auth.addAuthStateListener(authListener) }
-
-        viewModelScope.launch {
-            ModelRegistry.models.collect { models ->
-                _uiState.update { it.copy(activeModels = models) }
-            }
-        }
-        viewModelScope.launch {
-            runCatching { ModelRegistry.verifyStartupHealth() }
-        }
-
         viewModelScope.launch {
             profileStore.settingsFlow.collect { settings ->
                 _uiState.update { it.copy(settings = settings) }
@@ -194,12 +137,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             casStore.totalBytesFlow.collect { bytes ->
                 _uiState.update { it.copy(casTotalBytes = bytes) }
-            }
-        }
-
-        viewModelScope.launch {
-            localRepo.pendingOutboxCount.collect { count ->
-                _uiState.update { it.copy(pendingOutboxCount = count) }
             }
         }
 
@@ -214,7 +151,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 if (!initializedProject) {
                     initializedProject = true
                     if (savedProjects.isEmpty()) {
-                        val initial = ScriptProject()
+                        val initial = ScriptProject(voiceSource = VoiceSource.MIC_VOICEOVER)
                         localRepo.saveScript(initial)
                         _uiState.update { it.copy(projects = listOf(initial), activeProject = initial) }
                     } else {
@@ -259,7 +196,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
-        // VoiceStudio real OTA bundle state, synthesis progress, Room preference queue & EDL playhead
         viewModelScope.launch {
             otaBundleSyncManager.bundleState.collect { otaState ->
                 _uiState.update { cur ->
@@ -316,80 +252,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         refreshVmRssTelemetry()
+        testMacRigConnection()
     }
 
     fun observeClip(clipId: String): Flow<ClipRecord?> = localRepo.observeClip(clipId)
 
-    private fun startCloudObservations(uid: String) {
-        cloudSyncJob?.cancel()
-        cloudSyncJob = viewModelScope.launch {
-            runCatching {
-                firestoreRepo.observeUserScripts().collectLatest { remoteProjects ->
-                    if (Firebase.auth.currentUser?.uid != uid) return@collectLatest
-                    remoteProjects.forEach { remote ->
-                        val local = localRepo.getScriptById(remote.id)
-                        if (local == null) {
-                            localRepo.saveScript(remote)
-                        } else if (remote.updatedAtMillis > local.updatedAtMillis) {
-                            val merged = remote.copy(
-                                stageConfig = remote.stageConfig.copy(
-                                    photoSha = remote.stageConfig.photoSha ?: local.stageConfig.photoSha,
-                                    normalizedPhotoSha = remote.stageConfig.normalizedPhotoSha
-                                        ?: local.stageConfig.normalizedPhotoSha,
-                                    poseGate = local.stageConfig.poseGate
-                                ),
-                                masterAudioSha = local.masterAudioSha
-                            )
-                            localRepo.saveScript(merged)
-                        }
-                    }
-                }
-            }
-        }
-
-        jobsObserverJob?.cancel()
-        jobsObserverJob = viewModelScope.launch {
-            runCatching {
-                renderJobGateway.observeRenderJobs().collectLatest { remoteJobs ->
-                    if (Firebase.auth.currentUser?.uid != uid) return@collectLatest
-                    remoteJobs.forEach { job ->
-                        val local = localRepo.getClipById(job.id)
-                        val merged = job.copy(
-                            exportedUri = local?.exportedUri,
-                            waveformPeaks = job.waveformPeaks.ifEmpty { local?.waveformPeaks.orEmpty() },
-                            thumbHash = job.thumbHash ?: local?.thumbHash,
-                            alignedWords = job.alignedWords.ifEmpty { local?.alignedWords.orEmpty() }
-                        )
-                        localRepo.upsertClip(merged)
-                    }
-                }
-            }
-        }
-
-        personaObserverJob?.cancel()
-        personaObserverJob = viewModelScope.launch {
-            runCatching {
-                personaTrainingGateway.observePersonaProfile().collectLatest { remotePersona ->
-                    if (Firebase.auth.currentUser?.uid != uid || remotePersona == null) return@collectLatest
-                    profileStore.updatePersona(
-                        headModelId = remotePersona.headModelId.ifBlank { null },
-                        voiceId = remotePersona.voiceId.ifBlank { null },
-                        defaultPhotoSha = remotePersona.defaultPhotoSha.ifBlank { null },
-                        trainingJobId = remotePersona.trainingJobId,
-                        trainingStatus = remotePersona.trainingStatus,
-                        trainingError = remotePersona.trainingError
-                    )
-                }
-            }
-        }
-    }
-
-    private fun persistProject(updated: ScriptProject, pushCloud: Boolean = false) {
-        val currentUid = runCatching { Firebase.auth.currentUser?.uid }.getOrNull()
-        val stamped = updated.copy(
-            userId = currentUid ?: updated.userId,
-            updatedAtMillis = System.currentTimeMillis()
-        )
+    private fun persistProject(updated: ScriptProject) {
+        val stamped = updated.copy(updatedAtMillis = System.currentTimeMillis())
         _uiState.update { state ->
             val updatedList = if (state.projects.any { it.id == stamped.id }) {
                 state.projects.map { if (it.id == stamped.id) stamped else it }
@@ -402,12 +271,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             scriptSaveMutex.withLock {
                 localRepo.saveScript(stamped)
                 profileStore.setActiveScriptId(stamped.id)
-                if (pushCloud && currentUid != null) {
-                    val res = firestoreRepo.syncProject(stamped)
-                    if (res.isFailure) {
-                        localRepo.enqueueOutbox("script", stamped.id, "UPSERT", "{}")
-                    }
-                }
             }
         }
     }
@@ -428,10 +291,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(errorMessage = null) }
     }
 
-    fun reportError(message: String) {
-        _uiState.update { it.copy(errorMessage = message) }
-    }
-
     fun dismissStatusNotice() {
         _uiState.update { it.copy(statusNotice = null) }
     }
@@ -444,10 +303,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(liveNavToClipId = null) }
     }
 
-    // --- Project Lifecycle ---
+    // --- Project & Script Editing (100% Local Room Storage) ---
 
     fun createNewProject() {
-        cancelActiveAiAndRestore(restore = false)
         val settings = _uiState.value.settings
         val fresh = ScriptProject(
             voiceSource = settings.voiceSource,
@@ -465,28 +323,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun switchProject(projectId: String) {
-        val target = _uiState.value.projects.firstOrNull { it.id == projectId } ?: return
-        cancelActiveAiAndRestore(restore = false)
-        _uiState.update { it.copy(activeProject = target, exportState = ExportState.IDLE) }
-        viewModelScope.launch { profileStore.setActiveScriptId(projectId) }
-        loadWaveformForProject(target)
-    }
-
-    // --- Stage 0 / Stage 1: Spark & URL → Script ---
-
     fun updateTitle(title: String) {
         persistProject(_uiState.value.activeProject.copy(title = title))
-    }
-
-    fun updateSpark(spark: String) {
-        val trimmed = spark.trim()
-        val detectedUrl = if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-            trimmed.substringBefore(" ")
-        } else {
-            _uiState.value.activeProject.sourceUrl
-        }
-        persistProject(_uiState.value.activeProject.copy(ideaSpark = spark, sourceUrl = detectedUrl))
     }
 
     fun setTargetDuration(seconds: Int) {
@@ -500,33 +338,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 beat.copy(
                     spokenText = text,
                     durationSec = estimateDurationSeconds(text, beat.durationSec)
-                )
-            } else beat
-        }
-        persistProject(current.copy(beats = updatedBeats))
-    }
-
-    fun updateBeatMetadata(
-        beatId: String,
-        mentionTag: String? = null,
-        depthTextTag: String? = null,
-        anchorWord: String? = null,
-        evidenceSource: String? = null,
-        sfxTag: String? = null,
-        phoneticOverride: String? = null,
-        bRollPrompt: String? = null
-    ) {
-        val current = _uiState.value.activeProject
-        val updatedBeats = current.beats.map { beat ->
-            if (beat.id == beatId) {
-                beat.copy(
-                    mentionTag = mentionTag ?: beat.mentionTag,
-                    depthTextTag = depthTextTag ?: beat.depthTextTag,
-                    anchorWord = anchorWord ?: beat.anchorWord,
-                    evidenceSource = evidenceSource ?: beat.evidenceSource,
-                    sfxTag = sfxTag ?: beat.sfxTag,
-                    phoneticOverride = phoneticOverride ?: beat.phoneticOverride,
-                    bRollPrompt = bRollPrompt ?: beat.bRollPrompt
                 )
             } else beat
         }
@@ -559,317 +370,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         persistProject(current.copy(beats = remaining))
     }
 
-    fun cancelActiveAiAndRestore(restore: Boolean = true) {
-        activeAiJob?.cancel()
-        activeAiJob = null
-        val snapshot = preRunProjectSnapshot
-        preRunProjectSnapshot = null
-        if (restore && snapshot != null) {
-            persistProject(snapshot)
-        }
-        _uiState.update { it.copy(activeShimmerKey = null, shimmerLabel = "") }
-    }
-
-    fun toggleHoneSpark() {
-        if (_uiState.value.activeShimmerKey == "spark") {
-            cancelActiveAiAndRestore(restore = true)
-            return
-        }
-        cancelActiveAiAndRestore(restore = false)
-
-        val current = _uiState.value.activeProject
-        val seed = current.ideaSpark.ifBlank { current.title }.trim()
-        if (seed.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "Paste a URL or type a spark first, then tap ✨.") }
-            return
-        }
-
-        val isUrlIngest = seed.startsWith("http://") || seed.startsWith("https://")
-        preRunProjectSnapshot = current
-        _uiState.update {
-            it.copy(
-                activeShimmerKey = "spark",
-                shimmerLabel = if (isUrlIngest) "Ingesting URL…" else "Honing script…",
-                errorMessage = null
-            )
-        }
-
-        activeAiJob = viewModelScope.launch {
-            try {
-                val result = if (isUrlIngest) {
-                    ingestGateway.ingestUrlToScript(
-                        sourceUrl = seed.substringBefore(" "),
-                        targetSeconds = current.targetDurationSec,
-                        providers = _uiState.value.settings.providers
-                    )
-                } else {
-                    scriptGateway.honeSparkToScript(
-                        spark = seed,
-                        targetSeconds = current.targetDurationSec,
-                        onStreamChunk = { streamed ->
-                            _uiState.update { state ->
-                                val proj = state.activeProject
-                                val firstId = proj.beats.firstOrNull()?.id ?: "beat_stream_0"
-                                val updatedBeats = if (proj.beats.isEmpty()) {
-                                    listOf(ScriptBeat(id = firstId, index = 0, spokenText = streamed))
-                                } else {
-                                    proj.beats.mapIndexed { idx, b ->
-                                        if (idx == 0) b.copy(spokenText = streamed) else b
-                                    }
-                                }
-                                state.copy(activeProject = proj.copy(beats = updatedBeats))
-                            }
-                        }
-                    )
-                }
-                val finalProject = _uiState.value.activeProject.copy(
-                    title = result.title.ifBlank { current.title },
-                    beats = result.beats,
-                    stageConfig = current.stageConfig.copy(
-                        chyronHeadline = current.stageConfig.chyronHeadline.ifBlank { result.chyronHeadline },
-                        chyronSubline = current.stageConfig.chyronSubline.ifBlank { result.chyronSubline }
-                    )
-                )
-                preRunProjectSnapshot = null
-                persistProject(finalProject, pushCloud = true)
-                _uiState.update {
-                    it.copy(
-                        activeShimmerKey = null,
-                        shimmerLabel = "",
-                        statusNotice = "Script honed (${result.beats.size} beats)."
-                    )
-                }
-            } catch (_: CancellationException) {
-                // Restored by cancelActiveAiAndRestore
-            } catch (e: Exception) {
-                val fallback = preRunProjectSnapshot
-                preRunProjectSnapshot = null
-                if (fallback != null) persistProject(fallback)
-                _uiState.update {
-                    it.copy(
-                        activeShimmerKey = null,
-                        shimmerLabel = "",
-                        errorMessage = e.localizedMessage ?: "Unable to hone script right now."
-                    )
-                }
-            }
-        }
-    }
-
-    fun toggleExpandBeat(beatId: String) {
-        val shimmerKey = "beat_$beatId"
-        if (_uiState.value.activeShimmerKey == shimmerKey) {
-            cancelActiveAiAndRestore(restore = true)
-            return
-        }
-        cancelActiveAiAndRestore(restore = false)
-
-        val current = _uiState.value.activeProject
-        val beat = current.beats.firstOrNull { it.id == beatId } ?: return
-        val seed = beat.spokenText.ifBlank { current.ideaSpark.ifBlank { current.title } }.trim()
-        if (seed.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "Write a line in this beat before tapping ✨.") }
-            return
-        }
-
-        preRunProjectSnapshot = current
-        _uiState.update {
-            it.copy(activeShimmerKey = shimmerKey, shimmerLabel = "Sharpening beat…", errorMessage = null)
-        }
-
-        activeAiJob = viewModelScope.launch {
-            try {
-                val refined = scriptGateway.streamExpandBeat(
-                    projectContext = current.ideaSpark.ifBlank { current.title },
-                    beatText = seed,
-                    onStreamChunk = { streamed ->
-                        _uiState.update { state ->
-                            val proj = state.activeProject
-                            state.copy(
-                                activeProject = proj.copy(
-                                    beats = proj.beats.map { b ->
-                                        if (b.id == beatId) b.copy(spokenText = streamed) else b
-                                    }
-                                )
-                            )
-                        }
-                    }
-                )
-                val finalProject = _uiState.value.activeProject.copy(
-                    beats = _uiState.value.activeProject.beats.map { b ->
-                        if (b.id == beatId) {
-                            b.copy(
-                                spokenText = refined,
-                                durationSec = estimateDurationSeconds(refined, b.durationSec),
-                                proposedShortText = null
-                            )
-                        } else b
-                    }
-                )
-                preRunProjectSnapshot = null
-                persistProject(finalProject, pushCloud = true)
-                _uiState.update { it.copy(activeShimmerKey = null, shimmerLabel = "") }
-            } catch (_: CancellationException) {
-                // Restored
-            } catch (e: Exception) {
-                val fallback = preRunProjectSnapshot
-                preRunProjectSnapshot = null
-                if (fallback != null) persistProject(fallback)
-                _uiState.update {
-                    it.copy(
-                        activeShimmerKey = null,
-                        shimmerLabel = "",
-                        errorMessage = e.localizedMessage ?: "Unable to refine this beat."
-                    )
-                }
-            }
-        }
-    }
-
-    fun toggleShorten20Percent() {
-        if (_uiState.value.activeShimmerKey == "shorten") {
-            cancelActiveAiAndRestore(restore = true)
-            return
-        }
-        cancelActiveAiAndRestore(restore = false)
-
-        val current = _uiState.value.activeProject
-        if (current.activeBeats.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "Write at least one spoken beat before shortening.") }
-            return
-        }
-
-        preRunProjectSnapshot = current
-        _uiState.update {
-            it.copy(activeShimmerKey = "shorten", shimmerLabel = "Tightening 20%…", errorMessage = null)
-        }
-
-        activeAiJob = viewModelScope.launch {
-            try {
-                val proposals = scriptGateway.proposeShorten20Percent(current.beats)
-                val updated = current.copy(
-                    beats = current.beats.map { beat ->
-                        val shorter = proposals[beat.id]
-                        if (shorter != null && shorter != beat.spokenText) {
-                            beat.copy(proposedShortText = shorter)
-                        } else beat
-                    }
-                )
-                preRunProjectSnapshot = null
-                persistProject(updated)
-                _uiState.update {
-                    it.copy(
-                        activeShimmerKey = null,
-                        shimmerLabel = "",
-                        statusNotice = "Review shorter versions inline below."
-                    )
-                }
-            } catch (_: CancellationException) {
-                // Restored
-            } catch (e: Exception) {
-                preRunProjectSnapshot = null
-                _uiState.update {
-                    it.copy(
-                        activeShimmerKey = null,
-                        shimmerLabel = "",
-                        errorMessage = e.localizedMessage ?: "Shorten 20% failed."
-                    )
-                }
-            }
-        }
-    }
-
-    fun acceptShortProposal(beatId: String) {
-        val current = _uiState.value.activeProject
-        val updated = current.copy(
-            beats = current.beats.map { b ->
-                val proposed = b.proposedShortText
-                if (b.id == beatId && proposed != null) {
-                    b.copy(
-                        spokenText = proposed,
-                        durationSec = estimateDurationSeconds(proposed, 3),
-                        proposedShortText = null
-                    )
-                } else b
-            }
-        )
-        persistProject(updated, pushCloud = true)
-    }
-
-    fun rejectShortProposal(beatId: String) {
-        val current = _uiState.value.activeProject
-        persistProject(
-            current.copy(beats = current.beats.map { if (it.id == beatId) it.copy(proposedShortText = null) else it })
-        )
-    }
-
-    fun factCheckBeat(beatId: String) {
-        val shimmerKey = "beat_$beatId"
-        if (_uiState.value.activeShimmerKey == shimmerKey) {
-            cancelActiveAiAndRestore(restore = true)
-            return
-        }
-        cancelActiveAiAndRestore(restore = false)
-
-        val current = _uiState.value.activeProject
-        val beat = current.beats.firstOrNull { it.id == beatId } ?: return
-        if (beat.spokenText.isBlank()) {
-            _uiState.update { it.copy(errorMessage = "Write a line first to fact-check it.") }
-            return
-        }
-
-        preRunProjectSnapshot = current
-        _uiState.update {
-            it.copy(activeShimmerKey = shimmerKey, shimmerLabel = "Checking facts…", errorMessage = null)
-        }
-
-        activeAiJob = viewModelScope.launch {
-            try {
-                val res = scriptGateway.factCheckBeat(
-                    topic = current.ideaSpark.ifBlank { current.title },
-                    beatText = beat.spokenText
-                )
-                val updated = current.copy(
-                    beats = current.beats.map { b ->
-                        if (b.id == beatId) {
-                            val newText = res.tightenedText ?: b.spokenText
-                            b.copy(
-                                spokenText = newText,
-                                durationSec = estimateDurationSeconds(newText, b.durationSec),
-                                evidenceSource = res.citationLabel
-                            )
-                        } else b
-                    }
-                )
-                preRunProjectSnapshot = null
-                persistProject(updated, pushCloud = true)
-                _uiState.update {
-                    it.copy(
-                        activeShimmerKey = null,
-                        shimmerLabel = "",
-                        statusNotice = res.note.ifBlank { "Citation added: ${res.citationLabel}" }
-                    )
-                }
-            } catch (_: CancellationException) {
-                // Restored
-            } catch (e: Exception) {
-                preRunProjectSnapshot = null
-                _uiState.update {
-                    it.copy(
-                        activeShimmerKey = null,
-                        shimmerLabel = "",
-                        errorMessage = e.localizedMessage ?: "Fact check failed."
-                    )
-                }
-            }
-        }
-    }
-
-    // --- Photo Stage (1 Phone Photo + Cloud Pose Gate + Stage 4 Contract) ---
+    // --- Optional Custom Presenter Photo (100% Local CAS) ---
 
     fun importPhoto(uri: Uri) {
         viewModelScope.launch {
-            _uiState.update { it.copy(errorMessage = null, isCheckingPose = true) }
+            _uiState.update { it.copy(errorMessage = null) }
             try {
                 val stored = casStore.importImageFromUri(uri)
                 profileStore.updatePersona(defaultPhotoSha = stored.sha256)
@@ -877,104 +382,19 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 val baseStage = current.stageConfig.copy(
                     photoSha = stored.sha256,
                     normalizedPhotoSha = null,
-                    poseGate = PoseGateResult(checked = false, note = "Photo cached (${stored.sha256.take(8)}).")
+                    poseGate = PoseGateResult(
+                        checked = true,
+                        valid = true,
+                        note = "Local photo ready (${stored.sha256.take(8)})."
+                    )
                 )
                 persistProject(current.copy(stageConfig = baseStage))
-
-                if (_uiState.value.isSignedIn) {
-                    val pose = runCatching {
-                        poseGateGateway.validatePhotoPose(
-                            photoSha = stored.sha256,
-                            headModelId = _uiState.value.settings.persona.headModelId
-                        )
-                    }
-                    pose.onSuccess { result ->
-                        val latest = _uiState.value.activeProject
-                        persistProject(
-                            latest.copy(stageConfig = latest.stageConfig.copy(poseGate = result))
-                        )
-                        _uiState.update {
-                            it.copy(
-                                isCheckingPose = false,
-                                statusNotice = if (result.valid) result.note else null,
-                                errorMessage = if (!result.valid) result.note else null
-                            )
-                        }
-                    }.onFailure { err ->
-                        _uiState.update {
-                            it.copy(
-                                isCheckingPose = false,
-                                errorMessage = err.localizedMessage ?: "Cloud pose gate failed."
-                            )
-                        }
-                    }
-                } else {
-                    _uiState.update {
-                        it.copy(
-                            isCheckingPose = false,
-                            statusNotice = "Photo stored in SHA-256 CAS (${stored.sha256.take(8)}). Sign in to run Cloud Pose Gate."
-                        )
-                    }
+                _uiState.update {
+                    it.copy(statusNotice = "Presenter photo cached locally (${stored.sha256.take(8)}).")
                 }
             } catch (e: Exception) {
                 _uiState.update {
-                    it.copy(
-                        isCheckingPose = false,
-                        errorMessage = e.localizedMessage ?: "Could not import photo."
-                    )
-                }
-            }
-        }
-    }
-
-    fun normalizePhotoPose() {
-        val current = _uiState.value.activeProject
-        val photoSha = current.stageConfig.photoSha
-        if (photoSha.isNullOrBlank()) {
-            _uiState.update { it.copy(errorMessage = "Pick a photo first.") }
-            return
-        }
-        val headModelId = _uiState.value.settings.persona.headModelId
-        if (headModelId.isBlank()) {
-            _uiState.update {
-                it.copy(errorMessage = "No enrolled head_model_id found. Complete Phase A Persona Training in Account settings.")
-            }
-            return
-        }
-
-        viewModelScope.launch {
-            _uiState.update { it.copy(isNormalizingPose = true, errorMessage = null) }
-            try {
-                val preset = BackdropPreset.fromId(current.stageConfig.backdropPresetId)
-                val prompt = current.stageConfig.customBackdropPrompt.ifBlank { preset.promptHint }
-                val normalizedSha = poseGateGateway.normalizePhotoPose(
-                    photoSha = photoSha,
-                    headModelId = headModelId,
-                    backdropPrompt = prompt
-                )
-                val latest = _uiState.value.activeProject
-                persistProject(
-                    latest.copy(
-                        stageConfig = latest.stageConfig.copy(
-                            normalizedPhotoSha = normalizedSha,
-                            poseGate = PoseGateResult(
-                                checked = true,
-                                valid = true,
-                                note = "Normalized via $headModelId (${normalizedSha.take(8)})."
-                            )
-                        )
-                    ),
-                    pushCloud = true
-                )
-                _uiState.update {
-                    it.copy(isNormalizingPose = false, statusNotice = "Eye-level portrait normalized.")
-                }
-            } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isNormalizingPose = false,
-                        errorMessage = e.localizedMessage ?: "Pose normalization failed."
-                    )
+                    it.copy(errorMessage = e.localizedMessage ?: "Could not import photo.")
                 }
             }
         }
@@ -985,53 +405,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         persistProject(current.copy(stageConfig = transform(current.stageConfig)))
     }
 
-    fun setStage4Mode(mode: Stage4Mode) {
-        viewModelScope.launch { profileStore.setStage4Mode(mode) }
-        updateStageConfig { it.copy(stage4Mode = mode) }
-    }
-
     fun setVoiceSource(source: VoiceSource) {
         viewModelScope.launch { profileStore.setVoiceSource(source) }
         persistProject(_uiState.value.activeProject.copy(voiceSource = source))
     }
 
-    fun generateBeatBRoll(beatId: String) {
-        val current = _uiState.value.activeProject
-        val beat = current.beats.firstOrNull { it.id == beatId } ?: return
-        val prompt = beat.bRollPrompt.ifBlank { beat.spokenText }.trim()
-        if (prompt.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "Add a beat line or B-roll cue first.") }
-            return
-        }
-        viewModelScope.launch {
-            _uiState.update { it.copy(generatingBRollBeatId = beatId, errorMessage = null) }
-            try {
-                val bmp = scriptGateway.generateBRollPlate(
-                    bRollPrompt = prompt,
-                    topicContext = current.title.ifBlank { current.ideaSpark }
-                )
-                val stored = casStore.saveBitmap(bmp)
-                val latest = _uiState.value.activeProject
-                persistProject(
-                    latest.copy(
-                        beats = latest.beats.map { if (it.id == beatId) it.copy(bRollSha = stored.sha256) else it }
-                    )
-                )
-                _uiState.update {
-                    it.copy(generatingBRollBeatId = null, statusNotice = "B-roll plate cached (${stored.sha256.take(8)}).")
-                }
-            } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        generatingBRollBeatId = null,
-                        errorMessage = e.localizedMessage ?: "B-roll generation failed."
-                    )
-                }
-            }
-        }
-    }
-
-    // --- Mic Recording & WAV Preview (Explicit User Choice Only) ---
+    // --- Local Mic Recording & WAV Preview ---
 
     fun toggleMicRecording(beatId: String? = null) {
         if (_uiState.value.isRecordingMic) {
@@ -1062,7 +441,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         it.copy(
                             waveformPeaks = peaks,
                             recordingTargetBeatId = null,
-                            statusNotice = "Mic WAV cached (${"%.1f".format(durSec)}s · ${stored.sha256.take(8)})."
+                            statusNotice = "Recorded ${"%.1f".format(durSec)}s WAV locally."
                         )
                     }
                 }
@@ -1092,146 +471,87 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
         val wavFile = casStore.fileForSha(_uiState.value.activeProject.masterAudioSha, "wav")
         if (wavFile == null) {
-            _uiState.update { it.copy(errorMessage = "No recorded WAV audio cached for this script.") }
+            _uiState.update { it.copy(errorMessage = "Record your voice first to preview audio.") }
             return
         }
         audioEngine.playWavFile(viewModelScope, wavFile)
     }
 
-    // --- Direct Mac Rig Render Bridge & Cloud Render Enqueue ---
+    // --- Direct Mac Studio Rig Render Bridge (Zero Firebase, Zero Sign-In) ---
 
-    fun enqueueCloudRender() {
-        renderActiveProject()
-    }
-
-    /**
-     * Routes directly to the Mac Studio Rig (`POST {tailscaleRigUrl}/v1/render-video`) whenever
-     * `tailscaleRigUrl` is configured (zero Firebase/auth requirement), polling live job status
-     * into Room and caching the finished MP4 in `CasMediaStore`. Falls back to the Firebase Cloud
-     * Functions pipeline only when no Mac Rig URL is configured.
-     */
     fun renderActiveProject(pollIntervalMs: Long = MAC_RIG_POLL_INTERVAL_MS) {
         val current = _uiState.value.activeProject
         val settings = _uiState.value.settings
-        val rigUrl = settings.tailscaleRigUrl.trim()
         val photoSha = current.stageConfig.activePhotoSha ?: settings.persona.defaultPhotoSha.ifBlank { null }
 
-        if (rigUrl.isNotBlank()) {
-            if (current.voiceSource == VoiceSource.ENROLLED_VOICE_CLONE && current.activeBeats.isEmpty()) {
-                _uiState.update { it.copy(errorMessage = "Write at least one spoken beat before rendering.") }
-                return
-            }
-            if (current.voiceSource == VoiceSource.MIC_VOICEOVER &&
-                casStore.fileForSha(current.masterAudioSha, "wav") == null
-            ) {
-                _uiState.update {
-                    it.copy(errorMessage = "Record a mic voiceover take before rendering in Mic Voiceover mode.")
-                }
-                return
-            }
+        val hasRecordedWav = casStore.fileForSha(current.masterAudioSha, "wav") != null
+        val effectiveProject = when {
+            current.voiceSource == VoiceSource.MIC_VOICEOVER && !hasRecordedWav && current.activeBeats.isNotEmpty() ->
+                current.copy(voiceSource = VoiceSource.ENROLLED_VOICE_CLONE)
+            else -> current
+        }
 
-            viewModelScope.launch {
-                _uiState.update { it.copy(isEnqueuingRender = true, errorMessage = null) }
-                try {
-                    val enqueued = renderJobGateway.enqueueMacRigRender(
-                        rigBaseUrl = rigUrl,
-                        project = current,
-                        photoSha = photoSha,
-                        resolution = "720P",
-                        ratio = "9:16",
-                        maxDurationSec = 10
-                    )
-                    val now = System.currentTimeMillis()
-                    val clip = ClipRecord(
-                        id = enqueued.clipId,
-                        scriptId = current.id,
-                        jobId = enqueued.jobId,
-                        title = current.title.ifBlank { "Untitled Aircheck" },
-                        photoSha = photoSha,
-                        voiceSha = current.masterAudioSha,
-                        alignSha = null,
-                        lipsyncSha = null,
-                        finalSha = null,
-                        status = RenderJobStatus.QUEUED,
-                        progressFraction = 0.05f,
-                        stageDetail = "Queued on Mac Studio rig",
-                        errorMessage = null,
-                        durationMs = current.totalActiveSeconds * 1000L,
-                        waveformPeaks = _uiState.value.waveformPeaks,
-                        thumbHash = null,
-                        alignedWords = emptyList(),
-                        chyronHeadline = current.stageConfig.chyronHeadline.ifBlank { current.title },
-                        chyronSubline = current.stageConfig.chyronSubline,
-                        remoteLipsyncUrl = null,
-                        remoteFinalUrl = null,
-                        exportedUri = null,
-                        createdAtMillis = now,
-                        updatedAtMillis = now
-                    )
-                    localRepo.upsertClip(clip)
-                    _uiState.update {
-                        it.copy(
-                            isEnqueuingRender = false,
-                            liveNavToClipId = clip.id,
-                            statusNotice = "Render queued on Mac Rig (${enqueued.jobId.take(8)})."
-                        )
-                    }
-                    startMacRigJobPolling(
-                        rigBaseUrl = rigUrl,
-                        initialClip = clip,
-                        pollIntervalMs = pollIntervalMs
-                    )
-                } catch (e: Exception) {
-                    _uiState.update {
-                        it.copy(
-                            isEnqueuingRender = false,
-                            errorMessage = e.localizedMessage ?: "Unable to enqueue Mac Rig render."
-                        )
-                    }
-                }
+        if (effectiveProject.voiceSource == VoiceSource.ENROLLED_VOICE_CLONE && effectiveProject.activeBeats.isEmpty()) {
+            _uiState.update {
+                it.copy(errorMessage = "Tap Mic to record your voice or type a spoken line before rendering.")
             }
             return
         }
-
-        if (current.activeBeats.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "Write at least one spoken beat before rendering.") }
-            return
-        }
-        if (photoSha.isNullOrBlank() && current.stageConfig.stage4Mode == Stage4Mode.PHOTO_HEAD_LORA) {
-            _uiState.update { it.copy(errorMessage = "Pick a photo in the Photo tab before rendering.") }
+        if (effectiveProject.voiceSource == VoiceSource.MIC_VOICEOVER && !hasRecordedWav) {
+            _uiState.update {
+                it.copy(errorMessage = "Tap Mic to record your voice before rendering.")
+            }
             return
         }
 
         viewModelScope.launch {
             _uiState.update { it.copy(isEnqueuingRender = true, errorMessage = null) }
             try {
-                val enqueued = renderJobGateway.enqueueClipRender(
-                    project = current,
-                    persona = settings.persona,
-                    providers = settings.providers,
-                    photoSha = photoSha.orEmpty()
+                val health = macRigGateway.resolveAndCheckHealth(settings.tailscaleRigUrl)
+                val resolvedUrl = health.resolvedUrl
+                _uiState.update {
+                    it.copy(
+                        rigHealth = RigHealthUiState(
+                            status = RigConnectionStatus.ONLINE,
+                            resolvedUrl = resolvedUrl,
+                            loraVersion = health.loraVersion,
+                            bundleVersion = health.bundleVersion,
+                            pendingPreferences = health.pendingPreferences,
+                            renderBridgeAvailable = health.renderBridgeAvailable,
+                            errorMessage = null
+                        )
+                    )
+                }
+
+                val enqueued = macRigGateway.enqueueMacRigRender(
+                    rigBaseUrl = resolvedUrl,
+                    project = effectiveProject,
+                    photoSha = photoSha,
+                    resolution = "720P",
+                    ratio = "9:16",
+                    maxDurationSec = effectiveProject.targetDurationSec.coerceIn(5, 10)
                 )
                 val now = System.currentTimeMillis()
                 val clip = ClipRecord(
                     id = enqueued.clipId,
-                    scriptId = current.id,
+                    scriptId = effectiveProject.id,
                     jobId = enqueued.jobId,
-                    title = current.title.ifBlank { "Untitled Aircheck" },
+                    title = effectiveProject.title.ifBlank { "Untitled Aircheck" },
                     photoSha = photoSha,
-                    voiceSha = current.masterAudioSha,
+                    voiceSha = effectiveProject.masterAudioSha,
                     alignSha = null,
                     lipsyncSha = null,
                     finalSha = null,
                     status = RenderJobStatus.QUEUED,
                     progressFraction = 0.05f,
-                    stageDetail = "Queued on Cloud Tasks",
+                    stageDetail = "Queued on Mac Studio rig",
                     errorMessage = null,
-                    durationMs = current.totalActiveSeconds * 1000L,
+                    durationMs = effectiveProject.totalActiveSeconds * 1000L,
                     waveformPeaks = _uiState.value.waveformPeaks,
                     thumbHash = null,
                     alignedWords = emptyList(),
-                    chyronHeadline = current.stageConfig.chyronHeadline.ifBlank { current.title },
-                    chyronSubline = current.stageConfig.chyronSubline,
+                    chyronHeadline = effectiveProject.stageConfig.chyronHeadline.ifBlank { effectiveProject.title },
+                    chyronSubline = effectiveProject.stageConfig.chyronSubline,
                     remoteLipsyncUrl = null,
                     remoteFinalUrl = null,
                     exportedUri = null,
@@ -1243,15 +563,20 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     it.copy(
                         isEnqueuingRender = false,
                         liveNavToClipId = clip.id,
-                        statusNotice = "Render queued (${enqueued.jobId.take(8)})."
+                        statusNotice = "Render queued on Mac Rig (${enqueued.jobId.take(8)})."
                     )
                 }
+                startMacRigJobPolling(
+                    rigBaseUrl = resolvedUrl,
+                    initialClip = clip,
+                    pollIntervalMs = pollIntervalMs
+                )
             } catch (e: Exception) {
-                // Zero silent fallback: surface exact actionable error
+                if (e is CancellationException) throw e
                 _uiState.update {
                     it.copy(
                         isEnqueuingRender = false,
-                        errorMessage = e.localizedMessage ?: "Unable to enqueue cloud render."
+                        errorMessage = e.localizedMessage ?: "Unable to reach Mac Studio rig."
                     )
                 }
             }
@@ -1271,7 +596,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 while (isActive) {
                     delay(intervalMs)
                     val pollResult = runCatching {
-                        renderJobGateway.pollMacRigJob(rigBaseUrl, initialClip.jobId)
+                        macRigGateway.pollMacRigJob(rigBaseUrl, initialClip.jobId)
                     }
                     if (pollResult.isFailure) {
                         val err = pollResult.exceptionOrNull()
@@ -1320,7 +645,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                                 latest.copy(
                                     status = RenderJobStatus.PACKAGING,
                                     progressFraction = 0.95f,
-                                    stageDetail = "Caching MP4 locally",
+                                    stageDetail = "Downloading MP4 locally",
                                     remoteFinalUrl = videoUrl,
                                     durationMs = resolvedDuration,
                                     errorMessage = null,
@@ -1329,7 +654,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                             )
 
                             val downloadRes = runCatching {
-                                renderJobGateway.downloadRenderedMp4ToCas(videoUrl)
+                                macRigGateway.downloadRenderedMp4ToCas(videoUrl)
                             }
                             downloadRes.onSuccess { stored ->
                                 val currentClip = localRepo.getClipById(initialClip.id) ?: latest
@@ -1436,78 +761,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    // --- Persisted Settings, Persona Enrollment & Cloud Sync ---
+    // --- Persisted Settings, Local Rig Health & Hairline Clipper ---
 
     fun setBrandChannel(channel: BrandChannel) {
         viewModelScope.launch { profileStore.setBrandChannel(channel) }
     }
 
-    fun savePersonaIds(headModelId: String, voiceId: String) {
-        viewModelScope.launch {
-            profileStore.updatePersona(headModelId = headModelId, voiceId = voiceId)
-            _uiState.update { it.copy(statusNotice = "Persona IDs saved to Proto DataStore.") }
-        }
-    }
-
-    fun saveProviderSettings(providers: StageProviderSettings) {
-        viewModelScope.launch {
-            profileStore.updateProviders(providers)
-            _uiState.update { it.copy(statusNotice = "Stage providers updated.") }
-        }
-    }
-
-    fun startPersonaTraining(gcsUrisCsv: String) {
-        val uris = gcsUrisCsv.split(",", "\n").map { it.trim() }.filter { it.startsWith("gs://") }
-        if (uris.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "Provide one or more gs:// reference video URIs to start Phase A training.") }
-            return
-        }
-        viewModelScope.launch {
-            _uiState.update { it.copy(errorMessage = null) }
-            try {
-                val jobId = personaTrainingGateway.startPersonaTraining(
-                    trainingVideoGcsUris = uris,
-                    voiceProviderId = _uiState.value.settings.providers.voiceProviderId
-                )
-                profileStore.updatePersona(trainingJobId = jobId, trainingStatus = "RUNNING", trainingError = "")
-                _uiState.update { it.copy(statusNotice = "Phase A training started ($jobId).") }
-            } catch (e: Exception) {
-                _uiState.update { it.copy(errorMessage = e.localizedMessage ?: "Phase A training trigger failed.") }
-            }
-        }
-    }
-
     fun clearCasCache() {
         viewModelScope.launch {
             casStore.clearAllCache()
-            _uiState.update { it.copy(statusNotice = "Local CAS media cache cleared.") }
+            _uiState.update { it.copy(statusNotice = "Local media cache cleared.") }
         }
     }
-
-    fun triggerManualCloudSync() {
-        if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
-            _uiState.update { it.copy(errorMessage = "Sign in with Google to sync scripts.") }
-            return
-        }
-        viewModelScope.launch {
-            _uiState.update { it.copy(isSyncingCloud = true, errorMessage = null) }
-            val result = firestoreRepo.syncProject(_uiState.value.activeProject)
-            result.onSuccess {
-                _uiState.update {
-                    it.copy(isSyncingCloud = false, lastSyncMessage = "Synced to Aircheck Cloud.")
-                }
-            }.onFailure { err ->
-                _uiState.update {
-                    it.copy(
-                        isSyncingCloud = false,
-                        errorMessage = err.localizedMessage ?: "Cloud sync failed."
-                    )
-                }
-            }
-        }
-    }
-
-    // --- VoiceStudio Local Rig, OTA Sync & Hairline Clipper ---
 
     fun refreshVmRssTelemetry() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -1517,48 +782,35 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun saveTailscaleRigUrl(url: String) {
-        val trimmed = url.trim()
+        val trimmed = url.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
         viewModelScope.launch {
             profileStore.setTailscaleRigUrl(trimmed)
             otaBundleSyncManager.refreshLocalState(trimmed)
             _uiState.update {
                 it.copy(
-                    rigHealth = RigHealthUiState(),
-                    statusNotice = if (trimmed.isNotEmpty()) {
-                        "Tailscale Rig URL saved."
-                    } else {
-                        "Tailscale Rig URL cleared."
-                    }
+                    rigHealth = RigHealthUiState(resolvedUrl = trimmed),
+                    statusNotice = "Mac Rig URL saved."
                 )
             }
+            testMacRigConnection(trimmed)
         }
     }
 
     fun testMacRigConnection(overrideUrl: String? = null) {
-        val url = overrideUrl?.trim()?.takeIf { it.isNotEmpty() }
-            ?: _uiState.value.settings.tailscaleRigUrl.trim()
-        if (url.isEmpty()) {
-            _uiState.update {
-                it.copy(
-                    rigHealth = RigHealthUiState(
-                        status = RigConnectionStatus.ERROR,
-                        errorMessage = "Enter a Mac Rig URL (e.g. http://10.0.0.242:8443) first."
-                    )
-                )
-            }
-            return
-        }
+        val candidate = overrideUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: _uiState.value.settings.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
         rigHealthCheckJob?.cancel()
         rigHealthCheckJob = viewModelScope.launch {
             _uiState.update {
-                it.copy(rigHealth = RigHealthUiState(status = RigConnectionStatus.CHECKING))
+                it.copy(rigHealth = RigHealthUiState(status = RigConnectionStatus.CHECKING, resolvedUrl = candidate))
             }
-            val result = runCatching { renderJobGateway.checkMacRigHealth(url) }
+            val result = runCatching { macRigGateway.resolveAndCheckHealth(candidate) }
             result.onSuccess { health ->
                 _uiState.update {
                     it.copy(
                         rigHealth = RigHealthUiState(
                             status = RigConnectionStatus.ONLINE,
+                            resolvedUrl = health.resolvedUrl,
                             loraVersion = health.loraVersion,
                             bundleVersion = health.bundleVersion,
                             pendingPreferences = health.pendingPreferences,
@@ -1573,6 +825,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     it.copy(
                         rigHealth = RigHealthUiState(
                             status = RigConnectionStatus.ERROR,
+                            resolvedUrl = candidate,
                             errorMessage = err.localizedMessage ?: "Mac Rig connection failed."
                         )
                     )
@@ -1582,20 +835,16 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun syncOtaBundleFromRig(overrideUrl: String? = null) {
-        val url = overrideUrl?.trim()?.takeIf { it.isNotEmpty() }
-            ?: _uiState.value.settings.tailscaleRigUrl.trim()
-        if (url.isEmpty()) {
-            _uiState.update {
-                it.copy(errorMessage = "Enter your Tailscale Rig URL (e.g. http://100.x.y.z:8443) first.")
-            }
-            return
-        }
+        val candidate = overrideUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: _uiState.value.settings.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
         viewModelScope.launch {
-            if (url != _uiState.value.settings.tailscaleRigUrl) {
-                profileStore.setTailscaleRigUrl(url)
-            }
             _uiState.update { it.copy(errorMessage = null) }
-            val result = voiceStudioCoordinator.syncOtaBundleNow(url)
+            val resolvedUrl = runCatching { macRigGateway.resolveAndCheckHealth(candidate).resolvedUrl }
+                .getOrDefault(candidate)
+            if (resolvedUrl != _uiState.value.settings.tailscaleRigUrl) {
+                profileStore.setTailscaleRigUrl(resolvedUrl)
+            }
+            val result = voiceStudioCoordinator.syncOtaBundleNow(resolvedUrl)
             refreshVmRssTelemetry()
             result.onSuccess { manifest ->
                 _uiState.update {
@@ -1612,31 +861,22 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun syncPreferencesNow(overrideUrl: String? = null) {
-        val url = overrideUrl?.trim()?.takeIf { it.isNotEmpty() }
-            ?: _uiState.value.settings.tailscaleRigUrl.trim()
-        if (url.isEmpty()) {
-            _uiState.update {
-                it.copy(errorMessage = "Configure a Tailscale Rig URL before syncing preferences.jsonl.")
-            }
-            return
-        }
+        val candidate = overrideUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: _uiState.value.settings.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
         viewModelScope.launch {
-            if (url != _uiState.value.settings.tailscaleRigUrl) {
-                profileStore.setTailscaleRigUrl(url)
+            val resolvedUrl = runCatching { macRigGateway.resolveAndCheckHealth(candidate).resolvedUrl }
+                .getOrDefault(candidate)
+            if (resolvedUrl != _uiState.value.settings.tailscaleRigUrl) {
+                profileStore.setTailscaleRigUrl(resolvedUrl)
             }
             voiceStudioCoordinator.enqueuePreferenceSyncAndLoraCheck(
-                tailscaleBaseUrl = url,
+                tailscaleBaseUrl = resolvedUrl,
                 requireUnmetered = false
             )
             _uiState.update {
                 it.copy(statusNotice = "Queued preferences.jsonl upload & LoRA delta check.")
             }
         }
-    }
-
-    fun enqueueLocalVoiceSynthesis(projectId: String = _uiState.value.activeProject.id) {
-        voiceStudioCoordinator.enqueueProjectSynthesis(projectId)
-        _uiState.update { it.copy(statusNotice = "Queued local 44.1 kHz VoiceStudio synthesis.") }
     }
 
     fun loadClipperForProject(projectId: String) {
@@ -1940,7 +1180,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun formatOtaStatusSummary(state: OtaBundleState): String = when (state.status) {
         OtaBundleStatus.NOT_INSTALLED -> state.errorMessage
-            ?: "Not installed. Configure your Tailscale Rig URL in System Deck and tap Sync OTA Bundle."
+            ?: "Not installed. Tap Sync OTA Bundle in System Deck to pull models from your Mac Rig."
         OtaBundleStatus.SYNCING -> {
             val verifiedMb = state.verifiedBytes / (1024.0 * 1024.0)
             val totalMb = state.totalBytes / (1024.0 * 1024.0)
@@ -1956,11 +1196,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
-        runCatching { Firebase.auth.removeAuthStateListener(authListener) }
-        activeAiJob?.cancel()
-        cloudSyncJob?.cancel()
-        jobsObserverJob?.cancel()
-        personaObserverJob?.cancel()
         voiceManifestObserverJob?.cancel()
         rigHealthCheckJob?.cancel()
         macRigPollingJobs.values.forEach { it.cancel() }

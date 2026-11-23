@@ -40,9 +40,6 @@ sealed interface ScreenKey : NavKey {
     data class ClipperKey(val projectId: String) : ScreenKey
 
     @Serializable
-    data object SettingsKey : ScreenKey
-
-    @Serializable
     data object SystemDeckKey : ScreenKey
 }
 

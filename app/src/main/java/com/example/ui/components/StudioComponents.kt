@@ -37,7 +37,6 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -139,14 +138,13 @@ fun AircheckBrandMark(
 
 /**
  * Uniform 52.dp top bar shared across every screen: Brand mark + Title on left,
- * max 2 clean 48.dp icon triggers on right (System Deck & Account). Zero step badges or clutter.
+ * single System Deck trigger on right with live green dot when Mac Studio Rig is online.
  */
 @Composable
 fun StudioTopBar(
     title: String,
-    isSignedIn: Boolean,
+    isRigOnline: Boolean,
     onOpenSystemDeck: () -> Unit,
-    onOpenAccount: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
@@ -173,34 +171,21 @@ fun StudioTopBar(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
-            IconButton(
-                onClick = onOpenSystemDeck,
-                modifier = Modifier
-                    .size(48.dp)
-                    .testTag("top_bar_system_deck_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Tune,
-                    contentDescription = stringResource(R.string.cd_open_system_deck),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(21.dp)
-                )
-            }
             Box(contentAlignment = Alignment.Center) {
                 IconButton(
-                    onClick = onOpenAccount,
+                    onClick = onOpenSystemDeck,
                     modifier = Modifier
                         .size(48.dp)
-                        .testTag("top_bar_account_button")
+                        .testTag("top_bar_system_deck_button")
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.AccountCircle,
-                        contentDescription = stringResource(R.string.cd_open_account),
-                        tint = if (isSignedIn) tokens.channelAccent else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(22.dp)
+                        imageVector = Icons.Filled.Tune,
+                        contentDescription = stringResource(R.string.cd_open_system_deck),
+                        tint = if (isRigOnline) tokens.channelAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(21.dp)
                     )
                 }
-                if (isSignedIn) {
+                if (isRigOnline) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
