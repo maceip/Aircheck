@@ -1,169 +1,134 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aircheck.local/schemas/clause_node.schema.json",
-  "title": "ClauseNode",
-  "description": "Canonical per-clause synthesis, 4-gate verification, and 48kHz zero-crossing token map contract shared across Android (Kotlin/C++ JNI) and the Home/Cloud Training Rig (Python).",
+  "title": "VoiceProjectManifestAndClauseNode",
+  "description": "Canonical 44.1 kHz Float32 PCM (64-byte aligned, headerless mmap) schema shared across :core-engine, :core-verifier, :audio-edl, :ui-clipper, and :sync-trainer.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "clause_id",
-    "raw_text",
-    "normalized_phonemes",
-    "selected_take_index",
-    "gap_after_ms",
-    "candidates"
+    "projectId",
+    "sampleRate",
+    "globalGapScale",
+    "activeLoraVersion",
+    "clauses"
   ],
   "properties": {
-    "clause_id": {
-      "type": "string",
-      "minLength": 1,
-      "pattern": "^[a-zA-Z0-9_-]+$"
-    },
-    "raw_text": {
-      "type": "string",
-      "minLength": 1
-    },
-    "normalized_phonemes": {
-      "type": "string"
-    },
-    "acoustic_prefix_uri": {
-      "type": ["string", "null"],
-      "description": "Relative URI to previous winning clause tail (e.g. takes/c_003_winner_tail_1500ms.pcm, 48kHz f32 mono)."
-    },
-    "selected_take_index": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "gap_after_ms": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 3000
-    },
-    "candidates": {
+    "projectId": { "type": "string", "minLength": 1 },
+    "sampleRate": { "type": "integer", "const": 44100 },
+    "globalGapScale": { "type": "number", "minimum": 0.25, "maximum": 1.0 },
+    "activeLoraVersion": { "type": "integer", "minimum": 0 },
+    "clauses": {
       "type": "array",
-      "items": {
-        "$ref": "#/$defs/TakeCandidate"
-      }
+      "items": { "$ref": "#/$defs/ClauseNode" }
     }
   },
   "$defs": {
-    "TakeCandidate": {
+    "ClauseNode": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "take_id",
-        "pcm_uri",
+        "clauseId",
+        "index",
+        "rawText",
+        "normalizedPhonemes",
+        "selectedTakeIndex",
+        "baseGapAfterSamples",
+        "candidates"
+      ],
+      "properties": {
+        "clauseId": { "type": "string", "minLength": 1 },
+        "index": { "type": "integer", "minimum": 0 },
+        "rawText": { "type": "string", "minLength": 1 },
+        "normalizedPhonemes": { "type": "string" },
+        "acousticPrefixPcmPath": {
+          "type": ["string", "null"],
+          "description": "Trailing 1.5s (66,150 samples @ 44.1kHz f32) of previous winning clause."
+        },
+        "selectedTakeIndex": { "type": "integer", "minimum": 0 },
+        "baseGapAfterSamples": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3969,
+          "description": "Default 3969 samples (90ms @ 44.1kHz)."
+        },
+        "candidates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CandidateTake" }
+        }
+      }
+    },
+    "CandidateTake": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "takeId",
+        "pcmFilePath",
+        "totalSamples",
+        "discreteAudioTokens",
         "seed",
         "temperature",
         "metrics",
         "tokens"
       ],
       "properties": {
-        "take_id": {
-          "type": "string",
-          "minLength": 1
+        "takeId": { "type": "string", "minLength": 1 },
+        "pcmFilePath": { "type": "string", "minLength": 1 },
+        "totalSamples": { "type": "integer", "minimum": 0 },
+        "discreteAudioTokens": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Flattened discrete s2-pro audio codebook token IDs logged for Tinker OPSD/GRPO."
         },
-        "pcm_uri": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Relative URI to 48kHz Float32 little-endian mono PCM take."
-        },
-        "seed": {
-          "type": "integer"
-        },
-        "temperature": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 2.0
-        },
-        "metrics": {
-          "$ref": "#/$defs/VerificationMetrics"
-        },
+        "seed": { "type": "integer" },
+        "temperature": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
+        "metrics": { "$ref": "#/$defs/GateMetrics" },
         "tokens": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/ZeroCrossingToken"
-          }
+          "items": { "$ref": "#/$defs/WordToken" }
         }
       }
     },
-    "VerificationMetrics": {
+    "GateMetrics": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "cer",
-        "speaker_cosine_sim",
-        "utmos_score",
-        "syllables_per_sec",
-        "passed_all_gates"
+        "maxPhonemeDurationMs",
+        "speakerCosineSim",
+        "dnsmosP808",
+        "tailRmsDb",
+        "syllablesPerSec",
+        "passedAllGates"
       ],
       "properties": {
-        "cer": {
-          "type": "number",
-          "minimum": 0.0,
-          "description": "Gate 1: CTC Character Error Rate (strict 0.0 pass criterion)."
-        },
-        "speaker_cosine_sim": {
-          "type": "number",
-          "minimum": -1.0,
-          "maximum": 1.0,
-          "description": "Gate 2: WeSpeaker cosine similarity against enrolled speaker centroid."
-        },
-        "utmos_score": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 5.0,
-          "description": "Gate 3: UTMOSv2 predicted perceptual quality score."
-        },
-        "syllables_per_sec": {
-          "type": "number",
-          "minimum": 0.0,
-          "description": "Gate 4: Prosody pacing rate in syllables per second."
-        },
-        "passed_all_gates": {
-          "type": "boolean"
-        }
+        "cer": { "type": "number", "minimum": 0.0, "description": "Gate 1: Must be == 0.0f" },
+        "maxPhonemeDurationMs": { "type": "number", "minimum": 0.0, "description": "Gate 1b: Must be <= 380.0f" },
+        "speakerCosineSim": { "type": "number", "minimum": -1.0, "maximum": 1.0, "description": "Gate 2: WeSpeaker ResNet34 >= 0.86f" },
+        "dnsmosP808": { "type": "number", "minimum": 0.0, "maximum": 5.0, "description": "Gate 3: DNSMOS p808 >= 4.10f" },
+        "tailRmsDb": { "type": "number", "description": "Gate 3b: Final 80ms RMS energy <= -45.0f dBFS" },
+        "syllablesPerSec": { "type": "number", "minimum": 0.0, "description": "Gate 4: Target band 4.2f..6.1f" },
+        "passedAllGates": { "type": "boolean" }
       }
     },
-    "ZeroCrossingToken": {
+    "WordToken": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "word",
-        "start_sample",
-        "end_sample",
-        "zero_cross_in",
-        "zero_cross_out",
-        "f0_peak_sample"
+        "startSample",
+        "endSample",
+        "zeroCrossIn",
+        "zeroCrossOut",
+        "f0PeakSample"
       ],
       "properties": {
-        "word": {
-          "type": "string",
-          "minLength": 1
-        },
-        "start_sample": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "end_sample": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "zero_cross_in": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "zero_cross_out": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "f0_peak_sample": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "video_anchor_id": {
-          "type": ["string", "null"]
-        }
+        "word": { "type": "string", "minLength": 1 },
+        "startSample": { "type": "integer", "minimum": 0 },
+        "endSample": { "type": "integer", "minimum": 0 },
+        "zeroCrossIn": { "type": "integer", "minimum": 0, "description": "Nearest zero-crossing within +/- 88 samples (2ms @ 44.1kHz)" },
+        "zeroCrossOut": { "type": "integer", "minimum": 0, "description": "Nearest zero-crossing within +/- 88 samples (2ms @ 44.1kHz)" },
+        "f0PeakSample": { "type": "integer", "minimum": 0 },
+        "videoAnchorId": { "type": ["string", "null"] }
       }
     }
   }

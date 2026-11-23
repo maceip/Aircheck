@@ -1,104 +1,105 @@
-# Aircheck Bare-Metal On-Device Synthesis & Self-Distillation Architecture
+# Aircheck / VoiceStudio Rectified Bare-Metal Architecture (`SPEC.md` Grounded)
 
-This specification grounds the closed-loop bare-metal neural speech synthesis, 4-gate C++ verification, 48kHz RVC v2 + Room IR resynthesis, Hairline Audio/Video Clipper, and nightly GRPO/OPSD self-distillation initiative in the existing `/Users/mac/Aircheck` repository (AGP `9.1.1`, Kotlin `2.4.21`, `compileSdk = 37`, Nav3 `1.2.2`, Room WAL `2.8.5`, Media3 `1.11.1`).
+This architecture incorporates all 3 critical rectifications over the initial draft and grounds the 5-milestone `VoiceStudio` architecture cleanly inside `/Users/mac/Aircheck` (AGP `9.1.1`, Kotlin `2.4.21`, `compileSdk = 37`, Nav3 `1.2.2`, Room WAL `2.8.5`, Media3 `1.11.1`, NDK `28.2.13676358`, CMake `3.22.1`).
 
 ---
 
-## 1. End-to-End Architecture & Dataflow
+## 1. The 3 Rectified Architectural Decisions (Non-Negotiable)
+
+1. **`s2-pro-GGUF` (`llama.cpp` JNI) + LiteRT 44.1 kHz DAC Decoder (NO `.litertlm` / NO Runtime `.tflite` LoRA)**:
+   - LiteRT flatbuffers have static weight topologies; runtime LoRA hot-swapping is NOT done in `.tflite`/`.litertlm`.
+   - Stage A runs the 4B Dual-AR discrete-token backbone (`fishaudio/s2-pro` via `ggml-org/s2-pro-GGUF` in `llama.cpp` C++20 JNI) with **1-line atomic C++ LoRA hot-swapping** (`llama_adapter_lora_init()` / `llama_set_adapter_lora()`).
+   - Discrete audio codebook token IDs decode via a single fine-tuned 44.1 kHz DAC vocoder (`codec_decoder_fp16.tflite`, ~262 MB) in **LiteRT `CompiledModel`** (`com.google.ai.edge.litert:litert:2.3.0` + `litert-gpu:2.3.0` / C API) and feed straight into `thinking-machines-lab/tinker-cookbook` OPSD + GRPO without custom diffusion math.
+2. **Removed Redundant 48 kHz RVC v2 Pass -> 5ms Deterministic C++20 NEON DSP Mastering**:
+   - Fine-tuning the native 44.1 kHz DAC decoder once on raw dry studio recordings eliminates RMVPE + RVC v2 double phase filtering and saves ~4s/clause.
+   - Stage C is a deterministic 5ms C++20 NEON pass (`dsp_mastering.cc`): 12ms studio Room IR convolution + `-16 LUFS` loudness norm + `-58 dBFS` studio noise floor + `±88`-sample (`±2ms @ 44.1 kHz`) zero-crossing scanner writing 64-byte-aligned headerless **44.1 kHz Float32 mono `.pcm`** files.
+3. **Swapped UTMOSv2 -> `sherpa-onnx` CTC Forced Aligner + `WeSpeaker ResNet34` (25 MB) + Microsoft `DNSMOS p808` (4 MB)**:
+   - Eliminates wav2vec2 SSL latency/RAM bloat.
+   - Stage B runs 4 fast deterministic/ONNX gates (`verifier_gates.cc`):
+     1. `sherpa-onnx` CTC Forced Aligner: `cer == 0.0f` + word `[startSample, endSample]` + `maxPhonemeDurationMs <= 380.0f`.
+     2. `WeSpeaker ResNet34` (25 MB ONNX): `speakerCosineSim >= 0.86f` vs 256-float `master_centroid.bin`.
+     3. Microsoft `DNSMOS p808` (4 MB ONNX, `<15ms`): `dnsmosP808 >= 4.10f` + final 80ms `tailRmsDb <= -45.0f` dBFS / spectral flux check.
+     4. Cadence gate: `syllablesPerSec` in `4.2f..6.1f`.
+
+---
+
+## 2. Rectified System Topology
 
 ```text
-[Home / Cloud Training Rig (8x H100 or Local Server)]
-   │  1. Full-SFT + GRPO + On-Policy Self-Distillation (OPSD)
-   │  2. litert-torch / ai-edge-quantizer export -> bundle_manifest.json
+[Home / Cloud Training Rig]
+   │  1. Base SFT on studio audio (s2-pro-4B + 44.1kHz DAC Decoder)
+   │  2. Nightly Tinker Cookbook Loop (Discrete-Token OPSD + GRPO)
+   │     trains ONLY a ~35 MB Rank-32 GGUF LoRA Adapter
    ▼
-[OTA Model Bundle (.litertlm / .tflite + RVC .onnx + room_ir + lexicon.json)]
-   │  (Synced over Tailscale / WireGuard into Android noBackupFilesDir/bundles/{ver}/)
+[OTA Bundle Synced over Tailscale / HTTP into Android noBackupFilesDir]
+   ├── s2_pro_4b_q4_k_m.gguf        (Static base, synced once: ~2.6 GB)
+   ├── codec_decoder_fp16.tflite    (Static fine-tuned vocoder: ~262 MB)
+   ├── voice_lora_vXXX.gguf         (Nightly hot-swap delta: ~35 MB)
+   ├── sherpa-onnx CTC + wespeaker_resnet34.onnx (25 MB) + master_centroid.bin + dnsmos_p808.onnx (4 MB)
+   ├── room_ir_44k.pcm + room_tone_44k.pcm (-58 dBFS)
+   └── lexicon.json                 (Deterministic IPA phoneme overrides)
    ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ ANDROID 17 CLIENT (16 GB RAM Budget / ~9.5 GB Foreground Ceiling)       │
+│ ANDROID 17 CLIENT (API 37 | Pixel 11 Pro XL 16 GB RAM | arm64-v8a)      │
 │                                                                         │
-│  [1. Script Input & Deterministic G2P Normalizer]                       │
-│         │  Splits draft into ClauseNodes (<15s each)                    │
+│  [1. Script Input & Deterministic G2P Normalizer (:core-engine Kotlin)] │
+│         │  Applies lexicon.json -> splits draft into ClauseNodes (<14s) │
 │         ▼                                                               │
-│  [2. Async Synthesis Engine (WorkManager Expedited / C++ JNI)]          │
-│         ├─► Stage A: Heavy Prosody Generator (N=4 takes per clause)     │
-│         │     (Ming-3.0-tts-tiny MoE or Fish-S2-Pro-4B / VoxCPM2)       │
-│         ├─► Stage B: 4-Gate C++ Verifier & Reranker (~350 MB RAM)       │
-│         │     (CTC CER == 0.0 + WeSpeaker Sim + UTMOSv2 + Syllable Rate)│
-│         └─► Stage C: 48kHz RVC v2 Harmonic Resynthesis + Room IR        │
+│  [2. Async Synthesis Engine (WorkManager Expedited -> C++20 JNI)]       │
+│         ├─► Stage A: Dual-AR Token Rollout (llama.cpp JNI + LoRA)       │
+│         │     N=4 discrete audio-token rollouts -> LiteRT DAC (44.1kHz) │
+│         ├─► Stage B: 4-Gate C++ Verifier (:core-verifier)               │
+│         │     CTC (CER==0.0, <=380ms) + WeSpeaker (>=0.86)              │
+│         │     + DNSMOS p808 (>=4.10, tail <=-45dBFS) + Cadence (4.2-6.1)│
+│         └─► Stage C: 5ms C++20 NEON DSP Mastering & Zero-Cross Scanner  │
+│               12ms Room IR + -16 LUFS + -58 dBFS + +/-88 zero-crossing  │
 │                 │                                                       │
-│                 ▼  Emits 48kHz Float32 PCM + Zero-Crossing Token Map    │
-│  [3. Hairline Audio/Video Clipper (Jetpack Compose + Media3 + Oboe)]    │
-│         ├─► Fixed Center Blade + Dual-Speed Vernier Tick Scrubber       │
-│         ├─► Word-Pill Take Swapper (Take #1 ◄─► Take #2/3)              │
-│         └─► Global Gap-Compression Rail + Media3 Video Beat Anchors     │
+│                 ▼  Emits 64B-aligned mmap 44.1kHz Float32 .pcm + JSON   │
+│  [3. Hairline Clipper (:audio-edl + :ui-clipper)]                       │
+│         ├─► Wait-Free Oboe EDL Ring Buffer (std::atomic<EdlSnapshot*>)  │
+│         │     15ms (660-sample) equal-power cosine x-fade + room tone   │
+│         ├─► Fixed Center Blade + 1:20 Gear-Ratio Vernier Strip          │
+│         ├─► Monospace WordPill Take Swapper (0ms swap, tap re-queue)    │
+│         └─► GapCompressionRail (100%->25%) + Media3 Transformer Anchors │
 │                 │                                                       │
-│                 ▼  Logs implicit preference pairs (Chosen vs. Rejected) │
-│  [4. Telemetry & Preference Sync Worker]                                │
+│                 ▼  Logs chosen/rejected discrete token IDs + edits      │
+│  [4. Preference Sync Worker (:sync-trainer/android-worker)]             │
 └─────────────────┼───────────────────────────────────────────────────────┘
-                  │  Uploads JSONL preference tuples + edits on Wi-Fi
+                  │  Uploads preferences.jsonl over Tailscale/Wi-Fi
                   ▼
-[Home / Cloud Rig: Nightly Self-Distillation & GRPO Adapter Update]
+[Home / Cloud Rig (:sync-trainer/home-daemon/tinker_voice_daemon.py)]
+   └─► SingleSpeakerAudioEnv (OPSD + GRPO) -> voice_lora_vXXX.gguf (~35 MB)
 ```
 
 ---
 
-## 2. Frozen Wave-0 Contracts (Single Source of Truth)
+## 3. Multi-Module Layout & Frozen Wave-0 Contracts
 
-All Kotlin, C++, and Python workers MUST conform strictly to these already-committed contracts:
-
-- **JSON Schemas**:
+- **Gradle Modules** added to `/Users/mac/Aircheck/settings.gradle.kts` alongside `:app`:
+  - `:core-engine` (Milestone 1 — `llama.cpp`, LiteRT DAC, NEON DSP, `ClauseNormalizer`)
+  - `:core-verifier` (Milestone 2 — `sherpa-onnx`, `WeSpeaker ResNet34`, `DNSMOS p808`)
+  - `:audio-edl` (Milestone 3 — Oboe wait-free double-buffered EDL + canonical `ClauseNode.kt`)
+  - `:ui-clipper` (Milestone 4 — Compose Vernier Clipper, `WordPill` swapper, `GapCompressionRail`, `Media3BeatExporter`)
+  - `:sync-trainer:android-worker` (Milestone 5 Android — `PreferenceSyncWorker` + atomic `HotSwapLora`)
+- **Python Rig**: `sync-trainer/home-daemon/` (`tinker_voice_daemon.py`, `ota_server.py`, `export_lora_gguf.sh`)
+- **Frozen Wave-0 Files**:
   - `docs/swarm/schemas/clause_node.schema.json`
   - `docs/swarm/schemas/ota_bundle_manifest.schema.json`
   - `docs/swarm/schemas/preference_tuple.schema.json`
-- **Kotlin Wire & Persistence Models**:
   - `app/src/main/java/com/example/data/synthesis/SynthesisContracts.kt`
-- **Kotlin Subsystem Interfaces**:
   - `app/src/main/java/com/example/data/synthesis/SynthesisInterfaces.kt`
-- **Contract Verification Test**:
   - `app/src/test/java/com/example/SynthesisContractsTest.kt`
 
-### Audio Format Standard
-- **Sample Rate**: `48,000 Hz` mono (`SYNTHESIS_SAMPLE_RATE_HZ = 48_000`)
-- **Sample Encoding**: 32-bit IEEE Float little-endian (`PCM_48K_F32`, `.pcm`)
-- **Acoustic Prefix Tail**: Last `1,500 ms` (`72,000` Float32 samples) of the winning take from clause `k - 1`, written to `takes/{prev_clause_id}_winner_tail_1500ms.pcm` and passed as `acoustic_prefix_uri` to clause `k`.
-- **Sample-Accurate Boundaries**: Every `ZeroCrossingToken` stores `start_sample`, `end_sample`, `zero_cross_in`, `zero_cross_out`, `f0_peak_sample`, and optional `video_anchor_id`.
-
 ---
 
-## 3. Android 17 Memory Budget & Native Build Mandates
+## 4. Android 17 Native Build, Memory & Constitutional Mandates
 
-### Local Build Toolchain (Verified Installed)
-- `ANDROID_HOME=/opt/homebrew/share/android-commandlinetools`
-- **NDK**: `28.2.13676358` (fallback `27.3.13750724`)
-- **CMake**: `3.22.1`
-- **16 KB Page Alignment (Android 15/16/17 Mandatory)**: All native shared libraries built via CMake MUST link with `-Wl,-z,max-page-size=16384`.
-- **Oboe Audio**: Consume via Android Gradle Prefab (`buildFeatures { prefab = true }`, `com.google.oboe:oboe`).
-
-### Strict Memory Ceiling Enforcement (`16 GB` Device / `<= 9.5 GB` Foreground Ceiling)
-1. **Sequential Stage Residency (Never Co-Resident)**:
-   - Stage A (`prosody_generator`: `.litertlm` / `.tflite`) runs to emit `N = 4` candidate takes per clause, then **explicitly closes** (`conversation.close()` -> `engine.close()` under single-thread Mutex) before Stage B loads.
-   - Stage B (`ctc_verifier` + `wespeaker_verifier` + `speaker_centroid` + `utmos_verifier`) MUST remain `<= 350 MB` total RSS using file-path `mmap` + `xnnPackFlags = 0x23` + versioned `xnnPackWeightCachePath` in `codeCacheDir`, then closes before Stage C loads.
-   - Stage C (`rvc_v2_resynth` ONNX + `room_ir` partitioned FFT convolver) resynthesizes candidates to 48kHz Float32 PCM, extracts zero-crossing/F0 token maps and 1500ms winner tails, then unloads immediately.
-2. **Never Pack Models into the APK**:
-   - Zero `.litertlm`, `.tflite`, `.onnx`, or Room IR binary weights may be placed in `app/src/main/assets/` or bundled inside the APK.
-   - All model files live under `context.noBackupFilesDir/bundles/{bundle_version}/` verified by SHA-256 against `bundle_manifest.json` using atomic `.tmp` -> rename installs.
-3. **LiteRT & LiteRT-LM Skill Mandates**:
-   - Bundled LiteRT: `com.google.ai.edge.litert:litert:2.3.0` + `com.google.ai.edge.litert:litert-gpu:2.3.0` (never legacy `org.tensorflow:tensorflow-lite*`).
-   - LiteRT-LM: `com.google.ai.edge.litertlm:litertlm-android:0.18.0` + `libvndksupport.so` and `libOpenCL.so` (`android:required="false"`) inside `<application>` in `AndroidManifest.xml`.
-   - Single-thread background executor owns every `CompiledModel` / `Engine` lifecycle (init, infer, close). Reuse `TensorBuffer`s; close buffers before `CompiledModel.close()`.
-
----
-
-## 4. Non-Negotiable Engineering & Constitutional Rules
-
-1. **Zero Fabrication / Zero Dead Controls (Constitutional Law 2)**:
-   - Never fabricate synthetic sine waves pretending to be neural TTS output, never fake `cer = 0.0` / `utmos_score = 4.42` / `speaker_cosine_sim = 0.914` when models aren't loaded, and never silently swallow missing OTA bundles.
-   - If the OTA model bundle is not synced on device, display real `OtaBundleStatus.NOT_INSTALLED` state with real Tailscale sync controls and fail synthesis cleanly with an actionable error.
-   - Real DSP tests (C++ zero-crossing detector, F0 peak finder, FFT Room IR convolution, Oboe splicer, G2P normalizer, Room WAL persistence) run against real deterministic audio buffers in unit/instrumentation tests—never fake production code paths.
-2. **UI Label Density Limit**:
-   - Never stack more than **2 adjacent labels** next to any single primary label (strict <= 2:1 ratio on Word-Pill Take Swapper chips, verifier badges, and Clipper controls).
-3. **Continuous Atomic Commits & Push (Constitutional Law 3)**:
-   - Every worker commits atomically on its worktree branch; coordinator merges and pushes continuously to `origin`.
-4. **No Local Android Emulators**:
-   - Verification MUST run on a physical USB phone (`adb`) or Limrun remote Android (`lim` with `LIM_API_KEY` from `~/trap/.env`). Never launch local Android emulators.
+- **Toolchain (Verified Local)**: `ANDROID_HOME=/opt/homebrew/share/android-commandlinetools`, NDK `28.2.13676358`, CMake `3.22.1`.
+- **16 KB Alignment**: Link every Android `.so` with `-Wl,-z,max-page-size=16384`.
+- **Cross-Platform CMake Flag Guard**: Apply `-march=armv9-a+simd+fp16` ONLY on `ANDROID` + `arm64-v8a` so host macOS/Linux CTest suites compile cleanly.
+- **Zero Models in APK**: `.gguf`, `.tflite`, `.onnx`, `.bin`, `.pcm` models live ONLY under `context.noBackupFilesDir/bundles/` verified by SHA-256 + atomic `.tmp` rename. Never bundle models in `assets/`.
+- **LiteRT Mandates (`litert-runtime` skill)**: Use `com.google.ai.edge.litert:litert:2.3.0` + `litert-gpu:2.3.0`, single-thread confined executor, reusable `TensorBuffer`s closed before `CompiledModel.close()`, `xnnPackFlags = 0x23` with versioned `xnnPackWeightCachePath` in `codeCacheDir`, GPU-to-CPU fallback.
+- **Memory Eviction**: Call `VoiceEngine::EvictWeightPages()` (`madvise(..., MADV_DONTNEED)`) when synthesis queue goes idle; monitor `/proc/self/status` `VmRSS` to stay strictly under `9,500 MB` foreground ceiling.
+- **Constitutional Law 2 (Zero Fabrication)**: Never emit fake audio buffers, hardcoded gate metrics (`cer=0.0`, `dnsmos=4.42`), or fake LoRA hot-swaps in production paths. Missing OTA files MUST surface real actionable sync UI states.
+- **UI Label Density Limit**: Max 2 adjacent labels per primary label in every Compose component (`WordPill`, clipper status bar, `SystemDeckSheet`).
+- **No Local Emulators**: Run all device gates on USB phone (`adb`) or Limrun remote Android (`LIM_API_KEY` in `~/trap/.env`).

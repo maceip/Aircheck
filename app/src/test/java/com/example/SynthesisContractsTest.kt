@@ -1,20 +1,27 @@
 package com.example
 
+import com.example.data.synthesis.CandidateTake
 import com.example.data.synthesis.ClauseNode
+import com.example.data.synthesis.DEFAULT_BASE_GAP_SAMPLES
+import com.example.data.synthesis.GateFailureRecord
 import com.example.data.synthesis.OtaArtifactFormat
 import com.example.data.synthesis.OtaArtifactRole
 import com.example.data.synthesis.OtaBundleManifest
 import com.example.data.synthesis.OtaModelArtifact
-import com.example.data.synthesis.PipelineStage
-import com.example.data.synthesis.PreferenceActionType
-import com.example.data.synthesis.PreferenceTuple
-import com.example.data.synthesis.ProsodyBackend
+import com.example.data.synthesis.OtaUpdateCadence
+import com.example.data.synthesis.PreferenceTelemetryRecord
+import com.example.data.synthesis.PreferenceUserAction
+import com.example.data.synthesis.SYNTHESIS_SAMPLE_RATE_HZ
 import com.example.data.synthesis.VerificationGateThresholds
+import com.example.data.synthesis.VoiceProjectManifest
+import com.example.data.synthesis.WordToken
+import com.example.data.synthesis.computeAnchorTimestampsUs
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class SynthesisContractsTest {
 
@@ -24,190 +31,234 @@ class SynthesisContractsTest {
     }
 
     @Test
-    fun clauseNode_roundTripsExactCanonicalWireJson() {
-        val canonicalJson = """
-            {
-              "clause_id": "c_004",
-              "raw_text": "We ripped out the cloud wrapper and ran it bare-metal.",
-              "normalized_phonemes": "w iː ɹ ˈɪ p t ˈaʊ t ð ə k l ˈaʊ d ɹ ˈæ p ɚ...",
-              "acoustic_prefix_uri": "takes/c_003_winner_tail_1500ms.pcm",
-              "selected_take_index": 0,
-              "gap_after_ms": 85,
-              "candidates": [
-                {
-                  "take_id": "c_004_t0",
-                  "pcm_uri": "takes/c_004_t0_48k_f32.pcm",
-                  "seed": 948102,
-                  "temperature": 0.72,
-                  "metrics": {
-                    "cer": 0.0,
-                    "speaker_cosine_sim": 0.914,
-                    "utmos_score": 4.42,
-                    "syllables_per_sec": 5.1,
-                    "passed_all_gates": true
-                  },
-                  "tokens": [
-                    {
-                      "word": "ripped",
-                      "start_sample": 18240,
-                      "end_sample": 31680,
-                      "zero_cross_in": 18233,
-                      "zero_cross_out": 31689,
-                      "f0_peak_sample": 24100,
-                      "video_anchor_id": "vid_event_02"
-                    }
-                  ]
-                }
-              ]
-            }
-        """.trimIndent()
-
-        val decoded = json.decodeFromString(ClauseNode.serializer(), canonicalJson)
-        assertEquals("c_004", decoded.clauseId)
-        assertEquals("takes/c_003_winner_tail_1500ms.pcm", decoded.acousticPrefixUri)
-        assertEquals(0, decoded.selectedTakeIndex)
-        assertEquals(85, decoded.gapAfterMs)
-        assertEquals(1, decoded.candidates.size)
-
-        val candidate = decoded.selectedCandidate!!
-        assertEquals("c_004_t0", candidate.takeId)
-        assertEquals("takes/c_004_t0_48k_f32.pcm", candidate.pcmUri)
-        assertEquals(948102L, candidate.seed)
-        assertEquals(0.72, candidate.temperature, 1e-9)
-        assertEquals(0.0, candidate.metrics.cer, 1e-9)
-        assertEquals(0.914, candidate.metrics.speakerCosineSim, 1e-9)
-        assertEquals(4.42, candidate.metrics.utmosScore, 1e-9)
-        assertEquals(5.1, candidate.metrics.syllablesPerSec, 1e-9)
-        assertTrue(candidate.metrics.passedAllGates)
-
-        val token = candidate.tokens.single()
-        assertEquals("ripped", token.word)
-        assertEquals(18240L, token.startSample)
-        assertEquals(31680L, token.endSample)
-        assertEquals(18233L, token.zeroCrossIn)
-        assertEquals(31689L, token.zeroCrossOut)
-        assertEquals(24100L, token.f0PeakSample)
-        assertEquals("vid_event_02", token.videoAnchorId)
-
-        val reEncoded = json.encodeToString(ClauseNode.serializer(), decoded)
-        val reDecoded = json.decodeFromString(ClauseNode.serializer(), reEncoded)
-        assertEquals(decoded, reDecoded)
-    }
-
-    @Test
-    fun verificationGateThresholds_enforcesZeroCerAndFourGates() {
+    fun voiceProjectManifest_roundTripsCanonicalSpecJson() {
         val thresholds = VerificationGateThresholds()
-
-        val pass = thresholds.evaluate(
-            cer = 0.0,
-            speakerCosineSim = 0.914,
-            utmosScore = 4.42,
-            syllablesPerSec = 5.1
+        val metrics = thresholds.evaluate(
+            cer = 0.0f,
+            maxPhonemeDurationMs = 210.0f,
+            speakerCosineSim = 0.914f,
+            dnsmosP808 = 4.42f,
+            tailRmsDb = -54.0f,
+            syllablesPerSec = 5.1f
         )
-        assertTrue(pass.passedAllGates)
+        assertTrue(metrics.passedAllGates)
 
-        val failCer = thresholds.evaluate(
-            cer = 0.01,
-            speakerCosineSim = 0.914,
-            utmosScore = 4.42,
-            syllablesPerSec = 5.1
-        )
-        assertFalse(failCer.passedAllGates)
-    }
-
-    @Test
-    fun otaBundleManifest_enforcesMemoryCeilings() {
-        val validSha = "a".repeat(64)
-        val validManifest = OtaBundleManifest(
-            bundleVersion = "2026.11.22-grpo-r1",
-            createdAtUtc = "2026-11-22T22:00:00Z",
-            prosodyBackend = ProsodyBackend.MING_3_0_TTS_TINY,
-            adapterCheckpointId = "grpo_opsd_001",
-            artifacts = listOf(
-                OtaModelArtifact(
-                    role = OtaArtifactRole.PROSODY_GENERATOR,
-                    filename = "ming_3_0_tts_tiny_q4.litertlm",
-                    format = OtaArtifactFormat.LITERTLM,
-                    sha256 = validSha,
-                    sizeBytes = 2_400_000_000L,
-                    estimatedRamMb = 4_200,
-                    stage = PipelineStage.STAGE_A
-                ),
-                OtaModelArtifact(
-                    role = OtaArtifactRole.CTC_VERIFIER,
-                    filename = "ctc_en_int8.tflite",
-                    format = OtaArtifactFormat.TFLITE,
-                    sha256 = validSha,
-                    sizeBytes = 90_000_000L,
-                    estimatedRamMb = 140,
-                    stage = PipelineStage.STAGE_B
-                ),
-                OtaModelArtifact(
-                    role = OtaArtifactRole.WESPEAKER_VERIFIER,
-                    filename = "wespeaker_int8.tflite",
-                    format = OtaArtifactFormat.TFLITE,
-                    sha256 = validSha,
-                    sizeBytes = 40_000_000L,
-                    estimatedRamMb = 110,
-                    stage = PipelineStage.STAGE_B
-                ),
-                OtaModelArtifact(
-                    role = OtaArtifactRole.UTMOS_VERIFIER,
-                    filename = "utmosv2_int8.tflite",
-                    format = OtaArtifactFormat.TFLITE,
-                    sha256 = validSha,
-                    sizeBytes = 50_000_000L,
-                    estimatedRamMb = 95,
-                    stage = PipelineStage.STAGE_B
-                ),
-                OtaModelArtifact(
-                    role = OtaArtifactRole.RVC_V2_RESYNTH,
-                    filename = "rvc_v2_48k.onnx",
-                    format = OtaArtifactFormat.ONNX,
-                    sha256 = validSha,
-                    sizeBytes = 120_000_000L,
-                    estimatedRamMb = 480,
-                    stage = PipelineStage.STAGE_C
+        val manifest = VoiceProjectManifest(
+            projectId = "proj_001",
+            sampleRate = SYNTHESIS_SAMPLE_RATE_HZ,
+            globalGapScale = 1.0f,
+            activeLoraVersion = 12,
+            clauses = listOf(
+                ClauseNode(
+                    clauseId = "c_004",
+                    index = 0,
+                    rawText = "We ripped out the cloud wrapper and ran it bare-metal.",
+                    normalizedPhonemes = "w iː ɹ ˈɪ p t ˈaʊ t ð ə k l ˈaʊ d ɹ ˈæ p ɚ",
+                    acousticPrefixPcmPath = "takes/c_003_winner_tail_1500ms.pcm",
+                    selectedTakeIndex = 0,
+                    baseGapAfterSamples = DEFAULT_BASE_GAP_SAMPLES,
+                    candidates = listOf(
+                        CandidateTake(
+                            takeId = "c_004_t0",
+                            pcmFilePath = "takes/c_004_t0_44k_f32.pcm",
+                            totalSamples = 110_250L,
+                            discreteAudioTokens = intArrayOf(1042, 8819, 441, 902),
+                            seed = 948102L,
+                            temperature = 0.72f,
+                            metrics = metrics,
+                            tokens = listOf(
+                                WordToken(
+                                    word = "ripped",
+                                    startSample = 18240L,
+                                    endSample = 31680L,
+                                    zeroCrossIn = 18233L,
+                                    zeroCrossOut = 31689L,
+                                    f0PeakSample = 24100L,
+                                    videoAnchorId = "vid_event_02"
+                                )
+                            )
+                        )
+                    )
                 )
             )
         )
 
-        assertEquals(345, validManifest.verifierRamMb())
-        assertEquals(4_200, validManifest.peakStageRamMb())
-        assertTrue(validManifest.fitsMemoryBudget())
-
-        val overBudgetVerifier = validManifest.copy(
-            artifacts = validManifest.artifacts + OtaModelArtifact(
-                role = OtaArtifactRole.SPEAKER_CENTROID,
-                filename = "huge.f32",
-                format = OtaArtifactFormat.F32,
-                sha256 = validSha,
-                sizeBytes = 20_000_000L,
-                estimatedRamMb = 20,
-                stage = PipelineStage.STAGE_B
-            )
-        )
-        assertFalse(overBudgetVerifier.fitsMemoryBudget())
+        val encoded = json.encodeToString(VoiceProjectManifest.serializer(), manifest)
+        val decoded = json.decodeFromString(VoiceProjectManifest.serializer(), encoded)
+        assertEquals(manifest, decoded)
+        assertEquals(44_100, decoded.sampleRate)
+        assertEquals(4, decoded.clauses.single().selectedCandidate!!.discreteAudioTokens.size)
     }
 
     @Test
-    fun preferenceTuple_serializesToSingleLineJsonl() {
-        val tuple = PreferenceTuple(
-            eventId = "pref_001",
-            timestampUtc = "2026-11-22T22:05:00Z",
-            bundleVersion = "2026.11.22-grpo-r1",
-            scriptId = "proj_abc",
-            clauseId = "c_004",
-            rawText = "We ripped out the cloud wrapper and ran it bare-metal.",
-            normalizedPhonemes = "w iː ɹ ˈɪ p t",
-            acousticPrefixUri = "takes/c_003_winner_tail_1500ms.pcm",
-            actionType = PreferenceActionType.TAKE_SWAP,
-            chosenTakeId = "c_004_t2",
-            rejectedTakeIds = listOf("c_004_t0", "c_004_t1", "c_004_t3"),
-            gapAfterMs = 85
+    fun verificationGateThresholds_enforcesAllFourRectifiedGates() {
+        val thresholds = VerificationGateThresholds()
+
+        assertTrue(
+            thresholds.evaluate(
+                cer = 0.0f,
+                maxPhonemeDurationMs = 380.0f,
+                speakerCosineSim = 0.86f,
+                dnsmosP808 = 4.10f,
+                tailRmsDb = -45.0f,
+                syllablesPerSec = 5.0f
+            ).passedAllGates
         )
-        val line = json.encodeToString(PreferenceTuple.serializer(), tuple)
+
+        // Gate 1: dropped word (CER > 0)
+        assertFalse(thresholds.evaluate(0.05f, 200f, 0.92f, 4.4f, -55f, 5.0f).passedAllGates)
+        // Gate 1b: dragged phoneme (> 380ms)
+        assertFalse(thresholds.evaluate(0.0f, 410f, 0.92f, 4.4f, -55f, 5.0f).passedAllGates)
+        // Gate 2: WeSpeaker cosine < 0.86
+        assertFalse(thresholds.evaluate(0.0f, 200f, 0.85f, 4.4f, -55f, 5.0f).passedAllGates)
+        // Gate 3: DNSMOS p808 < 4.10
+        assertFalse(thresholds.evaluate(0.0f, 200f, 0.92f, 4.05f, -55f, 5.0f).passedAllGates)
+        // Gate 3b: white-noise tail glitch (> -45 dBFS)
+        assertFalse(thresholds.evaluate(0.0f, 200f, 0.92f, 4.4f, -32f, 5.0f).passedAllGates)
+        // Gate 4: cadence outside 4.2..6.1 syl/s
+        assertFalse(thresholds.evaluate(0.0f, 200f, 0.92f, 4.4f, -55f, 6.4f).passedAllGates)
+    }
+
+    @Test
+    fun computeAnchorTimestampsUs_shiftsDeterministicallyWithGlobalGapCompression() {
+        val passMetrics = VerificationGateThresholds().evaluate(0f, 200f, 0.91f, 4.3f, -52f, 5.0f)
+
+        fun makeClause(idx: Int, anchorId: String?): ClauseNode = ClauseNode(
+            clauseId = "c_00$idx",
+            index = idx,
+            rawText = "Clause $idx",
+            normalizedPhonemes = "k l ɔ z",
+            baseGapAfterSamples = 4_410, // 100 ms @ 44.1 kHz
+            candidates = listOf(
+                CandidateTake(
+                    takeId = "c_00${idx}_t0",
+                    pcmFilePath = "takes/c_00${idx}_t0.pcm",
+                    totalSamples = 44_100L,
+                    discreteAudioTokens = intArrayOf(1, 2, 3),
+                    seed = idx.toLong(),
+                    temperature = 0.7f,
+                    metrics = passMetrics,
+                    tokens = listOf(
+                        WordToken("hello", 0L, 22_050L, 0L, 22_050L, 11_000L, anchorId),
+                        WordToken("world", 22_050L, 44_100L, 22_050L, 44_100L, 33_000L, null)
+                    )
+                )
+            )
+        )
+
+        val base = VoiceProjectManifest(
+            projectId = "p1",
+            globalGapScale = 1.0f,
+            clauses = listOf(
+                makeClause(0, "vid_0"),
+                makeClause(1, "vid_1"),
+                makeClause(2, "vid_2")
+            )
+        )
+        val compressed = base.copy(globalGapScale = 0.60f) // 40% gap compression -> 60ms gaps
+
+        val baseAnchors = computeAnchorTimestampsUs(base)
+        val compAnchors = computeAnchorTimestampsUs(compressed)
+
+        assertEquals(0L, baseAnchors["vid_0"])
+        assertEquals(1_100_000L, baseAnchors["vid_1"])
+        assertEquals(2_200_000L, baseAnchors["vid_2"])
+
+        assertEquals(0L, compAnchors["vid_0"])
+        assertTrue(abs(compAnchors["vid_1"]!! - 1_060_000L) < 1_000L)
+        assertTrue(abs(compAnchors["vid_2"]!! - 2_120_000L) < 1_000L)
+    }
+
+    @Test
+    fun otaBundleManifest_enforcesRectifiedGgufLiteRtAndOnnxBudget() {
+        val sha = "b".repeat(64)
+        val manifest = OtaBundleManifest(
+            bundleVersion = "2026.11.22-lora-v012",
+            loraVersion = 12,
+            createdAtUtc = "2026-11-22T22:00:00Z",
+            artifacts = listOf(
+                OtaModelArtifact(
+                    role = OtaArtifactRole.S2_PRO_BASE_GGUF,
+                    filename = "s2_pro_4b_q4_k_m.gguf",
+                    format = OtaArtifactFormat.GGUF,
+                    sha256 = sha,
+                    sizeBytes = 2_600_000_000L,
+                    estimatedRamMb = 3_200,
+                    updateCadence = OtaUpdateCadence.STATIC_ONCE
+                ),
+                OtaModelArtifact(
+                    role = OtaArtifactRole.CODEC_DECODER_TFLITE,
+                    filename = "codec_decoder_fp16.tflite",
+                    format = OtaArtifactFormat.TFLITE,
+                    sha256 = sha,
+                    sizeBytes = 262_000_000L,
+                    estimatedRamMb = 420,
+                    updateCadence = OtaUpdateCadence.STATIC_ONCE
+                ),
+                OtaModelArtifact(
+                    role = OtaArtifactRole.VOICE_LORA_GGUF,
+                    filename = "voice_lora_v012.gguf",
+                    format = OtaArtifactFormat.GGUF,
+                    sha256 = sha,
+                    sizeBytes = 35_000_000L,
+                    estimatedRamMb = 64,
+                    updateCadence = OtaUpdateCadence.NIGHTLY_DELTA
+                ),
+                OtaModelArtifact(
+                    role = OtaArtifactRole.WESPEAKER_RESNET34_ONNX,
+                    filename = "wespeaker_resnet34.onnx",
+                    format = OtaArtifactFormat.ONNX,
+                    sha256 = sha,
+                    sizeBytes = 25_000_000L,
+                    estimatedRamMb = 80,
+                    updateCadence = OtaUpdateCadence.STATIC_ONCE
+                ),
+                OtaModelArtifact(
+                    role = OtaArtifactRole.DNSMOS_P808_ONNX,
+                    filename = "dnsmos_p808.onnx",
+                    format = OtaArtifactFormat.ONNX,
+                    sha256 = sha,
+                    sizeBytes = 4_000_000L,
+                    estimatedRamMb = 24,
+                    updateCadence = OtaUpdateCadence.STATIC_ONCE
+                )
+            )
+        )
+        assertTrue(manifest.fitsMemoryBudget())
+        assertEquals(3_788, manifest.totalEstimatedRamMb())
+    }
+
+    @Test
+    fun preferenceTelemetryRecord_matchesExactSpecJsonlFormat() {
+        val rawSpecJson = """
+            {
+              "timestamp": 1795409000,
+              "clause_id": "c_004",
+              "lora_version": 12,
+              "raw_text": "We ripped out the cloud wrapper and ran it bare-metal.",
+              "normalized_phonemes": "w iː ɹ ˈɪ p t ˈaʊ t ð ə k l ˈaʊ d ɹ ˈæ p ɚ...",
+              "user_action": "TAKE_SWAP_AND_PACE_EDIT",
+              "user_gap_scale": 0.45,
+              "chosen_tokens": [1042, 8819, 441, 902],
+              "rejected_tokens": [1042, 7104, 118, 994],
+              "gate_failures": [
+                {"seed": 948104, "cer": 0.08, "reason": "SKIPPED_WORD", "tokens": [1042, 331]}
+              ]
+            }
+        """.trimIndent()
+
+        val decoded = json.decodeFromString(PreferenceTelemetryRecord.serializer(), rawSpecJson)
+        assertEquals("c_004", decoded.clauseId)
+        assertEquals(12, decoded.loraVersion)
+        assertEquals(PreferenceUserAction.TAKE_SWAP_AND_PACE_EDIT, decoded.userAction)
+        assertEquals(0.45f, decoded.userGapScale, 1e-6f)
+        assertEquals(listOf(1042, 8819, 441, 902), decoded.chosenTokens)
+        assertEquals(
+            GateFailureRecord(seed = 948104L, cer = 0.08f, reason = "SKIPPED_WORD", tokens = listOf(1042, 331)),
+            decoded.gateFailures.single()
+        )
+
+        val line = json.encodeToString(PreferenceTelemetryRecord.serializer(), decoded)
         assertFalse(line.contains("\n"))
-        assertEquals(tuple, json.decodeFromString(PreferenceTuple.serializer(), line))
     }
 }

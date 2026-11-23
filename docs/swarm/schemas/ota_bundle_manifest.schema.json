@@ -2,51 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aircheck.local/schemas/ota_bundle_manifest.schema.json",
   "title": "OtaBundleManifest",
-  "description": "Tailscale/WireGuard OTA model bundle manifest exported by litert-torch / ai-edge-quantizer and RVC v2 export scripts. Model files live under Android noBackupFilesDir/bundles/{bundle_version}/ and are NEVER packed into the APK.",
+  "description": "Tailscale/HTTP OTA bundle manifest for s2-pro-GGUF + nightly 35MB Rank-32 GGUF LoRA delta + LiteRT 44.1kHz DAC codec decoder + sherpa-onnx/WeSpeaker/DNSMOS p808 verifiers + room IR/tone + lexicon.json. Stored under noBackupFilesDir (NEVER in APK).",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "bundle_version",
+    "lora_version",
     "created_at_utc",
-    "prosody_backend",
     "sample_rate_hz",
     "foreground_ram_ceiling_mb",
     "artifacts"
   ],
   "properties": {
-    "schema_version": {
-      "type": "integer",
-      "const": 1
-    },
-    "bundle_version": {
-      "type": "string",
-      "minLength": 1
-    },
-    "created_at_utc": {
-      "type": "string",
-      "minLength": 1
-    },
-    "prosody_backend": {
-      "type": "string",
-      "enum": [
-        "ming_3_0_tts_tiny",
-        "fish_s2_pro_4b",
-        "voxcpm2"
-      ]
-    },
-    "adapter_checkpoint_id": {
-      "type": ["string", "null"]
-    },
-    "sample_rate_hz": {
-      "type": "integer",
-      "const": 48000
-    },
-    "foreground_ram_ceiling_mb": {
-      "type": "integer",
-      "minimum": 512,
-      "maximum": 9500
-    },
+    "schema_version": { "type": "integer", "const": 1 },
+    "bundle_version": { "type": "string", "minLength": 1 },
+    "lora_version": { "type": "integer", "minimum": 0 },
+    "created_at_utc": { "type": "string", "minLength": 1 },
+    "sample_rate_hz": { "type": "integer", "const": 44100 },
+    "foreground_ram_ceiling_mb": { "type": "integer", "minimum": 512, "maximum": 9500 },
     "artifacts": {
       "type": "array",
       "minItems": 1,
@@ -60,61 +34,37 @@
           "sha256",
           "size_bytes",
           "estimated_ram_mb",
-          "stage"
+          "update_cadence"
         ],
         "properties": {
           "role": {
             "type": "string",
             "enum": [
-              "prosody_generator",
-              "ctc_verifier",
-              "wespeaker_verifier",
-              "speaker_centroid",
-              "utmos_verifier",
-              "rvc_v2_resynth",
-              "room_ir",
+              "s2_pro_base_gguf",
+              "voice_lora_gguf",
+              "codec_decoder_tflite",
+              "sherpa_ctc_aligner",
+              "wespeaker_resnet34_onnx",
+              "master_centroid_bin",
+              "dnsmos_p808_onnx",
+              "room_ir_pcm",
+              "room_tone_pcm",
               "g2p_lexicon"
             ]
           },
-          "filename": {
-            "type": "string",
-            "minLength": 1
-          },
+          "filename": { "type": "string", "minLength": 1 },
           "format": {
             "type": "string",
-            "enum": [
-              "litertlm",
-              "tflite",
-              "onnx",
-              "json",
-              "f32",
-              "wav"
-            ]
+            "enum": ["gguf", "tflite", "onnx", "bin", "pcm", "json", "tar_gz"]
           },
-          "sha256": {
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "size_bytes": { "type": "integer", "minimum": 1 },
+          "estimated_ram_mb": { "type": "integer", "minimum": 1 },
+          "update_cadence": {
             "type": "string",
-            "pattern": "^[a-f0-9]{64}$"
+            "enum": ["static_once", "nightly_delta"]
           },
-          "size_bytes": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "estimated_ram_mb": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "stage": {
-            "type": "string",
-            "enum": [
-              "g2p",
-              "stage_a",
-              "stage_b",
-              "stage_c"
-            ]
-          },
-          "download_path": {
-            "type": ["string", "null"]
-          }
+          "download_path": { "type": ["string", "null"] }
         }
       }
     }

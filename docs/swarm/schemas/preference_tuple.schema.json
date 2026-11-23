@@ -1,102 +1,64 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aircheck.local/schemas/preference_tuple.schema.json",
-  "title": "PreferenceTuple",
-  "description": "Implicit Chosen-vs-Rejected human preference record emitted by the Hairline Clipper and uploaded as JSONL over Wi-Fi/Tailscale for nightly GRPO + On-Policy Self-Distillation (OPSD) adapter updates.",
+  "title": "PreferenceTelemetryRecord",
+  "description": "Exact preferences.jsonl schema uploaded over Tailscale/Wi-Fi from Android to sync-trainer/home-daemon/tinker_voice_daemon.py for discrete-token OPSD + GRPO LoRA updates.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version",
-    "event_id",
-    "timestamp_utc",
-    "bundle_version",
-    "script_id",
+    "timestamp",
     "clause_id",
+    "lora_version",
     "raw_text",
     "normalized_phonemes",
-    "action_type",
-    "chosen_take_id",
-    "rejected_take_ids",
-    "gap_after_ms"
+    "user_action",
+    "user_gap_scale",
+    "chosen_tokens",
+    "rejected_tokens",
+    "gate_failures"
   ],
   "properties": {
-    "schema_version": {
-      "type": "integer",
-      "const": 1
-    },
-    "event_id": {
-      "type": "string",
-      "minLength": 1
-    },
-    "timestamp_utc": {
-      "type": "string",
-      "minLength": 1
-    },
-    "bundle_version": {
-      "type": "string",
-      "minLength": 1
-    },
-    "script_id": {
-      "type": "string",
-      "minLength": 1
-    },
-    "clause_id": {
-      "type": "string",
-      "minLength": 1
-    },
-    "raw_text": {
-      "type": "string",
-      "minLength": 1
-    },
-    "normalized_phonemes": {
-      "type": "string"
-    },
-    "acoustic_prefix_uri": {
-      "type": ["string", "null"]
-    },
-    "action_type": {
+    "timestamp": { "type": "integer", "minimum": 0 },
+    "clause_id": { "type": "string", "minLength": 1 },
+    "lora_version": { "type": "integer", "minimum": 0 },
+    "raw_text": { "type": "string", "minLength": 1 },
+    "normalized_phonemes": { "type": "string" },
+    "user_action": {
       "type": "string",
       "enum": [
         "TAKE_SWAP",
-        "GAP_ADJUST",
-        "BOUNDARY_TRIM",
+        "PACE_EDIT",
+        "TAKE_SWAP_AND_PACE_EDIT",
+        "PHONEME_OVERRIDE",
         "VIDEO_ANCHOR_SNAP",
-        "PHONEME_OVERRIDE"
+        "PROJECT_EXPORT"
       ]
     },
-    "chosen_take_id": {
-      "type": "string",
-      "minLength": 1
+    "user_gap_scale": { "type": "number", "minimum": 0.25, "maximum": 1.0 },
+    "chosen_tokens": {
+      "type": "array",
+      "items": { "type": "integer" }
     },
-    "rejected_take_ids": {
+    "rejected_tokens": {
+      "type": "array",
+      "items": { "type": "integer" }
+    },
+    "gate_failures": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["seed", "cer", "reason", "tokens"],
+        "properties": {
+          "seed": { "type": "integer" },
+          "cer": { "type": "number", "minimum": 0.0 },
+          "reason": { "type": "string", "minLength": 1 },
+          "tokens": {
+            "type": "array",
+            "items": { "type": "integer" }
+          }
+        }
       }
-    },
-    "chosen_metrics": {
-      "type": ["object", "null"]
-    },
-    "rejected_metrics": {
-      "type": "array",
-      "items": {
-        "type": "object"
-      }
-    },
-    "gap_after_ms": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "trim_in_sample": {
-      "type": ["integer", "null"],
-      "minimum": 0
-    },
-    "trim_out_sample": {
-      "type": ["integer", "null"],
-      "minimum": 0
-    },
-    "video_anchor_id": {
-      "type": ["string", "null"]
     }
   }
 }
