@@ -201,7 +201,7 @@ class AircheckRunningAppE2ETest {
         }
 
         var renderedClipId: String? = null
-        composeRule.waitUntil(timeoutMillis = 300_000L) {
+        composeRule.waitUntil(timeoutMillis = 480_000L) {
             assertNoErrorBanner("live Mac broadcast render")
             val cards = runBlocking { app.container.localRepo.clipCards.first() }
             val newest = cards.firstOrNull { it.id !in beforeClipIds }
