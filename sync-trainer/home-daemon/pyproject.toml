@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voicestudio-home-daemon"
+version = "0.1.0"
+description = "VoiceStudio nightly Tinker Cookbook OPSD+GRPO LoRA trainer, GGUF exporter, and Tailscale OTA/telemetry server"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+train = [
+    "torch>=2.6",
+    "tinker-cookbook",
+    "pytest>=8.0",
+]
+dev = [
+    "pytest>=8.0",
+    "jsonschema>=4.20",
+]
+
+[project.scripts]
+voicestudio-tinker-daemon = "tinker_voice_daemon:main"
+voicestudio-ota-server = "ota_server:main"
+
+[tool.setuptools]
+py-modules = ["tinker_voice_daemon", "ota_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
