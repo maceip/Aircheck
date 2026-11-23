@@ -33,12 +33,12 @@ if(ANDROID)
     find_library(log-lib log)
 
     add_library(voicestudio_verifier SHARED
-        verifier_gates.cc
+        verifier_jni.cc
     )
 
-    target_include_directories(voicestudio_verifier
-        PUBLIC
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    target_compile_options(voicestudio_verifier PRIVATE
+        -Wall
+        -Wextra
     )
 
     if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
@@ -49,6 +49,7 @@ if(ANDROID)
 
     target_link_libraries(voicestudio_verifier
         PRIVATE
+            voicestudio_verifier_core
             ${log-lib}
     )
 
@@ -56,4 +57,20 @@ if(ANDROID)
     target_link_options(voicestudio_verifier PRIVATE
         "-Wl,-z,max-page-size=16384"
     )
+else()
+    include(CTest)
+    if(BUILD_TESTING)
+        add_executable(VerifierCoreTest
+            tests/VerifierCoreTest.cc
+        )
+        target_link_libraries(VerifierCoreTest
+            PRIVATE
+                voicestudio_verifier_core
+        )
+        target_compile_options(VerifierCoreTest PRIVATE
+            -Wall
+            -Wextra
+        )
+        add_test(NAME VerifierCoreTest COMMAND VerifierCoreTest)
+    endif()
 endif()
