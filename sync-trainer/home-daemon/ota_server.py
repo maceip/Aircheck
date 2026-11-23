@@ -1397,20 +1397,22 @@ def _run_ai_assist(payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) ->
         )
     elif mode == "polish_headline":
         user_prompt = (
-            f"Write ONE punchy ALL-CAPS breaking-news lower-third headline (max 34 characters, no quotes).\n"
+            f"Write ONE punchy ALL-CAPS breaking-news lower-third headline (max 34 characters, no quotes). "
+            f"If a draft is provided, write a fresh, punchier alternative worded differently from the draft.\n"
             f"Draft: {text}\nStory context: {context}\n"
             f'Return STRICT JSON ONLY: {{"text":"HEADLINE HERE"}}'
         )
     elif mode == "polish_subline":
         user_prompt = (
-            f"Write ONE punchy ALL-CAPS cable-news lower-third subline/ticker (max 42 characters, no quotes).\n"
+            f"Write ONE punchy ALL-CAPS cable-news lower-third subline/ticker (max 42 characters, no quotes). "
+            f"If a draft is provided, write a fresh, punchier alternative worded differently from the draft.\n"
             f"Draft: {text}\nStory context: {context}\n"
             f'Return STRICT JSON ONLY: {{"text":"SUBLINE HERE"}}'
         )
     else:  # polish_segment
         user_prompt = (
-            f"Rewrite or flesh out this single spoken news anchor segment (14-24 words, deadpan serious cable news tone, "
-            f"plain spoken text with no stage directions or quotes).\n"
+            f"Rewrite or flesh out this single spoken news anchor segment (14-22 words, deadpan serious cable news tone, "
+            f"plain spoken text with no stage directions or quotes, worded differently from the draft).\n"
             f"Segment draft: {text}\nStory context: {context}\n"
             f'Return STRICT JSON ONLY: {{"text":"Spoken segment here."}}'
         )
