@@ -212,31 +212,23 @@ fun SeedEyeZone(
                     )
                 }
 
-                Text(
-                    text = if (rawKeyboardMode) "Done" else "Raw Kbd",
-                    style = SeedMonoLabelStyle.copy(
-                        fontWeight = if (rawKeyboardMode) FontWeight.Bold else FontWeight.Medium
-                    ),
-                    color = if (rawKeyboardMode) PureBlackInk else TelemetryMuted,
-                    modifier = Modifier
-                        .testTag("seed_raw_kbd_toggle")
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(if (rawKeyboardMode) AcidVoltLime else ConsoleObsidian)
-                        .border(
-                            1.dp,
-                            if (rawKeyboardMode) AcidVoltLime else GraphiteHairline,
-                            RoundedCornerShape(4.dp)
-                        )
-                        .clickable(role = Role.Button) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            if (rawKeyboardMode) {
+                if (rawKeyboardMode) {
+                    Text(
+                        text = "Done",
+                        style = SeedMonoLabelStyle.copy(fontWeight = FontWeight.Bold),
+                        color = PureBlackInk,
+                        modifier = Modifier
+                            .testTag("seed_raw_kbd_toggle")
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(AcidVoltLime)
+                            .border(1.dp, AcidVoltLime, RoundedCornerShape(4.dp))
+                            .clickable(role = Role.Button) {
+                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 onCommitRawSeed(seedTranscript)
-                            } else {
-                                onToggleRawKeyboardMode()
                             }
-                        }
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                )
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
             }
         }
 

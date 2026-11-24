@@ -14,6 +14,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -178,11 +179,9 @@ fun CutSurgeryEyeZone(
             .background(OledVoid)
             .then(
                 if (!rawKeyboardMode && brushMicroStrip != null) {
-                    Modifier.clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = onDismissBrushStrip
-                    )
+                    Modifier.pointerInput(Unit) {
+                        detectTapGestures { onDismissBrushStrip() }
+                    }
                 } else {
                     Modifier
                 }
