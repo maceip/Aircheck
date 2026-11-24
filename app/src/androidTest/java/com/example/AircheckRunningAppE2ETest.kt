@@ -108,10 +108,18 @@ class AircheckRunningAppE2ETest {
         Espresso.closeSoftKeyboard()
         composeRule.onNodeWithTag("raw_kbd_toggle_button").performClick()
 
-        // Tap inline ✨ AI rewrite button on Seed and capture live stretched Siri hairline mid-thinking!
+        // Tap inline ✨ AI rewrite button on Seed, assert stretched Siri thinking hairline activates,
+        // and capture live glowing framebuffer mid-thinking!
         composeRule.onNodeWithTag("seed_ai_rewrite_button").performClick()
-        Thread.sleep(350L)
-        captureScreenshot(screenshotDir, "tactile_01a_siri_thinking.png")
+        composeRule.waitUntil(timeoutMillis = 8_000L) {
+            composeRule.onAllNodesWithTag("divider_density_scrubber")
+                .fetchSemanticsNodes()
+                .firstOrNull()
+                ?.config
+                ?.getOrNull(SemanticsProperties.StateDescription) == "Thinking"
+        }
+        Thread.sleep(260L)
+        captureScreenshotImmediate(screenshotDir, "tactile_01a_siri_thinking.png")
 
         // Wait for real /v1/draft/rewrite + /v1/draft/angles Row A & Row B chips to populate from Mac :8443.
         composeRule.waitUntil(timeoutMillis = 45_000L) {
@@ -285,6 +293,10 @@ class AircheckRunningAppE2ETest {
 
     private fun captureScreenshot(dir: File, filename: String) {
         composeRule.waitForIdle()
+        captureScreenshotImmediate(dir, filename)
+    }
+
+    private fun captureScreenshotImmediate(dir: File, filename: String) {
         val bmp = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
         if (bmp != null) {
             FileOutputStream(File(dir, filename)).use { out ->

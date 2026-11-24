@@ -56,6 +56,7 @@ data class DraftDeckUiState(
     val liveRmsLevel: Float = 0f,
     val rawKeyboardMode: Boolean = false,
     val isBusy: Boolean = false,
+    val isExtractingAngles: Boolean = false,
     val busyLabel: String? = null,
     val errorMessage: String? = null,
     val statusNotice: String? = null,
@@ -77,6 +78,9 @@ data class DraftDeckUiState(
 ) {
     val isAnyRecording: Boolean
         get() = isRecordingSeed || isRecordingSteer || isRecordingSplice
+
+    val isThinkingActive: Boolean
+        get() = isBusy || isExtractingAngles
 
     val hasAnyBackgroundThinking: Boolean
         get() = sessions.any { it.id != document.id && it.isThinking }
@@ -492,7 +496,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun updateSeedTranscriptManual(text: String) {
-        _uiState.update { state ->
+        updateSession(_uiState.value.document.id) { state ->
             state.copy(document = state.document.copy(seedTranscript = text))
         }
     }
@@ -533,19 +537,20 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
             graphContactCount = current.graphContactCount,
             lastSeedRigOnline = current.lastSeedRigOnline,
             rigBaseUrl = current.rigBaseUrl,
-            statusNotice = if (current.isBusy) {
+            statusNotice = if (current.isThinkingActive) {
                 "New draft ready · prior card still thinking"
             } else {
                 "New draft ready"
             },
             isSessionSwitcherOpen = false
         )
-        synchronized(sessionsLock) {
+        val summaries = synchronized(sessionsLock) {
             storedSessions[current.document.id] = current.copy(isSessionSwitcherOpen = false)
             storedSessions[freshDoc.id] = freshState
+            buildSessionSummariesLocked(freshState)
         }
         clearBrushBaseline()
-        _uiState.value = freshState.copy(sessions = buildSessionSummariesLocked())
+        _uiState.value = freshState.copy(sessions = summaries)
         refreshGraphMatches()
     }
 
@@ -555,9 +560,14 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
             _uiState.update { it.copy(isSessionSwitcherOpen = false) }
             return
         }
+        var summaries: List<DraftSessionSummary> = emptyList()
         val restored: DraftDeckUiState? = synchronized(sessionsLock) {
             storedSessions[current.document.id] = current.copy(isSessionSwitcherOpen = false)
-            storedSessions[sessionId]
+            val target = storedSessions[sessionId]
+            if (target != null) {
+                summaries = buildSessionSummariesLocked(target)
+            }
+            target
         }
         if (restored == null) return
         clearBrushBaseline()
@@ -566,7 +576,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
             lastSeedRigOnline = current.lastSeedRigOnline || restored.lastSeedRigOnline,
             rigBaseUrl = current.rigBaseUrl,
             isSessionSwitcherOpen = false,
-            sessions = buildSessionSummariesLocked()
+            sessions = summaries
         )
         refreshGraphMatches()
     }
@@ -577,13 +587,15 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setSessionSwitcherOpen(open: Boolean) {
         val current = _uiState.value
-        synchronized(sessionsLock) {
-            storedSessions[current.document.id] = current.copy(isSessionSwitcherOpen = open)
+        val updated = current.copy(isSessionSwitcherOpen = open)
+        val summaries = synchronized(sessionsLock) {
+            storedSessions[current.document.id] = updated
+            buildSessionSummariesLocked(updated)
         }
         _uiState.update {
             it.copy(
                 isSessionSwitcherOpen = open,
-                sessions = buildSessionSummariesLocked()
+                sessions = summaries
             )
         }
     }
@@ -707,16 +719,17 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
         if (isActive) {
             _uiState.update { cur ->
                 val next = transform(cur)
-                synchronized(sessionsLock) {
+                val summaries = synchronized(sessionsLock) {
                     storedSessions[sessionId] = next
+                    buildSessionSummariesLocked(next)
                 }
-                next.copy(sessions = buildSessionSummariesLocked())
+                next.copy(sessions = summaries)
             }
         } else {
             val updatedSummaries = synchronized(sessionsLock) {
                 val existing = storedSessions[sessionId] ?: return@synchronized null
                 storedSessions[sessionId] = transform(existing)
-                buildSessionSummariesLocked()
+                buildSessionSummariesLocked(_uiState.value)
             }
             if (updatedSummaries != null) {
                 _uiState.update { cur -> cur.copy(sessions = updatedSummaries) }
@@ -730,6 +743,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
         updateSession(sessionId) { state ->
             state.copy(
                 isBusy = false,
+                isExtractingAngles = false,
                 busyLabel = null,
                 densityDeltaPercent = 0,
                 lastSeedRigOnline = if (offline) false else state.lastSeedRigOnline,
@@ -739,13 +753,15 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun syncSessionSummariesIntoUi() {
-        val summaries = buildSessionSummariesLocked()
+        val summaries = buildSessionSummariesLocked(_uiState.value)
         _uiState.update { it.copy(sessions = summaries) }
     }
 
-    private fun buildSessionSummariesLocked(): List<DraftSessionSummary> =
+    private fun buildSessionSummariesLocked(
+        activeOverride: DraftDeckUiState? = null
+    ): List<DraftSessionSummary> =
         synchronized(sessionsLock) {
-            val current = _uiState.value
+            val current = activeOverride ?: _uiState.value
             storedSessions[current.document.id] = current
             storedSessions.values.mapIndexed { idx, s ->
                 val rawPreview = s.activePlainText.trim()
@@ -758,7 +774,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     id = s.document.id,
                     title = title,
                     stage = s.document.stage,
-                    isThinking = s.isBusy,
+                    isThinking = s.isThinkingActive,
                     charCount = s.activeCharCount
                 )
             }
@@ -777,18 +793,23 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
         silentOnError: Boolean,
         targetSessionId: String = _uiState.value.document.id
     ) {
-        val snapshotState = synchronized(sessionsLock) {
-            storedSessions[targetSessionId]
-        } ?: _uiState.value
+        val snapshotState = if (targetSessionId == _uiState.value.document.id) {
+            _uiState.value
+        } else {
+            synchronized(sessionsLock) { storedSessions[targetSessionId] } ?: _uiState.value
+        }
         val snapshotDoc = snapshotState.document
         val cleanSeed = DraftStateReducer.sanitizeAscii(snapshotDoc.seedTranscript).trim()
         if (cleanSeed.isEmpty()) return
 
         anglesJob = launchSessionJob(targetSessionId, "angles") {
-            if (!silentOnError) {
-                updateSession(targetSessionId) {
-                    it.copy(isBusy = true, busyLabel = "Extracting angles...", errorMessage = null)
-                }
+            updateSession(targetSessionId) {
+                it.copy(
+                    isExtractingAngles = true,
+                    isBusy = if (!silentOnError) true else it.isBusy,
+                    busyLabel = if (!silentOnError) "Extracting angles..." else it.busyLabel,
+                    errorMessage = if (!silentOnError) null else it.errorMessage
+                )
             }
             try {
                 val response = draftApiClient.extractAngles(
@@ -805,11 +826,15 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                             blindspotAngles = blindspots
                         ),
                         lastSeedRigOnline = true,
+                        isExtractingAngles = false,
                         isBusy = if (!silentOnError) false else state.isBusy,
                         busyLabel = if (!silentOnError) null else state.busyLabel
                     )
                 }
             } catch (e: CancellationException) {
+                updateSession(targetSessionId) { state ->
+                    state.copy(isExtractingAngles = false)
+                }
                 throw e
             } catch (e: Exception) {
                 if (!silentOnError) {
@@ -817,6 +842,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 } else {
                     updateSession(targetSessionId) {
                         it.copy(
+                            isExtractingAngles = false,
                             lastSeedRigOnline = if (e is IOException && e !is DraftApiClient.HttpStatusException) false else it.lastSeedRigOnline
                         )
                     }
@@ -1862,12 +1888,15 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
         if (entering) {
             dismissBrushStrip()
         }
-        _uiState.update { it.copy(rawKeyboardMode = entering) }
+        updateSession(current.document.id) { it.copy(rawKeyboardMode = entering) }
         if (!entering &&
             current.document.stage == Stage.SEED &&
             current.document.seedTranscript.trim().length >= 8
         ) {
-            refreshAnglesFromSeed()
+            refreshAnglesFromSeedInternal(
+                silentOnError = true,
+                targetSessionId = current.document.id
+            )
         }
     }
 

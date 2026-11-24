@@ -209,12 +209,12 @@ fun DensityScrubberRule(
                 val w = size.width.coerceAtLeast(1f)
                 val shift = siriFlowPhase * w
                 val siriColors = listOf(
-                    Color(0xFF18D4F5), // Luminous Cyan
-                    Color(0xFF7B61FF), // Electric Violet
-                    Color(0xFFFF3B9A), // Siri Magenta
-                    Color(0xFFFF8A00), // Warm Coral
-                    Color(0xFFB8FF00), // Aircheck Volt Lime
-                    Color(0xFF18D4F5)  // Seamless Loop Cyan
+                    Color(0xFF00E5FF), // Luminous Cyan
+                    Color(0xFF6E56FF), // Electric Indigo
+                    Color(0xFFFF2E93), // Siri Magenta
+                    Color(0xFFFF7A18), // Solar Coral
+                    Color(0xFFC4FF00), // Aircheck Volt Lime
+                    Color(0xFF00E5FF)  // Seamless Loop Cyan
                 )
                 val flowBrush = Brush.linearGradient(
                     colors = siriColors,
@@ -223,13 +223,13 @@ fun DensityScrubberRule(
                     tileMode = TileMode.Repeated
                 )
                 val softHaloBrush = Brush.linearGradient(
-                    colors = siriColors.map { it.copy(alpha = 0.24f * siriGlowBreath) },
+                    colors = siriColors.map { it.copy(alpha = 0.36f * siriGlowBreath) },
                     start = Offset(shift - w, centerY),
                     end = Offset(shift + w, centerY),
                     tileMode = TileMode.Repeated
                 )
                 val midBloomBrush = Brush.linearGradient(
-                    colors = siriColors.map { it.copy(alpha = 0.52f * siriGlowBreath) },
+                    colors = siriColors.map { it.copy(alpha = 0.72f * siriGlowBreath) },
                     start = Offset(shift - w, centerY),
                     end = Offset(shift + w, centerY),
                     tileMode = TileMode.Repeated
@@ -238,51 +238,51 @@ fun DensityScrubberRule(
                 drawRect(
                     brush = Brush.verticalGradient(
                         0.0f to Color.Transparent,
-                        0.32f to Color(0xFF7B61FF).copy(alpha = 0.14f * siriGlowBreath),
-                        0.50f to Color(0xFFFF3B9A).copy(alpha = 0.22f * siriGlowBreath),
-                        0.68f to Color(0xFF18D4F5).copy(alpha = 0.14f * siriGlowBreath),
+                        0.28f to Color(0xFF6E56FF).copy(alpha = 0.22f * siriGlowBreath),
+                        0.50f to Color(0xFFFF2E93).copy(alpha = 0.34f * siriGlowBreath),
+                        0.72f to Color(0xFF00E5FF).copy(alpha = 0.22f * siriGlowBreath),
                         1.0f to Color.Transparent
                     ),
                     topLeft = Offset(0f, 0f),
                     size = Size(w, size.height)
                 )
-                // Soft outer ribbon (9dp)
+                // Soft outer ribbon (11dp)
                 drawLine(
                     brush = softHaloBrush,
                     start = Offset(0f, centerY),
                     end = Offset(w, centerY),
-                    strokeWidth = 9.dp.toPx(),
+                    strokeWidth = 11.dp.toPx(),
                     cap = StrokeCap.Butt
                 )
-                // Mid chromatic bloom (4.5dp)
+                // Mid chromatic bloom (5dp)
                 drawLine(
                     brush = midBloomBrush,
                     start = Offset(0f, centerY),
                     end = Offset(w, centerY),
-                    strokeWidth = 4.5.dp.toPx(),
+                    strokeWidth = 5.dp.toPx(),
                     cap = StrokeCap.Butt
                 )
-                // Crisp iridescent plasma core (2.2dp)
+                // Crisp iridescent plasma core (2.4dp)
                 drawLine(
                     brush = flowBrush,
                     start = Offset(0f, centerY),
                     end = Offset(w, centerY),
-                    strokeWidth = 2.2.dp.toPx(),
+                    strokeWidth = 2.4.dp.toPx(),
                     cap = StrokeCap.Butt
                 )
-                // Razor-thin specular white-hot filament (0.8dp)
+                // Razor-thin specular white-hot filament (1.0dp)
                 val filamentX = (siriFlowPhase * 1.4f - 0.2f) * w
                 drawLine(
                     brush = Brush.horizontalGradient(
                         0.0f to Color.Transparent,
-                        0.5f to Color.White.copy(alpha = 0.85f * siriGlowBreath),
+                        0.5f to Color.White.copy(alpha = 0.92f * siriGlowBreath),
                         1.0f to Color.Transparent,
-                        startX = filamentX - w * 0.22f,
-                        endX = filamentX + w * 0.22f
+                        startX = filamentX - w * 0.24f,
+                        endX = filamentX + w * 0.24f
                     ),
                     start = Offset(0f, centerY),
                     end = Offset(w, centerY),
-                    strokeWidth = 0.9.dp.toPx(),
+                    strokeWidth = 1.dp.toPx(),
                     cap = StrokeCap.Round
                 )
             } else {

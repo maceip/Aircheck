@@ -118,7 +118,7 @@ fun TactileDraftingDeckScreen(
     val interceptBack = uiState.isSessionSwitcherOpen ||
         stage != Stage.SEED ||
         doc.seedTranscript.isNotBlank() ||
-        uiState.isBusy
+        uiState.isThinkingActive
     BackHandler(enabled = interceptBack) {
         when {
             uiState.isSessionSwitcherOpen -> viewModel.setSessionSwitcherOpen(false)
@@ -429,7 +429,7 @@ fun TactileDraftingDeckScreen(
                 active = stage == Stage.CUT && !uiState.rawKeyboardMode,
                 currentDeltaPercent = uiState.densityDeltaPercent,
                 isApplying = uiState.isBusy && uiState.densityDeltaPercent != 0,
-                isThinking = uiState.isBusy,
+                isThinking = uiState.isThinkingActive,
                 onDeltaPreview = viewModel::previewDensityDelta,
                 onDeltaCommit = viewModel::commitDensityScrub
             )
