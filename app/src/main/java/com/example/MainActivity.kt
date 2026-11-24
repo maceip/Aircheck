@@ -30,7 +30,9 @@ import com.example.ui.StudioViewModel
 import com.example.ui.draft.DraftDeckViewModel
 import com.example.ui.draft.TactileDraftingDeckScreen
 import com.example.ui.screens.ClipReviewScreen
+import com.example.ui.screens.NewsroomStudioScreen
 import com.example.ui.screens.SystemDeckSheet
+import com.example.ui.screens.VoiceModelCareScreen
 import com.example.ui.theme.AircheckTheme
 import com.example.ui.theme.OledVoid
 
@@ -110,6 +112,8 @@ fun AircheckApp(
     val context = LocalContext.current
 
     var showSettingsModal by rememberSaveable { mutableStateOf(false) }
+    var showVoiceModelCareModal by rememberSaveable { mutableStateOf(false) }
+    var showNewsroomStudioModal by rememberSaveable { mutableStateOf(false) }
     var activeReviewClipId by rememberSaveable { mutableStateOf<String?>(null) }
 
     LaunchedEffect(studioState.pendingShareIntent) {
@@ -137,6 +141,35 @@ fun AircheckApp(
                 .background(OledVoid)
         ) {
             when {
+                showVoiceModelCareModal -> {
+                    VoiceModelCareScreen(
+                        uiState = studioState,
+                        onTogglePhoneOnlyMode = studioViewModel::setPhoneOnlyVoiceMode,
+                        onVerifyFiles = {
+                            studioViewModel.refreshVoiceModelCare(verifyChecksums = true)
+                        },
+                        onStartRecordSample = studioViewModel::startVoiceCareSampleRecording,
+                        onStopRecordSample = studioViewModel::stopVoiceCareSampleRecording,
+                        onDeleteSample = studioViewModel::deleteVoiceCareSample,
+                        onImportModelUri = studioViewModel::importLocalVoiceModelUri,
+                        onRunQualityCheck = studioViewModel::runOnPhoneVoiceQualityCheck,
+                        onBack = { showVoiceModelCareModal = false }
+                    )
+                }
+
+                showNewsroomStudioModal -> {
+                    NewsroomStudioScreen(
+                        uiState = studioState,
+                        a2uiController = studioViewModel.a2uiController,
+                        onBack = { showNewsroomStudioModal = false },
+                        onOpenClip = { clipId ->
+                            showNewsroomStudioModal = false
+                            showSettingsModal = false
+                            activeReviewClipId = clipId
+                        }
+                    )
+                }
+
                 showSettingsModal -> {
                     SystemDeckSheet(
                         uiState = studioState,
@@ -144,11 +177,20 @@ fun AircheckApp(
                         onClearCasCache = studioViewModel::clearCasCache,
                         onSaveTailscaleRigUrl = { url ->
                             studioViewModel.saveTailscaleRigUrl(url)
-                            draftViewModel.probeRigHealth()
+                            if (!studioState.settings.phoneOnlyVoiceMode) {
+                                draftViewModel.probeRigHealth()
+                            }
                         },
                         onTestRigConnection = { url ->
                             studioViewModel.testMacRigConnection(url)
                             draftViewModel.probeRigHealth()
+                        },
+                        onOpenVoiceModelCare = {
+                            studioViewModel.refreshVoiceModelCare(verifyChecksums = false)
+                            showVoiceModelCareModal = true
+                        },
+                        onOpenNewsroomStudio = {
+                            showNewsroomStudioModal = true
                         },
                         onClose = { showSettingsModal = false }
                     )

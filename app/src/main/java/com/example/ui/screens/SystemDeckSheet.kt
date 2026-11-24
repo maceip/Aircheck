@@ -77,6 +77,8 @@ fun SystemDeckSheet(
     onClose: () -> Unit,
     onSaveTailscaleRigUrl: (String) -> Unit,
     onTestRigConnection: (String) -> Unit,
+    onOpenVoiceModelCare: () -> Unit = {},
+    onOpenNewsroomStudio: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
@@ -145,6 +147,52 @@ fun SystemDeckSheet(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            // Dedicated Phone-Only Voice Model Care Page
+            item(key = "voice_model_care_entry") {
+                StudioCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenVoiceModelCare)
+                        .testTag("open_voice_model_care_button")
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "Voice Model Care & Location",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = StudioCrisp
+                        )
+                        Text(
+                            text = "Phone-only lock, local LoRA upgrades & quality check",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TelemetryMuted
+                        )
+                    }
+                }
+            }
+
+            // Dedicated Newsroom & Jetpack A2UI Video Overlay Studio Page
+            item(key = "newsroom_studio_entry") {
+                StudioCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenNewsroomStudio)
+                        .testTag("open_newsroom_studio_button")
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "Newsroom & Overlay Studio",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = StudioCrisp
+                        )
+                        Text(
+                            text = "Jetpack A2UI cue sheet, Remotion pop-ups & B-roll",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TelemetryMuted
+                        )
+                    }
+                }
+            }
+
             // 1. Studio Server Connection
             item(key = "studio_server_card") {
                 StudioCard(modifier = Modifier.fillMaxWidth()) {

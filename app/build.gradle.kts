@@ -153,7 +153,6 @@ dependencies {
   implementation(libs.androidx.appsearch)
   implementation(libs.androidx.appsearch.local.storage)
   implementation(libs.androidx.appsearch.platform.storage)
-  ksp(libs.androidx.appsearch.compiler)
   implementation(libs.mlkit.genai.agent)
   implementation(libs.mlkit.genai.prompt)
   implementation(libs.mlkit.genai.schema)

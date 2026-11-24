@@ -97,7 +97,11 @@ class DirectMacRigGateway(
             bundleVersion = json.optNullableString("bundle_version"),
             pendingPreferences = json.optInt("pending_preferences", 0),
             renderBridgeAvailable = json.optBoolean("render_bridge", false),
-            activeRenderJobs = json.optInt("active_render_jobs", 0)
+            activeRenderJobs = json.optInt("active_render_jobs", 0),
+            remotionWorkerPresent = json.optBoolean("remotion_worker_present", false),
+            remotionEnabled = json.optBoolean("remotion_enabled", false),
+            remotionRendersCompleted = json.optInt("remotion_renders_completed", 0),
+            remotionVersion = json.optNullableString("remotion_version")
         )
     }
 
@@ -305,6 +309,49 @@ class DirectMacRigGateway(
                 if (tmpFile.exists()) tmpFile.delete()
             }
         }
+
+    override suspend fun requestRemotionInstall(
+        rigBaseUrl: String,
+        userRequest: String,
+        enableBrollPopups: Boolean
+    ): RemotionInstallResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val cleanRequest = userRequest.trim()
+        require(cleanRequest.isNotEmpty()) { "Enter a request describing how you want Remotion configured." }
+
+        val payload = JSONObject()
+            .put("user_request", cleanRequest)
+            .put("enable_broll_popups", enableBrollPopups)
+
+        val req = Request.Builder()
+            .url("$baseUrl/v1/remotion/install")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = extractErrorDetail(bodyStr)
+                throw IllegalStateException(
+                    "Remotion setup failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                )
+            }
+            if (bodyStr.isBlank()) {
+                throw IllegalStateException("Server /v1/remotion/install returned an empty response.")
+            }
+            bodyStr
+        }
+        val json = JSONObject(rawBody)
+        RemotionInstallResult(
+            installed = json.optBoolean("remotion_enabled", false) ||
+                json.optBoolean("remotion_installed", false) ||
+                json.optString("status") == "installed",
+            remotionVersion = json.optNullableString("remotion_version"),
+            packageProviderId = json.optNullableString("package_provider_id") ?: "mac_rig_remotion",
+            userRequest = json.optNullableString("user_request") ?: cleanRequest,
+            enableBrollPopups = json.optBoolean("enable_broll_popups", enableBrollPopups)
+        )
+    }
 
     private fun resolveAbsoluteUrl(baseUrl: String, path: String): String = when {
         path.startsWith("http://") || path.startsWith("https://") -> path

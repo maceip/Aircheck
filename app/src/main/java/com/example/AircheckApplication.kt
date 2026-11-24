@@ -23,6 +23,7 @@ import com.example.draft.VadAudioCaptureEngine
 import com.example.engine.AircheckPlayerController
 import com.example.engine.AircheckProfilingCoordinator
 import com.example.engine.ClipExporter
+import com.example.engine.VoiceModelCareManager
 import com.example.graph.GraphAppSearchIndexer
 import com.example.graph.GraphRadarEngine
 import com.example.graph.LocalGraphDatabase
@@ -113,6 +114,9 @@ class AircheckContainer(context: Context) {
     val agentOrchestrator: AircheckAgentOrchestrator by lazy {
         AircheckAgentOrchestrator(appContext)
     }
+    val voiceModelCareManager: VoiceModelCareManager by lazy {
+        VoiceModelCareManager(appContext, otaBundleSyncManager)
+    }
 
     fun bindVoiceStudioRuntime() {
         VoiceStudioRuntimeRegistry.otaBundleSyncManager = otaBundleSyncManager
@@ -145,12 +149,16 @@ class AircheckApplication : Application(), SingletonImageLoader.Factory {
         container.appScope.launch {
             container.profilingCoordinator.registerDefaultTriggers()
             container.profileStore.preload()
-            val rigUrl = runCatching { container.profileStore.current().tailscaleRigUrl }
-                .getOrDefault(DEFAULT_MAC_RIG_LAN_URL)
-            container.otaBundleSyncManager.refreshLocalState(rigUrl)
-            val rigOnline = runCatching {
-                container.macRigGateway.resolveAndCheckHealth(rigUrl)
-            }.isSuccess
+            val settings = runCatching { container.profileStore.current() }.getOrNull()
+            val phoneOnlyVoice = settings?.phoneOnlyVoiceMode ?: true
+            // Scan local on-phone storage ONLY (zero network sync!).
+            container.otaBundleSyncManager.refreshLocalState("")
+            val rigOnline = if (phoneOnlyVoice) {
+                false
+            } else {
+                val rigUrl = settings?.tailscaleRigUrl ?: DEFAULT_MAC_RIG_LAN_URL
+                runCatching { container.macRigGateway.resolveAndCheckHealth(rigUrl) }.isSuccess
+            }
             val bundleReady = container.otaBundleSyncManager.bundleState.value.status == OtaBundleStatus.READY
             AppFunctionAvailabilitySync.syncDynamicFunctionStates(
                 context = this@AircheckApplication,

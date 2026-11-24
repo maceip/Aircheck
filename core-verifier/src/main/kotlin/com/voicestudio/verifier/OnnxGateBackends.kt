@@ -117,6 +117,20 @@ class OrtWeSpeakerEngine private constructor(
             val session = createAcceleratedOrtSession(env, modelFile, preferHardwareAccelerator)
             OrtWeSpeakerEngine(env, session)
         }
+
+        fun cosineWithSharedEnvironment(
+            modelFile: File,
+            centroidFile: File,
+            pcm44k: FloatArray,
+            preferHardwareAccelerator: Boolean = true
+        ): Result<Float> = runCatching {
+            val centroid = AudioDspMetrics.loadMasterCentroid(centroidFile).getOrThrow()
+            val env = OrtEnvironment.getEnvironment()
+            create(env, modelFile, preferHardwareAccelerator).getOrThrow().use { engine ->
+                val emb = engine.extractEmbedding(pcm44k).getOrThrow()
+                AudioDspMetrics.cosineSimilarity(emb, centroid)
+            }
+        }
     }
 }
 
@@ -293,6 +307,17 @@ class OrtDnsmosP808Engine private constructor(
             }
             val session = createAcceleratedOrtSession(env, modelFile, preferHardwareAccelerator)
             OrtDnsmosP808Engine(env, session)
+        }
+
+        fun scoreWithSharedEnvironment(
+            modelFile: File,
+            pcm44k: FloatArray,
+            preferHardwareAccelerator: Boolean = true
+        ): Result<Float> = runCatching {
+            val env = OrtEnvironment.getEnvironment()
+            create(env, modelFile, preferHardwareAccelerator).getOrThrow().use { engine ->
+                engine.scoreAudio(pcm44k).getOrThrow()
+            }
         }
     }
 }

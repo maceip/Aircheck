@@ -5,6 +5,7 @@ import androidx.appsearch.annotation.Document
 import androidx.appsearch.app.AppSearchSchema
 import androidx.appsearch.app.AppSearchSession
 import androidx.appsearch.app.EmbeddingVector
+import androidx.appsearch.app.GenericDocument
 import androidx.appsearch.app.PutDocumentsRequest
 import androidx.appsearch.app.SearchSpec
 import androidx.appsearch.app.SetSchemaRequest
@@ -16,7 +17,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * AppSearch document schema for local X/Twitter archive posts indexed on Android 17+ with
+ * AppSearch document model for local X/Twitter archive posts indexed on Android 17+ with
  * 128-dimensional L2-normalized [EmbeddingVector] cosine similarity + full-text BM25 prefix match.
  */
 @Document(name = "AircheckGraphPost")
@@ -45,6 +46,7 @@ data class AircheckGraphPostDocument(
     val embedding: EmbeddingVector
 ) {
     companion object {
+        const val SCHEMA_TYPE_POST: String = "AircheckGraphPost"
         const val NAMESPACE_GRAPH: String = "aircheck_graph"
         const val EMBEDDING_MODEL_SIG: String = "aircheck_lexical_v1_128d"
     }
@@ -53,9 +55,9 @@ data class AircheckGraphPostDocument(
 /**
  * Android 17 platform `AppSearch` vector & lexical indexer for Stage 4 Network Graph Radar posts.
  *
- * Uses Android's `PlatformStorage` when running on a real Android 17+ device and automatically
- * falls back to `LocalStorage` inside headless Robolectric unit tests where system `AppSearchManager`
- * IPC is absent. Never fabricates or pre-seeds posts.
+ * Registers an explicit [AppSearchSchema] and writes [GenericDocument] instances directly (zero
+ * reflection, R8-safe without KAPT), using Android's `PlatformStorage` on real Android 17+ devices
+ * and falling back to `LocalStorage` in headless unit tests. Never fabricates or pre-seeds posts.
  */
 class GraphAppSearchIndexer(
     context: Context,
@@ -71,7 +73,7 @@ class GraphAppSearchIndexer(
         activeSession?.let { return@withLock it }
         val opened = openSessionInternal()
         val schemaReq = SetSchemaRequest.Builder()
-            .addDocumentClasses(AircheckGraphPostDocument::class.java)
+            .addSchemas(GRAPH_POST_SCHEMA)
             .setForceOverride(true)
             .build()
         opened.setSchemaAsync(schemaReq).get()
@@ -97,13 +99,13 @@ class GraphAppSearchIndexer(
 
     suspend fun indexPosts(posts: List<GraphPostRecord>): Int = withContext(Dispatchers.IO) {
         if (posts.isEmpty()) return@withContext 0
-        val docs = buildDocuments(posts)
+        val genericDocs = buildGenericDocuments(posts)
         val session = runCatching { getOrOpenSession() }.getOrElse { err ->
             if (isHostJvmMissingNativeIcing(err)) return@withContext 0
             throw err
         }
         val putReq = PutDocumentsRequest.Builder()
-            .addDocuments(docs)
+            .addGenericDocuments(genericDocs)
             .build()
         val batchResult = session.putAsync(putReq).get()
         batchResult.successes.size
@@ -125,8 +127,10 @@ class GraphAppSearchIndexer(
         )
         val spec = SearchSpec.Builder()
             .addFilterNamespaces(AircheckGraphPostDocument.NAMESPACE_GRAPH)
+            .addFilterSchemas(AircheckGraphPostDocument.SCHEMA_TYPE_POST)
             .addEmbeddingParameters(queryVec)
             .setDefaultEmbeddingSearchMetricType(SearchSpec.EMBEDDING_SEARCH_METRIC_TYPE_COSINE)
+            .setListFilterQueryLanguageEnabled(true)
             .setResultCountPerPage(limit.coerceIn(1, 50))
             .build()
 
@@ -137,13 +141,13 @@ class GraphAppSearchIndexer(
             val page = results.nextPageAsync.get()
             page.mapNotNull { sr ->
                 runCatching {
-                    val doc = sr.genericDocument.toDocumentClass(AircheckGraphPostDocument::class.java)
+                    val doc = sr.genericDocument
                     GraphPostRecord(
                         tweetId = doc.id,
-                        handle = doc.handle,
-                        text = doc.text,
-                        createdAtEpochMs = doc.createdAtEpochMs,
-                        isReplyToUser = doc.isReplyToUser
+                        handle = doc.getPropertyString("handle").orEmpty(),
+                        text = doc.getPropertyString("text").orEmpty(),
+                        createdAtEpochMs = doc.getPropertyLong("createdAtEpochMs"),
+                        isReplyToUser = doc.getPropertyBoolean("isReplyToUser")
                     )
                 }.getOrNull()
             }
@@ -158,6 +162,41 @@ class GraphAppSearchIndexer(
     companion object {
         const val DEFAULT_DB_NAME: String = "aircheck_graph_appsearch"
 
+        val GRAPH_POST_SCHEMA: AppSearchSchema = AppSearchSchema.Builder(
+            AircheckGraphPostDocument.SCHEMA_TYPE_POST
+        )
+            .addProperty(
+                AppSearchSchema.StringPropertyConfig.Builder("handle")
+                    .setCardinality(AppSearchSchema.PropertyConfig.CARDINALITY_OPTIONAL)
+                    .setIndexingType(AppSearchSchema.StringPropertyConfig.INDEXING_TYPE_PREFIXES)
+                    .setTokenizerType(AppSearchSchema.StringPropertyConfig.TOKENIZER_TYPE_PLAIN)
+                    .build()
+            )
+            .addProperty(
+                AppSearchSchema.StringPropertyConfig.Builder("text")
+                    .setCardinality(AppSearchSchema.PropertyConfig.CARDINALITY_OPTIONAL)
+                    .setIndexingType(AppSearchSchema.StringPropertyConfig.INDEXING_TYPE_PREFIXES)
+                    .setTokenizerType(AppSearchSchema.StringPropertyConfig.TOKENIZER_TYPE_PLAIN)
+                    .build()
+            )
+            .addProperty(
+                AppSearchSchema.LongPropertyConfig.Builder("createdAtEpochMs")
+                    .setCardinality(AppSearchSchema.PropertyConfig.CARDINALITY_OPTIONAL)
+                    .build()
+            )
+            .addProperty(
+                AppSearchSchema.BooleanPropertyConfig.Builder("isReplyToUser")
+                    .setCardinality(AppSearchSchema.PropertyConfig.CARDINALITY_OPTIONAL)
+                    .build()
+            )
+            .addProperty(
+                AppSearchSchema.EmbeddingPropertyConfig.Builder("embedding")
+                    .setCardinality(AppSearchSchema.PropertyConfig.CARDINALITY_OPTIONAL)
+                    .setIndexingType(AppSearchSchema.EmbeddingPropertyConfig.INDEXING_TYPE_SIMILARITY)
+                    .build()
+            )
+            .build()
+
         fun buildDocuments(posts: List<GraphPostRecord>): List<AircheckGraphPostDocument> =
             posts.map { post ->
                 val vec = LocalVectorEmbedder.embed(post.text)
@@ -169,6 +208,22 @@ class GraphAppSearchIndexer(
                     isReplyToUser = post.isReplyToUser,
                     embedding = EmbeddingVector(vec, AircheckGraphPostDocument.EMBEDDING_MODEL_SIG)
                 )
+            }
+
+        fun buildGenericDocuments(posts: List<GraphPostRecord>): List<GenericDocument> =
+            buildDocuments(posts).map { doc ->
+                GenericDocument.Builder<GenericDocument.Builder<*>>(
+                    doc.namespace,
+                    doc.id,
+                    AircheckGraphPostDocument.SCHEMA_TYPE_POST
+                )
+                    .setCreationTimestampMillis(doc.createdAtEpochMs.coerceAtLeast(0L))
+                    .setPropertyString("handle", doc.handle)
+                    .setPropertyString("text", doc.text)
+                    .setPropertyLong("createdAtEpochMs", doc.createdAtEpochMs)
+                    .setPropertyBoolean("isReplyToUser", doc.isReplyToUser)
+                    .setPropertyEmbedding("embedding", doc.embedding)
+                    .build()
             }
 
         private fun isHostJvmMissingNativeIcing(err: Throwable): Boolean {

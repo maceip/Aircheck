@@ -58,7 +58,11 @@ data class AircheckProfileProto(
     @ProtoNumber(18) val trainingStatus: String = "",
     @ProtoNumber(19) val trainingError: String = "",
     @ProtoNumber(20) val fcmToken: String = "",
-    @ProtoNumber(21) val tailscaleRigUrl: String = DEFAULT_MAC_RIG_LAN_URL
+    @ProtoNumber(21) val tailscaleRigUrl: String = DEFAULT_MAC_RIG_LAN_URL,
+    @ProtoNumber(22) val remotionUsedCount: Int = 0,
+    @ProtoNumber(23) val remotionInstallRequested: Boolean = false,
+    @ProtoNumber(24) val remotionInstallNote: String = "",
+    @ProtoNumber(25) val phoneOnlyVoiceMode: Boolean = true
 )
 
 data class StudioSettings(
@@ -69,7 +73,11 @@ data class StudioSettings(
     val persona: PersonaProfile = PersonaProfile(),
     val providers: StageProviderSettings = StageProviderSettings(),
     val fcmToken: String = "",
-    val tailscaleRigUrl: String = DEFAULT_MAC_RIG_LAN_URL
+    val tailscaleRigUrl: String = DEFAULT_MAC_RIG_LAN_URL,
+    val remotionUsedCount: Int = 0,
+    val remotionInstallRequested: Boolean = false,
+    val remotionInstallNote: String = "",
+    val phoneOnlyVoiceMode: Boolean = true
 )
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -128,6 +136,43 @@ class AircheckProfileStore(
         dataStore.updateData { it.copy(tailscaleRigUrl = url.trim()) }
     }
 
+    suspend fun setPhoneOnlyVoiceMode(enabled: Boolean) {
+        dataStore.updateData {
+            it.copy(
+                phoneOnlyVoiceMode = enabled,
+                useLanVoice = !enabled
+            )
+        }
+    }
+
+    suspend fun recordRemotionInstallRequest(
+        userNote: String,
+        installedOnRig: Boolean
+    ) {
+        val cleanNote = userNote.trim()
+        dataStore.updateData { current ->
+            current.copy(
+                remotionInstallRequested = true,
+                remotionInstallNote = cleanNote,
+                packageProviderId = if (installedOnRig) "mac_rig_remotion" else current.packageProviderId,
+                remotionUsedCount = if (installedOnRig) {
+                    (current.remotionUsedCount + 1).coerceAtLeast(1)
+                } else {
+                    current.remotionUsedCount
+                }
+            )
+        }
+    }
+
+    suspend fun incrementRemotionUsedCount() {
+        dataStore.updateData { current ->
+            current.copy(
+                remotionUsedCount = current.remotionUsedCount + 1,
+                packageProviderId = "mac_rig_remotion"
+            )
+        }
+    }
+
     private fun AircheckProfileProto.toDomain(): StudioSettings = StudioSettings(
         brandChannel = BrandChannel.fromRaw(brandChannel),
         voiceSource = VoiceSource.fromRaw(voiceSource),
@@ -153,6 +198,10 @@ class AircheckProfileStore(
             useLanPackage = useLanPackage
         ),
         fcmToken = fcmToken,
-        tailscaleRigUrl = tailscaleRigUrl.ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+        tailscaleRigUrl = tailscaleRigUrl.ifBlank { DEFAULT_MAC_RIG_LAN_URL },
+        remotionUsedCount = remotionUsedCount.coerceAtLeast(0),
+        remotionInstallRequested = remotionInstallRequested,
+        remotionInstallNote = remotionInstallNote,
+        phoneOnlyVoiceMode = phoneOnlyVoiceMode
     )
 }

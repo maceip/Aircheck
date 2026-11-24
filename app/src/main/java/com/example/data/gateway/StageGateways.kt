@@ -17,7 +17,19 @@ data class MacRigHealthResult(
     val bundleVersion: String?,
     val pendingPreferences: Int,
     val renderBridgeAvailable: Boolean,
-    val activeRenderJobs: Int
+    val activeRenderJobs: Int,
+    val remotionWorkerPresent: Boolean = false,
+    val remotionEnabled: Boolean = false,
+    val remotionRendersCompleted: Int = 0,
+    val remotionVersion: String? = null
+)
+
+data class RemotionInstallResult(
+    val installed: Boolean,
+    val remotionVersion: String?,
+    val packageProviderId: String,
+    val userRequest: String,
+    val enableBrollPopups: Boolean
 )
 
 data class MacRigJobSnapshot(
@@ -61,4 +73,10 @@ interface MacRigRenderGateway {
     suspend fun pollMacRigJob(rigBaseUrl: String, jobId: String): MacRigJobSnapshot
 
     suspend fun downloadRenderedMp4ToCas(videoUrl: String): CasStoredAsset
+
+    suspend fun requestRemotionInstall(
+        rigBaseUrl: String,
+        userRequest: String,
+        enableBrollPopups: Boolean = true
+    ): RemotionInstallResult
 }

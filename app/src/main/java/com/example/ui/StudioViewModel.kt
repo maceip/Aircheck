@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Intent
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.AircheckApplication
@@ -21,8 +22,14 @@ import com.example.data.local.CasMediaStore
 import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.data.local.StudioSettings
 import com.example.engine.AircheckPlayerController
+import com.example.engine.VoiceModelCareManager
+import com.example.engine.VoiceQualityReport
+import com.example.engine.VoiceStorageSnapshot
+import com.example.ui.a2ui.AircheckA2uiController
+import com.example.ui.a2ui.NewsroomA2uiAction
 import com.voicestudio.edl.OtaBundleState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -34,6 +41,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.File
 
 enum class RigConnectionStatus {
     IDLE,
@@ -66,8 +74,19 @@ data class StudioUiState(
     val errorMessage: String? = null,
     val statusNotice: String? = null,
     val otaBundleState: OtaBundleState = OtaBundleState(),
-    val rigHealth: RigHealthUiState = RigHealthUiState()
-)
+    val rigHealth: RigHealthUiState = RigHealthUiState(),
+    val voiceStorageSnapshot: VoiceStorageSnapshot? = null,
+    val voiceQualityReport: VoiceQualityReport? = null,
+    val isCheckingVoiceQuality: Boolean = false,
+    val isVerifyingVoiceFiles: Boolean = false,
+    val isRecordingVoiceCareSample: Boolean = false,
+    val isInstallingRemotion: Boolean = false,
+    val remotionStatusMessage: String = "Remotion has not been used yet."
+) {
+    val isRemotionUnused: Boolean
+        get() = settings.remotionUsedCount <= 0 &&
+            settings.providers.packageProviderId != "mac_rig_remotion"
+}
 
 class StudioViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -79,19 +98,59 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val clipExporter = container.clipExporter
     private val macRigGateway = container.macRigGateway
     private val otaBundleSyncManager = container.otaBundleSyncManager
+    val voiceModelCareManager: VoiceModelCareManager = container.voiceModelCareManager
+    private val vadAudioEngine = container.vadAudioEngine
 
     private val _uiState = MutableStateFlow(StudioUiState())
     val uiState: StateFlow<StudioUiState> = _uiState.asStateFlow()
+
+    val a2uiController: AircheckA2uiController = AircheckA2uiController(
+        context = application,
+        scope = viewModelScope,
+        onAction = ::handleNewsroomA2uiAction
+    )
 
     private var rigHealthCheckJob: Job? = null
     private val macRigPollingJobs = mutableMapOf<String, Job>()
     private val scriptSaveMutex = Mutex()
     private var initializedProject = false
+    private var didInitialAutoHealthCheck = false
 
     init {
+        a2uiController.syncNewsroomSurface(
+            remotionUnused = true,
+            statusMessage = _uiState.value.remotionStatusMessage
+        )
+
         viewModelScope.launch {
             profileStore.settingsFlow.collect { settings ->
-                _uiState.update { it.copy(settings = settings) }
+                val remotionUnused = settings.remotionUsedCount <= 0 &&
+                    settings.providers.packageProviderId != "mac_rig_remotion"
+                val nextRemotionMsg = when {
+                    !remotionUnused -> "Remotion enabled (${settings.remotionUsedCount} uses)."
+                    settings.remotionInstallRequested -> "Install requested (${settings.remotionInstallNote}); waiting on studio rig."
+                    else -> "Remotion has not been used yet."
+                }
+                _uiState.update {
+                    it.copy(
+                        settings = settings,
+                        remotionStatusMessage = nextRemotionMsg
+                    )
+                }
+                val activeProj = _uiState.value.activeProject
+                a2uiController.syncNewsroomSurface(
+                    remotionUnused = remotionUnused,
+                    statusMessage = nextRemotionMsg,
+                    defaultHeadline = activeProj.stageConfig.chyronHeadline.ifBlank { activeProj.title },
+                    defaultSubline = activeProj.stageConfig.chyronSubline.ifBlank { "AIRCHECK LIVE DESK" },
+                    defaultScript = activeProj.ideaSpark
+                )
+                if (!didInitialAutoHealthCheck) {
+                    didInitialAutoHealthCheck = true
+                    if (!settings.phoneOnlyVoiceMode) {
+                        testMacRigConnection(settings.tailscaleRigUrl)
+                    }
+                }
             }
         }
 
@@ -144,7 +203,328 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
-        testMacRigConnection()
+        refreshVoiceModelCare(verifyChecksums = false)
+    }
+
+    private fun handleNewsroomA2uiAction(action: NewsroomA2uiAction) {
+        when (action) {
+            is NewsroomA2uiAction.AskInstallRemotion -> {
+                requestRemotionInstall(
+                    userRequest = action.userPrompt,
+                    enableBrollPopups = action.enableBrollPopups
+                )
+            }
+
+            is NewsroomA2uiAction.GenerateNewsroomOverlayClip -> {
+                generateNewsroomClipFromOverlay(
+                    headline = action.chyronHeadline,
+                    subline = action.chyronSubline,
+                    scriptText = action.spokenScript
+                )
+            }
+        }
+    }
+
+    fun requestRemotionInstall(
+        userRequest: String,
+        enableBrollPopups: Boolean = true
+    ) {
+        val cleanPrompt = userRequest.trim().ifBlank {
+            AircheckA2uiController.DEFAULT_REMOTION_INSTALL_PROMPT
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update {
+                it.copy(
+                    isInstallingRemotion = true,
+                    errorMessage = null,
+                    remotionStatusMessage = "Requesting Remotion setup…"
+                )
+            }
+            a2uiController.syncNewsroomSurface(
+                remotionUnused = _uiState.value.isRemotionUnused,
+                statusMessage = "Requesting Remotion setup…"
+            )
+            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+            val result = runCatching {
+                macRigGateway.requestRemotionInstall(
+                    rigBaseUrl = rigUrl,
+                    userRequest = cleanPrompt,
+                    enableBrollPopups = enableBrollPopups
+                )
+            }
+            result.onSuccess { res ->
+                profileStore.recordRemotionInstallRequest(
+                    userNote = cleanPrompt,
+                    installedOnRig = res.installed
+                )
+                val updatedSettings = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+                val statusMsg = if (res.installed) {
+                    "Remotion ${res.remotionVersion ?: "ready"} installed for speaking pop-ups & B-roll."
+                } else {
+                    "Remotion install request recorded; Remotion worker not yet installed on rig."
+                }
+                _uiState.update {
+                    it.copy(
+                        settings = updatedSettings,
+                        isInstallingRemotion = false,
+                        statusNotice = statusMsg,
+                        remotionStatusMessage = statusMsg
+                    )
+                }
+                val activeProj = _uiState.value.activeProject
+                a2uiController.syncNewsroomSurface(
+                    remotionUnused = !res.installed,
+                    statusMessage = statusMsg,
+                    defaultHeadline = activeProj.stageConfig.chyronHeadline.ifBlank { activeProj.title },
+                    defaultSubline = activeProj.stageConfig.chyronSubline.ifBlank { "AIRCHECK LIVE DESK" },
+                    defaultScript = activeProj.ideaSpark
+                )
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                profileStore.recordRemotionInstallRequest(
+                    userNote = cleanPrompt,
+                    installedOnRig = false
+                )
+                val updatedSettings = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+                val honestMsg = "Install request saved on phone; studio server unreachable (${err.localizedMessage ?: "offline"})."
+                _uiState.update {
+                    it.copy(
+                        settings = updatedSettings,
+                        isInstallingRemotion = false,
+                        errorMessage = honestMsg,
+                        remotionStatusMessage = honestMsg
+                    )
+                }
+                a2uiController.syncNewsroomSurface(
+                    remotionUnused = true,
+                    statusMessage = honestMsg
+                )
+            }
+        }
+    }
+
+    fun generateNewsroomClipFromOverlay(
+        headline: String,
+        subline: String,
+        scriptText: String
+    ) {
+        val cleanScript = scriptText.trim().ifBlank {
+            _uiState.value.activeProject.ideaSpark.trim()
+        }
+        if (cleanScript.isBlank()) {
+            _uiState.update {
+                it.copy(errorMessage = "Enter spoken newsroom copy before generating a clip.")
+            }
+            return
+        }
+        val cleanSubline = subline.trim().ifBlank { "AIRCHECK LIVE DESK" }
+        val project = _uiState.value.activeProject
+        persistProject(
+            project.copy(
+                stageConfig = project.stageConfig.copy(
+                    chyronSubline = cleanSubline
+                )
+            )
+        )
+        viewModelScope.launch {
+            profileStore.incrementRemotionUsedCount()
+        }
+        renderDraftAsBroadcastClip(
+            plainText = cleanScript,
+            headline = headline.trim()
+        )
+    }
+
+    fun setPhoneOnlyVoiceMode(enabled: Boolean) {
+        if (enabled) {
+            rigHealthCheckJob?.cancel()
+        }
+        _uiState.update { current ->
+            current.copy(
+                settings = current.settings.copy(
+                    phoneOnlyVoiceMode = enabled,
+                    providers = current.settings.providers.copy(useLanVoice = !enabled)
+                ),
+                statusNotice = if (enabled) {
+                    "Phone-only voice mode active: zero Mac voice sync."
+                } else {
+                    "Network sync unlocked."
+                }
+            )
+        }
+        container.appScope.launch {
+            profileStore.setPhoneOnlyVoiceMode(enabled)
+        }
+    }
+
+    fun refreshVoiceModelCare(verifyChecksums: Boolean = false) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (verifyChecksums) {
+                _uiState.update { it.copy(isVerifyingVoiceFiles = true, errorMessage = null) }
+            }
+            val snapshot = runCatching {
+                voiceModelCareManager.inspectLocalVoiceStorage(verifyChecksums = verifyChecksums)
+            }.getOrNull()
+            _uiState.update {
+                it.copy(
+                    voiceStorageSnapshot = snapshot ?: it.voiceStorageSnapshot,
+                    isVerifyingVoiceFiles = false,
+                    statusNotice = if (verifyChecksums && snapshot != null) {
+                        "Verified ${snapshot.presentArtifactCount}/${snapshot.totalExpectedArtifacts} on-phone voice artifacts."
+                    } else {
+                        it.statusNotice
+                    }
+                )
+            }
+        }
+    }
+
+    fun startVoiceCareSampleRecording() {
+        if (_uiState.value.isRecordingVoiceCareSample) return
+        _uiState.update { it.copy(isRecordingVoiceCareSample = true, errorMessage = null) }
+        vadAudioEngine.startMomentaryClutch(
+            scope = viewModelScope,
+            onError = { err ->
+                _uiState.update {
+                    it.copy(
+                        isRecordingVoiceCareSample = false,
+                        errorMessage = err
+                    )
+                }
+            }
+        )
+    }
+
+    fun stopVoiceCareSampleRecording() {
+        if (!_uiState.value.isRecordingVoiceCareSample) return
+        viewModelScope.launch {
+            val outFile = voiceModelCareManager.nextSampleOutputFile()
+            val saved = vadAudioEngine.stopMomentaryClutch(outFile)
+            val snapshot = voiceModelCareManager.inspectLocalVoiceStorage(verifyChecksums = false)
+            _uiState.update {
+                it.copy(
+                    isRecordingVoiceCareSample = false,
+                    voiceStorageSnapshot = snapshot,
+                    statusNotice = if (saved != null) {
+                        "Saved voice sample ${saved.name} on phone."
+                    } else {
+                        null
+                    },
+                    errorMessage = if (saved == null) {
+                        "No voiced speech detected in recording."
+                    } else {
+                        it.errorMessage
+                    }
+                )
+            }
+        }
+    }
+
+    fun addVoiceSamplePcmForCare(pcm16k: ShortArray, fileName: String? = null) {
+        viewModelScope.launch {
+            val saved = runCatching {
+                voiceModelCareManager.writeWavSampleForCare(pcm16k, fileName)
+            }
+            val snapshot = voiceModelCareManager.inspectLocalVoiceStorage(verifyChecksums = false)
+            saved.onSuccess { file ->
+                _uiState.update {
+                    it.copy(
+                        voiceStorageSnapshot = snapshot,
+                        statusNotice = "Saved ${file.name} on phone."
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        voiceStorageSnapshot = snapshot,
+                        errorMessage = err.localizedMessage ?: "Failed writing voice sample."
+                    )
+                }
+            }
+        }
+    }
+
+    fun deleteVoiceCareSample(fileName: String) {
+        viewModelScope.launch {
+            voiceModelCareManager.deleteVoiceSample(fileName)
+            val snapshot = voiceModelCareManager.inspectLocalVoiceStorage(verifyChecksums = false)
+            _uiState.update {
+                it.copy(
+                    voiceStorageSnapshot = snapshot,
+                    statusNotice = "Removed $fileName from phone."
+                )
+            }
+        }
+    }
+
+    fun importLocalVoiceModelUri(uri: Uri) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(errorMessage = null) }
+            val result = voiceModelCareManager.importLocalModelOrLoraUri(uri)
+            val snapshot = voiceModelCareManager.inspectLocalVoiceStorage(verifyChecksums = false)
+            result.onSuccess { imported ->
+                _uiState.update {
+                    it.copy(
+                        voiceStorageSnapshot = snapshot,
+                        statusNotice = "Imported ${imported.fileName} (${imported.sha256Hex.take(8)}) on phone."
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        voiceStorageSnapshot = snapshot,
+                        errorMessage = err.localizedMessage ?: "Failed importing model file."
+                    )
+                }
+            }
+        }
+    }
+
+    fun importLocalVoiceModelFile(file: File) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(errorMessage = null) }
+            val result = voiceModelCareManager.importLocalModelOrLoraFile(file)
+            val snapshot = voiceModelCareManager.inspectLocalVoiceStorage(verifyChecksums = false)
+            result.onSuccess { imported ->
+                _uiState.update {
+                    it.copy(
+                        voiceStorageSnapshot = snapshot,
+                        statusNotice = "Imported ${imported.fileName} (${imported.sha256Hex.take(8)}) on phone."
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        voiceStorageSnapshot = snapshot,
+                        errorMessage = err.localizedMessage ?: "Failed importing model file."
+                    )
+                }
+            }
+        }
+    }
+
+    fun runOnPhoneVoiceQualityCheck() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(isCheckingVoiceQuality = true, errorMessage = null) }
+            val report = runCatching { voiceModelCareManager.runOnPhoneQualityCheck() }
+            report.onSuccess { r ->
+                _uiState.update {
+                    it.copy(
+                        isCheckingVoiceQuality = false,
+                        voiceQualityReport = r,
+                        statusNotice = r.summaryMessage
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isCheckingVoiceQuality = false,
+                        errorMessage = err.localizedMessage ?: "Quality check failed."
+                    )
+                }
+            }
+        }
     }
 
     fun observeClip(clipId: String): Flow<ClipRecord?> = localRepo.observeClip(clipId)
@@ -572,7 +952,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     statusNotice = "Studio server URL saved."
                 )
             }
-            testMacRigConnection(trimmed)
+            if (!_uiState.value.settings.phoneOnlyVoiceMode) {
+                testMacRigConnection(trimmed)
+            }
         }
     }
 
