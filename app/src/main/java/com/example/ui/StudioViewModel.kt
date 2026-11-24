@@ -679,6 +679,36 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun renderDraftAsBroadcastClip(plainText: String, headline: String = "") {
+        val clean = plainText.trim()
+        if (clean.isBlank()) return
+        val effectiveHeadline = headline.trim().ifBlank {
+            clean.split('.', '!', '?').firstOrNull().orEmpty().trim().take(36).uppercase()
+        }
+        val project = _uiState.value.activeProject
+        persistProject(
+            project.copy(
+                title = effectiveHeadline.ifBlank { "BREAKING NEWS" },
+                ideaSpark = clean,
+                voiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
+                masterAudioSha = null,
+                stageConfig = project.stageConfig.copy(
+                    chyronHeadline = effectiveHeadline,
+                    chyronSubline = project.stageConfig.chyronSubline.ifBlank { "AIRCHECK LIVE DESK" },
+                    showBrandBug = true
+                ),
+                beats = listOf(
+                    ScriptBeat(
+                        index = 0,
+                        spokenText = clean,
+                        durationSec = estimateDurationSeconds(clean, 8).coerceIn(4, 15)
+                    )
+                )
+            )
+        )
+        renderActiveProject()
+    }
+
     fun renderActiveProject(pollIntervalMs: Long = MAC_RIG_POLL_INTERVAL_MS) {
         val current = _uiState.value.activeProject
         val settings = _uiState.value.settings

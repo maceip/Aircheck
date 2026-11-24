@@ -6,51 +6,27 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Snackbar
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.navigation3.runtime.NavKey
-import androidx.navigation3.runtime.entryProvider
-import androidx.navigation3.ui.NavDisplay
-import com.example.data.StudioTab
-import com.example.navigation.AircheckNavigator
-import com.example.navigation.ScreenKey
-import com.example.navigation.rememberAircheckNavigationState
-import com.example.ui.RigConnectionStatus
 import com.example.ui.StudioViewModel
-import com.example.ui.components.StudioDockBar
-import com.example.ui.components.StudioNavigationRail
-import com.example.ui.components.StudioTopBar
+import com.example.ui.draft.DraftDeckViewModel
+import com.example.ui.draft.TactileDraftingDeckScreen
 import com.example.ui.screens.ClipReviewScreen
-import com.example.ui.screens.ClipsScreen
-import com.example.ui.screens.PhotoStageScreen
-import com.example.ui.screens.ScriptScreen
 import com.example.ui.screens.SystemDeckSheet
 import com.example.ui.theme.AircheckTheme
-import com.example.ui.theme.ConsoleElevated
-import com.example.ui.theme.LocalAircheckTokens
 import com.example.ui.theme.OledVoid
-import com.example.ui.theme.StudioCrisp
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,202 +37,111 @@ class MainActivity : ComponentActivity() {
         )
 
         setContent {
-            val viewModel: StudioViewModel = viewModel()
-            AircheckApp(viewModel = viewModel)
+            val draftViewModel: DraftDeckViewModel = viewModel()
+            val studioViewModel: StudioViewModel = viewModel()
+            AircheckApp(
+                draftViewModel = draftViewModel,
+                studioViewModel = studioViewModel
+            )
         }
     }
 }
 
+/**
+ * Single non-scrolling 100% viewport height Tactile Plain-Text Drafting Engine activity.
+ * The legacy 3-tab shell (`Script` / `Photo` / `Clips`) has been completely replaced by the
+ * 4-stage fixed-viewport instrument deck (`01 SEED` · `02 PICK` · `03 CUT` · `04 SHIP`),
+ * with clean full-screen modals for Studio Settings and rendered Broadcast Clip playback.
+ */
 @Composable
-fun AircheckApp(viewModel: StudioViewModel) {
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+fun AircheckApp(
+    draftViewModel: DraftDeckViewModel,
+    studioViewModel: StudioViewModel
+) {
+    val draftState by draftViewModel.uiState.collectAsStateWithLifecycle()
+    val studioState by studioViewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val snackbarHostState = remember { SnackbarHostState() }
 
-    val navigationState = rememberAircheckNavigationState()
-    val navigator = remember(navigationState) { AircheckNavigator(navigationState) }
+    var showSettingsModal by rememberSaveable { mutableStateOf(false) }
+    var activeReviewClipId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(uiState.statusNotice) {
-        val notice = uiState.statusNotice
-        if (!notice.isNullOrBlank()) {
-            snackbarHostState.showSnackbar(notice)
-            viewModel.dismissStatusNotice()
-        }
-    }
-
-    LaunchedEffect(uiState.pendingShareIntent) {
-        val shareIntent = uiState.pendingShareIntent
+    LaunchedEffect(studioState.pendingShareIntent) {
+        val shareIntent = studioState.pendingShareIntent
         if (shareIntent != null) {
             runCatching {
                 context.startActivity(Intent.createChooser(shareIntent, "Share Aircheck"))
             }
-            viewModel.clearPendingShareIntent()
+            studioViewModel.clearPendingShareIntent()
         }
     }
 
-    LaunchedEffect(uiState.liveNavToClipId) {
-        val clipId = uiState.liveNavToClipId
+    LaunchedEffect(studioState.liveNavToClipId) {
+        val clipId = studioState.liveNavToClipId
         if (!clipId.isNullOrBlank()) {
-            navigator.openClipReview(clipId)
-            viewModel.consumeLiveNavToClip()
+            activeReviewClipId = clipId
+            studioViewModel.consumeLiveNavToClip()
         }
     }
 
-    val currentRoute = navigationState.currentRoute
-    LaunchedEffect(currentRoute) {
-        snackbarHostState.currentSnackbarData?.dismiss()
-    }
-    val isFullScreenOverlay = currentRoute is ScreenKey.SystemDeckKey
-
-    AircheckTheme(channel = uiState.settings.brandChannel) {
-        val tokens = LocalAircheckTokens.current
-
-        val entryProvider = entryProvider<NavKey> {
-            entry<ScreenKey.ScriptKey> {
-                ScriptScreen(
-                    uiState = uiState,
-                    onUpdateIdea = viewModel::updateStoryIdea,
-                    onAiFleshOutStory = viewModel::aiFleshOutStory,
-                    onUpdateBeatText = viewModel::updateBeatText,
-                    onAiPolishSegment = viewModel::aiPolishSegment,
-                    onToggleBeatMicRecord = { beatId -> viewModel.toggleMicRecording(beatId) },
-                    onTogglePreviewWav = viewModel::togglePreviewMasterWav,
-                    onClearMicTake = viewModel::clearRecordedMicTake,
-                    onAddBeat = viewModel::addBeat,
-                    onDeleteBeat = viewModel::deleteBeat,
-                    onNewStory = viewModel::createNewProject,
-                    onDismissError = viewModel::dismissError,
-                    onRender = { viewModel.renderActiveProject() }
-                )
-            }
-
-            entry<ScreenKey.PhotoStageKey> {
-                PhotoStageScreen(
-                    uiState = uiState,
-                    casStore = viewModel.casStore,
-                    onImportPhoto = viewModel::importPhoto,
-                    onUpdateStageConfig = viewModel::updateStageConfig,
-                    onAiPolishHeadline = viewModel::aiPolishHeadline,
-                    onAiPolishSubline = viewModel::aiPolishSubline,
-                    onEnqueueRender = { viewModel.renderActiveProject() },
-                    onDismissError = viewModel::dismissError
-                )
-            }
-
-            entry<ScreenKey.ClipsKey> {
-                ClipsScreen(
-                    uiState = uiState,
-                    casStore = viewModel.casStore,
-                    onOpenClip = { clipId -> navigator.openClipReview(clipId) },
-                    onRefreshClips = viewModel::refreshRemoteClips,
-                    onStartNewStory = { navigator.selectTab(StudioTab.SCRIPT) },
-                    onDismissError = viewModel::dismissError
-                )
-            }
-
-            entry<ScreenKey.ClipReviewKey> { key ->
-                val clipFlow = remember(key.clipId) { viewModel.observeClip(key.clipId) }
-                val clip by clipFlow.collectAsStateWithLifecycle(initialValue = null)
-                ClipReviewScreen(
-                    clip = clip,
-                    exportState = uiState.exportState,
-                    errorMessage = uiState.errorMessage,
-                    casStore = viewModel.casStore,
-                    playerController = viewModel.playerController,
-                    onBack = { navigator.goBack() },
-                    onExport = { targetClip, share -> viewModel.exportClip(targetClip, openShareSheet = share) },
-                    onDismissError = viewModel::dismissError
-                )
-            }
-
-            entry<ScreenKey.SystemDeckKey> {
-                SystemDeckSheet(
-                    uiState = uiState,
-                    onSelectChannel = viewModel::setBrandChannel,
-                    onClearCasCache = viewModel::clearCasCache,
-                    onPreviewAudio = viewModel::togglePreviewMasterWav,
-                    onSaveTailscaleRigUrl = viewModel::saveTailscaleRigUrl,
-                    onTestRigConnection = viewModel::testMacRigConnection,
-                    onSyncOtaBundle = viewModel::syncOtaBundleFromRig,
-                    onSyncPreferences = viewModel::syncPreferencesNow,
-                    onRefreshVmRss = viewModel::refreshVmRssTelemetry,
-                    onCreateNewProject = {
-                        viewModel.createNewProject()
-                        navigator.goBack()
-                    },
-                    onClose = { navigator.goBack() }
-                )
-            }
-        }
-
+    AircheckTheme(channel = studioState.settings.brandChannel) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(OledVoid)
         ) {
-            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                val isExpanded = maxWidth >= 600.dp
+            when {
+                showSettingsModal -> {
+                    SystemDeckSheet(
+                        uiState = studioState,
+                        onSelectChannel = studioViewModel::setBrandChannel,
+                        onClearCasCache = studioViewModel::clearCasCache,
+                        onPreviewAudio = studioViewModel::togglePreviewMasterWav,
+                        onSaveTailscaleRigUrl = { url ->
+                            studioViewModel.saveTailscaleRigUrl(url)
+                            draftViewModel.probeRigHealth()
+                        },
+                        onTestRigConnection = { url ->
+                            studioViewModel.testMacRigConnection(url)
+                            draftViewModel.probeRigHealth()
+                        },
+                        onSyncOtaBundle = studioViewModel::syncOtaBundleFromRig,
+                        onSyncPreferences = studioViewModel::syncPreferencesNow,
+                        onRefreshVmRss = studioViewModel::refreshVmRssTelemetry,
+                        onCreateNewProject = {
+                            draftViewModel.resetNewDraft()
+                            showSettingsModal = false
+                        },
+                        onClose = { showSettingsModal = false }
+                    )
+                }
 
-                Scaffold(
-                    containerColor = OledVoid,
-                    contentColor = StudioCrisp,
-                    snackbarHost = {
-                        SnackbarHost(hostState = snackbarHostState) { data ->
-                            Snackbar(
-                                snackbarData = data,
-                                containerColor = ConsoleElevated,
-                                contentColor = StudioCrisp,
-                                actionColor = tokens.channelAccent
-                            )
-                        }
-                    },
-                    topBar = {
-                        if (!isFullScreenOverlay) {
-                            StudioTopBar(
-                                title = when (navigationState.activeTab) {
-                                    StudioTab.SCRIPT -> "Aircheck"
-                                    StudioTab.PHOTO -> "News Desk"
-                                    StudioTab.CLIPS -> "Clips"
-                                },
-                                isRigOnline = uiState.rigHealth.status == RigConnectionStatus.ONLINE,
-                                onOpenSystemDeck = { navigator.navigate(ScreenKey.SystemDeckKey) }
-                            )
-                        }
-                    },
-                    bottomBar = {
-                        if (!isExpanded && !isFullScreenOverlay) {
-                            StudioDockBar(
-                                selectedTab = navigationState.activeTab,
-                                onSelectTab = navigator::selectTab
-                            )
-                        }
-                    }
-                ) { innerPadding ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding)
-                            .background(OledVoid)
-                    ) {
-                        if (isExpanded && !isFullScreenOverlay) {
-                            StudioNavigationRail(
-                                selectedTab = navigationState.activeTab,
-                                onSelectTab = navigator::selectTab
-                            )
-                        }
+                !activeReviewClipId.isNullOrBlank() -> {
+                    val clipId = activeReviewClipId!!
+                    val clipFlow = remember(clipId) { studioViewModel.observeClip(clipId) }
+                    val clip by clipFlow.collectAsStateWithLifecycle(initialValue = null)
+                    ClipReviewScreen(
+                        clip = clip,
+                        exportState = studioState.exportState,
+                        errorMessage = studioState.errorMessage,
+                        casStore = studioViewModel.casStore,
+                        playerController = studioViewModel.playerController,
+                        onBack = { activeReviewClipId = null },
+                        onExport = { targetClip, share ->
+                            studioViewModel.exportClip(targetClip, openShareSheet = share)
+                        },
+                        onDismissError = studioViewModel::dismissError
+                    )
+                }
 
-                        NavDisplay(
-                            entries = navigationState.toDecoratedEntries(entryProvider),
-                            onBack = { navigator.goBack() },
-                            transitionSpec = {
-                                fadeIn(tween(90)) togetherWith fadeOut(tween(70))
-                            },
-                            popTransitionSpec = {
-                                fadeIn(tween(90)) togetherWith fadeOut(tween(70))
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
+                else -> {
+                    TactileDraftingDeckScreen(
+                        uiState = draftState,
+                        viewModel = draftViewModel,
+                        onOpenSettings = { showSettingsModal = true },
+                        onBroadcastClip = { plainText, headline ->
+                            studioViewModel.renderDraftAsBroadcastClip(plainText, headline)
+                        }
+                    )
                 }
             }
         }
