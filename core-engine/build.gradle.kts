@@ -9,7 +9,7 @@ android {
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
-        minSdk = 26
+        minSdk = 37
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         externalNativeBuild {
@@ -43,6 +43,18 @@ android {
         }
     }
 
+    sourceSets {
+        getByName("main") {
+            val prebuiltLlamaDir = providers.gradleProperty("voicestudioAndroidLibsDir").orNull
+                ?: System.getenv("VOICESTUDIO_ANDROID_LIBS_DIR")
+                ?: "${System.getProperty("user.home")}/Downloads/voicestudio-models/android-libs"
+            val dirFile = file(prebuiltLlamaDir)
+            if (dirFile.isDirectory) {
+                jniLibs.srcDir(dirFile)
+            }
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -62,7 +74,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
 
     // LiteRT 2.3.0 CompiledModel runtime + GPU accelerator for 44.1 kHz DAC vocoder
-    implementation(libs.litert)
+    api(libs.litert)
     implementation(libs.litert.gpu)
     implementation(libs.google.oboe)
 

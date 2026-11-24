@@ -106,18 +106,16 @@ class OrtWeSpeakerEngine private constructor(
     }
 
     companion object {
-        fun create(env: OrtEnvironment, modelFile: File): Result<OrtWeSpeakerEngine> = runCatching {
+        fun create(
+            env: OrtEnvironment,
+            modelFile: File,
+            preferHardwareAccelerator: Boolean = true
+        ): Result<OrtWeSpeakerEngine> = runCatching {
             require(modelFile.isFile && modelFile.canRead() && modelFile.length() > 0L) {
                 "Missing or empty WeSpeaker ONNX model: ${modelFile.absolutePath}"
             }
-            val opts = OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(2)
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            }
-            opts.use { options ->
-                val session = env.createSession(modelFile.absolutePath, options)
-                OrtWeSpeakerEngine(env, session)
-            }
+            val session = createAcceleratedOrtSession(env, modelFile, preferHardwareAccelerator)
+            OrtWeSpeakerEngine(env, session)
         }
     }
 }
@@ -285,18 +283,16 @@ class OrtDnsmosP808Engine private constructor(
             return sized
         }
 
-        fun create(env: OrtEnvironment, modelFile: File): Result<OrtDnsmosP808Engine> = runCatching {
+        fun create(
+            env: OrtEnvironment,
+            modelFile: File,
+            preferHardwareAccelerator: Boolean = true
+        ): Result<OrtDnsmosP808Engine> = runCatching {
             require(modelFile.isFile && modelFile.canRead() && modelFile.length() > 0L) {
                 "Missing or empty DNSMOS p808 ONNX model: ${modelFile.absolutePath}"
             }
-            val opts = OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(2)
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            }
-            opts.use { options ->
-                val session = env.createSession(modelFile.absolutePath, options)
-                OrtDnsmosP808Engine(env, session)
-            }
+            val session = createAcceleratedOrtSession(env, modelFile, preferHardwareAccelerator)
+            OrtDnsmosP808Engine(env, session)
         }
     }
 }
@@ -591,17 +587,40 @@ class OrtCtcAlignerEngine private constructor(
             return Triple(vocab, tokenToId, blankId)
         }
 
-        fun create(env: OrtEnvironment, sherpaCtcModelDir: File): Result<OrtCtcAlignerEngine> = runCatching {
+        fun create(
+            env: OrtEnvironment,
+            sherpaCtcModelDir: File,
+            preferHardwareAccelerator: Boolean = true
+        ): Result<OrtCtcAlignerEngine> = runCatching {
             val (onnxFile, tokensFile) = validateModelDir(sherpaCtcModelDir).getOrThrow()
             val (vocab, tokenToId, blankId) = loadTokens(tokensFile)
-            val opts = OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(2)
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            }
-            opts.use { options ->
-                val session = env.createSession(onnxFile.absolutePath, options)
-                OrtCtcAlignerEngine(env, session, vocab, tokenToId, blankId)
-            }
+            val session = createAcceleratedOrtSession(env, onnxFile, preferHardwareAccelerator)
+            OrtCtcAlignerEngine(env, session, vocab, tokenToId, blankId)
         }
     }
+}
+
+internal fun createAcceleratedOrtSession(
+    env: OrtEnvironment,
+    modelFile: File,
+    preferHardwareAccelerator: Boolean
+): OrtSession {
+    if (preferHardwareAccelerator) {
+        val hwAttempt = runCatching {
+            val hwOpts = OrtSession.SessionOptions().apply {
+                setIntraOpNumThreads(2)
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                addNnapi()
+            }
+            hwOpts.use { options -> env.createSession(modelFile.absolutePath, options) }
+        }
+        if (hwAttempt.isSuccess) {
+            return hwAttempt.getOrThrow()
+        }
+    }
+    val cpuOpts = OrtSession.SessionOptions().apply {
+        setIntraOpNumThreads(2)
+        setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+    }
+    return cpuOpts.use { options -> env.createSession(modelFile.absolutePath, options) }
 }

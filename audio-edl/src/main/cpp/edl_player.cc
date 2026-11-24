@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 
 namespace voicestudio::edl {
@@ -635,6 +636,44 @@ EdlPlayer::~EdlPlayer() {
     Close();
 }
 
+bool EdlPlayer::OpenAndroidStreamLocked(std::string* error_out) {
+#ifdef __ANDROID__
+    if (stream_) {
+        (void)stream_->stop();
+        (void)stream_->close();
+        stream_.reset();
+    }
+
+    oboe::AudioStreamBuilder builder;
+    builder.setDirection(oboe::Direction::Output)
+        ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+        ->setSharingMode(oboe::SharingMode::Exclusive)
+        ->setFormat(oboe::AudioFormat::Float)
+        ->setChannelCount(oboe::ChannelCount::Mono)
+        ->setSampleRate(kSampleRateHz)
+        ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
+        ->setDataCallback(this)
+        ->setErrorCallback(this);
+
+    oboe::Result result = builder.openStream(stream_);
+    if (result != oboe::Result::OK) {
+        // Fallback to Shared mode if Exclusive is unavailable on this audio route.
+        builder.setSharingMode(oboe::SharingMode::Shared);
+        result = builder.openStream(stream_);
+    }
+    if (result != oboe::Result::OK || !stream_) {
+        if (error_out) {
+            *error_out = std::string("Oboe openStream failed: ") + oboe::convertToText(result);
+        }
+        stream_.reset();
+        return false;
+    }
+#else
+    (void)error_out;
+#endif
+    return true;
+}
+
 bool EdlPlayer::Init(const std::string& room_tone_loop_path, std::string* error_out) {
     if (room_tone_loop_path.empty()) {
         if (error_out) {
@@ -649,34 +688,11 @@ bool EdlPlayer::Init(const std::string& room_tone_loop_path, std::string* error_
     }
 
 #ifdef __ANDROID__
-    if (stream_) {
-        stream_->stop();
-        stream_->close();
-        stream_.reset();
-    }
-
-    oboe::AudioStreamBuilder builder;
-    builder.setDirection(oboe::Direction::Output)
-        ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-        ->setSharingMode(oboe::SharingMode::Exclusive)
-        ->setFormat(oboe::AudioFormat::Float)
-        ->setChannelCount(oboe::ChannelCount::Mono)
-        ->setSampleRate(kSampleRateHz)
-        ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
-        ->setDataCallback(this);
-
-    oboe::Result result = builder.openStream(stream_);
-    if (result != oboe::Result::OK) {
-        // Fallback to Shared mode if Exclusive is unavailable on this audio route.
-        builder.setSharingMode(oboe::SharingMode::Shared);
-        result = builder.openStream(stream_);
-    }
-    if (result != oboe::Result::OK || !stream_) {
-        if (error_out) {
-            *error_out = std::string("Oboe openStream failed: ") + oboe::convertToText(result);
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        if (!OpenAndroidStreamLocked(error_out)) {
+            return false;
         }
-        stream_.reset();
-        return false;
     }
 #endif
 
@@ -696,6 +712,7 @@ bool EdlPlayer::Start(std::string* error_out) {
     renderer_.SetPlaying(true);
 
 #ifdef __ANDROID__
+    std::lock_guard<std::mutex> lock(stream_mutex_);
     if (!stream_) {
         renderer_.SetPlaying(false);
         if (error_out) {
@@ -719,6 +736,7 @@ bool EdlPlayer::Start(std::string* error_out) {
 void EdlPlayer::Pause() {
     renderer_.SetPlaying(false);
 #ifdef __ANDROID__
+    std::lock_guard<std::mutex> lock(stream_mutex_);
     if (stream_) {
         (void)stream_->requestPause();
     }
@@ -728,10 +746,13 @@ void EdlPlayer::Pause() {
 void EdlPlayer::Close() {
     renderer_.SetPlaying(false);
 #ifdef __ANDROID__
-    if (stream_) {
-        (void)stream_->stop();
-        (void)stream_->close();
-        stream_.reset();
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        if (stream_) {
+            (void)stream_->stop();
+            (void)stream_->close();
+            stream_.reset();
+        }
     }
 #endif
     renderer_.ResetAndReclaimAll();
@@ -849,6 +870,24 @@ oboe::DataCallbackResult EdlPlayer::onAudioReady(
     }
 
     return oboe::DataCallbackResult::Continue;
+}
+
+void EdlPlayer::onErrorAfterClose(
+    oboe::AudioStream* /*audio_stream*/,
+    oboe::Result error) {
+    if (error != oboe::Result::ErrorDisconnected) {
+        return;
+    }
+    // Reopen Oboe stream asynchronously on route hot-plug (Bluetooth / USB-C headset switch).
+    std::thread([this]() {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        if (room_tone_path_.empty() || !renderer_.HasRoomTone()) {
+            return;
+        }
+        if (OpenAndroidStreamLocked(nullptr) && renderer_.IsPlaying() && stream_) {
+            (void)stream_->requestStart();
+        }
+    }).detach();
 }
 #endif
 

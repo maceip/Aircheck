@@ -1,6 +1,7 @@
 package com.example.draft
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -131,7 +132,8 @@ internal fun computeRmsPcm16(pcm: ShortArray, start: Int = 0, endExclusive: Int 
 class VadAudioCaptureEngine(
     private val chunkCacheDir: File = File(System.getProperty("java.io.tmpdir") ?: "/tmp", "aircheck_vad"),
     val silenceThresholdRms: Float = DEFAULT_SILENCE_THRESHOLD_RMS,
-    val maxPauseMs: Long = DEFAULT_MAX_PAUSE_MS
+    val maxPauseMs: Long = DEFAULT_MAX_PAUSE_MS,
+    private val attributionContext: Context? = null
 ) {
 
     data class TimestampedFrame(
@@ -523,13 +525,21 @@ class VadAudioCaptureEngine(
         }
         val bufferSizeBytes = maxOf(minBufBytes * 2, FRAME_SAMPLES * 2 * 4)
         val recorder = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                SAMPLE_RATE_HZ,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSizeBytes
-            )
+            val format = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE_HZ)
+                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                .build()
+            AudioRecord.Builder()
+                .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(bufferSizeBytes)
+                .apply {
+                    if (attributionContext != null) {
+                        setContext(attributionContext)
+                    }
+                }
+                .build()
         } catch (e: SecurityException) {
             onError(e.localizedMessage ?: "Microphone permission denied.")
             return null

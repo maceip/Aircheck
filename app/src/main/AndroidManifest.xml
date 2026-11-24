@@ -3,9 +3,16 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+
+    <!-- Android 17 hardware NPU declaration for LiteRT Accelerator.NPU vocoding -->
+    <uses-feature
+        android:name="android.hardware.neural_processing_unit"
+        android:required="false" />
 
     <queries>
         <package android:name="com.twitter.android" />
@@ -22,8 +29,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication"
-        android:networkSecurityConfig="@xml/network_security_config"
-        android:usesCleartextTraffic="true">
+        android:networkSecurityConfig="@xml/network_security_config">
 
         <!-- LiteRT GPU (com.google.ai.edge.litert:litert-gpu:2.3.0) optional native runtime libraries -->
         <uses-native-library
@@ -33,10 +39,10 @@
             android:name="libOpenCL.so"
             android:required="false" />
 
-        <!-- WorkManager expedited synthesis foreground service declaration (Android 14+ dataSync) -->
+        <!-- WorkManager expedited foreground service declaration (Android 17 mediaProcessing + dataSync) -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
-            android:foregroundServiceType="dataSync"
+            android:foregroundServiceType="mediaProcessing|dataSync"
             tools:node="merge" />
 
         <activity
@@ -50,6 +56,56 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Android 17 (CINNAMON_BUN, minSdk 37) Multi-Module Jetpack AppFunction Services -->
+        <service
+            android:name="com.example.appfunctions.DraftingDeckAppFunctionService"
+            android:permission="android.permission.BIND_APP_FUNCTION_SERVICE"
+            android:exported="true">
+            <property
+                android:name="android.app.appfunctions.schema"
+                android:value="app_functions_schema.xsd" />
+            <property
+                android:name="android.app.appfunctions.v2"
+                android:value="drafting_deck_app_function_service.xml" />
+            <intent-filter>
+                <action android:name="android.app.appfunctions.AppFunctionService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name="com.voicestudio.ui.appfunctions.HairlineClipperAppFunctionService"
+            android:permission="android.permission.BIND_APP_FUNCTION_SERVICE"
+            android:exported="true">
+            <property
+                android:name="android.app.appfunctions.schema"
+                android:value="app_functions_schema.xsd" />
+            <property
+                android:name="android.app.appfunctions.v2"
+                android:value="hairline_clipper_app_function_service.xml" />
+            <intent-filter>
+                <action android:name="android.app.appfunctions.AppFunctionService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name="com.voicestudio.sync.appfunctions.VoiceStudioSyncAppFunctionService"
+            android:permission="android.permission.BIND_APP_FUNCTION_SERVICE"
+            android:exported="true">
+            <property
+                android:name="android.app.appfunctions.schema"
+                android:value="app_functions_schema.xsd" />
+            <property
+                android:name="android.app.appfunctions.v2"
+                android:value="voice_studio_sync_app_function_service.xml" />
+            <intent-filter>
+                <action android:name="android.app.appfunctions.AppFunctionService" />
+            </intent-filter>
+        </service>
+
+        <property
+            android:name="android.app.appfunctions.app_metadata"
+            android:resource="@xml/app_metadata" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

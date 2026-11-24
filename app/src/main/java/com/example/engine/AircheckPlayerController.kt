@@ -3,6 +3,8 @@ package com.example.engine
 import android.content.Context
 import android.net.Uri
 import androidx.annotation.OptIn
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -76,12 +78,32 @@ class AircheckPlayerController(
         if (existing != null) return existing
         return ExoPlayer.Builder(appContext)
             .setMediaSourceFactory(DefaultMediaSourceFactory(cacheFactory))
+            .setAudioAttributes(buildMediaAudioAttributes(), /* handleAudioFocus = */ true)
+            .setHandleAudioBecomingNoisy(true)
             .build()
             .apply {
                 repeatMode = Player.REPEAT_MODE_ONE
                 addListener(listener)
                 backingPlayer = this
             }
+    }
+
+    companion object {
+        fun buildMediaAudioAttributes(): AudioAttributes =
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build()
+
+        /**
+         * Android 17 dedicated assistant audio stream routing (`USAGE_ASSISTANT` + `AUDIO_CONTENT_TYPE_SPEECH`)
+         * for spoken agent cues without ducking or overwriting user media volume.
+         */
+        fun buildAssistantAudioAttributes(): AudioAttributes =
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_ASSISTANT)
+                .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
+                .build()
     }
 
     fun prepareUri(uri: Uri, autoPlay: Boolean = false) {

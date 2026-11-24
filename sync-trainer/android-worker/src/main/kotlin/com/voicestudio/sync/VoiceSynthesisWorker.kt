@@ -1,10 +1,11 @@
 package com.voicestudio.sync
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.ServiceInfo
-import android.os.Build
+import android.graphics.Color
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
@@ -52,26 +53,55 @@ class VoiceSynthesisWorker(
     params: WorkerParameters
 ) : CoroutineWorker(appContext, params) {
 
-    override suspend fun getForegroundInfo(): ForegroundInfo {
+    override suspend fun getForegroundInfo(): ForegroundInfo =
+        buildMediaProcessingForegroundInfo(
+            phase = ClauseSynthesisPhase.NORMALIZING,
+            completedClauses = 0,
+            totalClauses = 1
+        )
+
+    private fun buildMediaProcessingForegroundInfo(
+        phase: ClauseSynthesisPhase,
+        completedClauses: Int,
+        totalClauses: Int
+    ): ForegroundInfo {
         ensureNotificationChannel(applicationContext)
-        val notification = NotificationCompat.Builder(applicationContext, NOTIFICATION_CHANNEL_ID)
+        val safeTotal = totalClauses.coerceAtLeast(1)
+        val phaseOrdinal = when (phase) {
+            ClauseSynthesisPhase.IDLE, ClauseSynthesisPhase.NORMALIZING -> 1
+            ClauseSynthesisPhase.STAGE_A_GGUF_AND_LITERT_DAC -> 2
+            ClauseSynthesisPhase.STAGE_B_4GATE_VERIFIER -> 3
+            ClauseSynthesisPhase.STAGE_C_NEON_MASTERING, ClauseSynthesisPhase.READY -> 4
+            ClauseSynthesisPhase.FAILED -> 0
+        }
+        val progressPercent = (((completedClauses * 4) + phaseOrdinal) * 100 / (safeTotal * 4))
+            .coerceIn(5, 100)
+
+        val progressStyle = Notification.ProgressStyle()
+            .setStyledByProgress(true)
+            .setProgress(progressPercent)
+            .setProgressSegments(
+                listOf(
+                    Notification.ProgressStyle.Segment(25).setColor(Color.parseColor("#00E5FF")),
+                    Notification.ProgressStyle.Segment(35).setColor(Color.parseColor("#B8FF00")),
+                    Notification.ProgressStyle.Segment(25).setColor(Color.parseColor("#F5B700")),
+                    Notification.ProgressStyle.Segment(15).setColor(Color.parseColor("#00E676"))
+                )
+            )
+
+        val notification = Notification.Builder(applicationContext, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("Aircheck VoiceStudio")
-            .setContentText("Synthesizing 44.1 kHz voice takes locally…")
+            .setContentText("Synthesizing 44.1 kHz voice takes locally (${phase.name.lowercase()})…")
+            .setStyle(progressStyle)
             .setOngoing(true)
-            .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ForegroundInfo(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
-        } else {
-            ForegroundInfo(NOTIFICATION_ID, notification)
-        }
+        return ForegroundInfo(
+            NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
+        )
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -312,20 +342,18 @@ class VoiceSynthesisWorker(
         private const val NOTIFICATION_ID: Int = 44101
 
         private fun ensureNotificationChannel(context: Context) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                    ?: return
-                if (manager.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
-                    val channel = NotificationChannel(
-                        NOTIFICATION_CHANNEL_ID,
-                        "VoiceStudio Local Synthesis",
-                        NotificationManager.IMPORTANCE_LOW
-                    ).apply {
-                        description = "Local 44.1 kHz GGUF + LiteRT DAC voice synthesis progress"
-                        setShowBadge(false)
-                    }
-                    manager.createNotificationChannel(channel)
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                ?: return
+            if (manager.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
+                val channel = NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "VoiceStudio Local Synthesis",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Local 44.1 kHz GGUF + LiteRT DAC voice synthesis progress"
+                    setShowBadge(false)
                 }
+                manager.createNotificationChannel(channel)
             }
         }
     }
@@ -353,6 +381,8 @@ internal class NativeVoiceSynthesisExecutor(
         var verifier: ClauseVerifier? = null
 
         return try {
+            val nativeLibDir = context.applicationInfo?.nativeLibraryDir
+            val llamaLibFile = nativeLibDir?.let { File(it, "libllama.so") }?.takeIf { it.isFile }
             val engineHandle = pipeline.initialize(
                 baseGgufPath = bundle.baseGguf.absolutePath,
                 loraGgufPath = bundle.loraGguf.absolutePath,
@@ -360,7 +390,9 @@ internal class NativeVoiceSynthesisExecutor(
                 roomIrPcmPath = bundle.roomIrPcm.absolutePath,
                 roomTonePcmPath = bundle.roomTonePcm.absolutePath,
                 cacheVersion = bundle.manifest.bundleVersion,
-                preferredAccelerator = Accelerator.GPU
+                preferredAccelerator = Accelerator.GPU,
+                llamaLibPath = llamaLibFile?.absolutePath,
+                nativeLibraryDir = nativeLibDir
             ).getOrElse { return Result.failure(it) }
             VoiceStudioRuntimeRegistry.registerActiveEngineHandle(engineHandle)
 

@@ -32,7 +32,7 @@ import org.robolectric.annotation.Config
  * - Vernier 1:20 gear physics + real 44.1 kHz `.pcm` waveform extraction (zero fabrication).
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [37])
 class TimelineSyncTest {
 
     @get:Rule

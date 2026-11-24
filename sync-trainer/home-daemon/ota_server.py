@@ -1512,7 +1512,113 @@ class OtaHttpServer(ThreadingHTTPServer):
         )
         self.draft_engine = draft_engine or DraftPassEngine()
         self.quiet = quiet
+        self._remotion_lock = threading.Lock()
+        self._remotion_state_path = self.render_manager.renders_dir / "remotion_state.json"
         super().__init__(server_address, OtaRequestHandler)
+
+    def get_remotion_state(self) -> dict[str, Any]:
+        repo_root = Path(__file__).resolve().parents[2]
+        worker_dir = repo_root / "backend" / "remotion-worker"
+        pkg_json = worker_dir / "package.json"
+        remotion_pkg = worker_dir / "node_modules" / "remotion" / "package.json"
+        version: str | None = None
+        if remotion_pkg.is_file():
+            try:
+                version = str(json.loads(remotion_pkg.read_text(encoding="utf-8")).get("version") or "") or None
+            except Exception:
+                version = None
+
+        persisted: dict[str, Any] = {}
+        with self._remotion_lock:
+            if self._remotion_state_path.is_file():
+                try:
+                    persisted = json.loads(self._remotion_state_path.read_text(encoding="utf-8"))
+                except Exception:
+                    persisted = {}
+
+        return {
+            "remotion_worker_present": pkg_json.is_file() and remotion_pkg.is_file(),
+            "remotion_version": version,
+            "remotion_enabled": bool(persisted.get("enabled", False)),
+            "remotion_renders_completed": int(persisted.get("renders_completed", 0)),
+            "last_user_request": str(persisted.get("last_user_request") or ""),
+            "enable_broll_popups": bool(persisted.get("enable_broll_popups", False)),
+        }
+
+    def install_and_enable_remotion(
+        self,
+        *,
+        user_request: str,
+        enable_broll_popups: bool = True,
+    ) -> dict[str, Any]:
+        clean_req = user_request.strip()
+        if not clean_req:
+            raise ValueError("user_request must not be blank.")
+
+        repo_root = Path(__file__).resolve().parents[2]
+        worker_dir = repo_root / "backend" / "remotion-worker"
+        pkg_json = worker_dir / "package.json"
+        remotion_pkg = worker_dir / "node_modules" / "remotion" / "package.json"
+        dist_entry = worker_dir / "dist" / "server.js"
+
+        if not pkg_json.is_file() or not remotion_pkg.is_file():
+            raise RuntimeError(
+                f"Remotion worker packages not present at {worker_dir}; run npm ci in backend/remotion-worker."
+            )
+
+        if not dist_entry.is_file():
+            proc = subprocess.run(
+                ["npm", "run", "build"],
+                cwd=str(worker_dir),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0 or not dist_entry.is_file():
+                raise RuntimeError(_summarize_subprocess_error("remotion npm build", proc))
+
+        remotion_meta = json.loads(remotion_pkg.read_text(encoding="utf-8"))
+        remotion_version = str(remotion_meta.get("version") or "4.0.0")
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        with self._remotion_lock:
+            self._remotion_state_path.parent.mkdir(parents=True, exist_ok=True)
+            existing: dict[str, Any] = {}
+            if self._remotion_state_path.is_file():
+                try:
+                    existing = json.loads(self._remotion_state_path.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = {}
+            requests_log = list(existing.get("requests") or [])
+            requests_log.append(
+                {
+                    "user_request": clean_req,
+                    "enable_broll_popups": bool(enable_broll_popups),
+                    "requested_at_utc": now_iso,
+                }
+            )
+            updated = {
+                "enabled": True,
+                "package_provider_id": "mac_rig_remotion",
+                "remotion_version": remotion_version,
+                "renders_completed": int(existing.get("renders_completed", 0)),
+                "last_user_request": clean_req,
+                "enable_broll_popups": bool(enable_broll_popups),
+                "updated_at_utc": now_iso,
+                "requests": requests_log,
+            }
+            tmp_path = self._remotion_state_path.with_suffix(".json.tmp")
+            tmp_path.write_text(json.dumps(updated, indent=2), encoding="utf-8")
+            os.replace(tmp_path, self._remotion_state_path)
+
+        return {
+            "status": "installed",
+            "remotion_enabled": True,
+            "remotion_version": remotion_version,
+            "package_provider_id": "mac_rig_remotion",
+            "user_request": clean_req,
+            "enable_broll_popups": bool(enable_broll_popups),
+        }
 
     def server_close(self) -> None:
         try:
@@ -1665,6 +1771,7 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             manifest_error = str(exc)
 
+        remotion_state = self.server.get_remotion_state()
         payload: dict[str, Any] = {
             "status": "ok" if manifest_error is None else "degraded",
             "lora_version": lora_version,
@@ -1672,6 +1779,10 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             "pending_preferences": self.server.store.count_pending_preferences(),
             "render_bridge": True,
             "active_render_jobs": self.server.render_manager.count_active_jobs(),
+            "remotion_worker_present": remotion_state["remotion_worker_present"],
+            "remotion_version": remotion_state["remotion_version"],
+            "remotion_enabled": remotion_state["remotion_enabled"],
+            "remotion_renders_completed": remotion_state["remotion_renders_completed"],
         }
         if manifest_error is not None:
             payload["manifest_error"] = manifest_error
@@ -1961,6 +2072,9 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/draft/rewrite":
             self._handle_post_draft_pass("rewrite", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
             return
+        if parsed.path == "/v1/remotion/install":
+            self._handle_post_remotion_install()
+            return
 
         self._send_json(
             HTTPStatus.NOT_FOUND,
@@ -2054,7 +2168,6 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(HTTPStatus.OK, result)
 
-
     def _handle_post_draft_pass(self, pass_name: str, *, max_bytes: int) -> None:
         text_body = self._read_post_utf8_body(
             max_bytes=max_bytes,
@@ -2086,6 +2199,50 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
                 {"error": "draft_pass_failed", "detail": str(exc)},
             )
             return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _handle_post_remotion_install(self) -> None:
+        text_body = self._read_post_utf8_body(
+            max_bytes=64 * 1024,
+            empty_detail="Empty Remotion install request payload",
+        )
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"},
+            )
+            return
+        if not isinstance(decoded, dict):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "bad_request", "detail": "JSON body must be an object"},
+            )
+            return
+
+        user_request = str(decoded.get("user_request") or "").strip()
+        enable_broll = bool(decoded.get("enable_broll_popups", True))
+        try:
+            result = self.server.install_and_enable_remotion(
+                user_request=user_request,
+                enable_broll_popups=enable_broll,
+            )
+        except ValueError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "invalid_remotion_request", "detail": str(exc)},
+            )
+            return
+        except Exception as exc:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "remotion_install_failed", "detail": str(exc)},
+            )
+            return
+
         self._send_json(HTTPStatus.OK, result)
 
 

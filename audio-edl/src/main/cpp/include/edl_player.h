@@ -233,7 +233,7 @@ private:
  * Full EDL playback engine combining MmapFileRegistry + wait-free EdlRenderer + Android Oboe AAudio callback.
  */
 #ifdef __ANDROID__
-class EdlPlayer : public oboe::AudioStreamDataCallback {
+class EdlPlayer : public oboe::AudioStreamDataCallback, public oboe::AudioStreamErrorCallback {
 #else
 class EdlPlayer {
 #endif
@@ -285,14 +285,21 @@ public:
         oboe::AudioStream* audio_stream,
         void* audio_data,
         int32_t num_frames) override;
+
+    void onErrorAfterClose(
+        oboe::AudioStream* audio_stream,
+        oboe::Result error) override;
 #endif
 
 private:
+    bool OpenAndroidStreamLocked(std::string* error_out = nullptr);
+
     MmapFileRegistry mmap_registry_;
     EdlRenderer renderer_;
     std::string room_tone_path_;
 
 #ifdef __ANDROID__
+    mutable std::mutex stream_mutex_;
     std::shared_ptr<oboe::AudioStream> stream_;
 #endif
 };

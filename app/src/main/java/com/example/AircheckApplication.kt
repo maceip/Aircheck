@@ -8,6 +8,9 @@ import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.allowHardware
 import coil3.request.bitmapConfig
+import com.example.agent.AircheckAgentOrchestrator
+import com.example.agent.OnDevicePromptEngine
+import com.example.appfunctions.AppFunctionAvailabilitySync
 import com.example.data.gateway.DirectMacRigGateway
 import com.example.data.gateway.MacRigRenderGateway
 import com.example.data.local.AircheckDatabase
@@ -18,11 +21,17 @@ import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.draft.DraftApiClient
 import com.example.draft.VadAudioCaptureEngine
 import com.example.engine.AircheckPlayerController
+import com.example.engine.AircheckProfilingCoordinator
 import com.example.engine.ClipExporter
+import com.example.graph.GraphAppSearchIndexer
 import com.example.graph.GraphRadarEngine
 import com.example.graph.LocalGraphDatabase
 import com.example.graph.XArchiveImporter
+import com.voicestudio.edl.ClipperManifestRegistry
+import com.voicestudio.edl.ClipperManifestStore
 import com.voicestudio.edl.EdlController
+import com.voicestudio.edl.OtaBundleStatus
+import com.voicestudio.edl.VoiceProjectManifest
 import com.voicestudio.sync.OtaBundleSyncManager
 import com.voicestudio.sync.SyncConfigProvider
 import com.voicestudio.sync.VoiceStudioRuntimeRegistry
@@ -80,15 +89,30 @@ class AircheckContainer(context: Context) {
         )
     }
     val vadAudioEngine: VadAudioCaptureEngine by lazy {
-        VadAudioCaptureEngine(chunkCacheDir = File(appContext.cacheDir, "aircheck_vad"))
+        VadAudioCaptureEngine(
+            chunkCacheDir = File(appContext.cacheDir, "aircheck_vad"),
+            attributionContext = appContext
+        )
     }
     val localGraphDatabase: LocalGraphDatabase by lazy {
         LocalGraphDatabase(appContext)
+    }
+    val graphAppSearchIndexer: GraphAppSearchIndexer by lazy {
+        GraphAppSearchIndexer(appContext)
     }
     val graphRadarEngine: GraphRadarEngine by lazy {
         GraphRadarEngine(localGraphDatabase)
     }
     val xArchiveImporter: XArchiveImporter by lazy { XArchiveImporter }
+    val profilingCoordinator: AircheckProfilingCoordinator by lazy {
+        AircheckProfilingCoordinator(appContext)
+    }
+    val onDevicePromptEngine: OnDevicePromptEngine by lazy {
+        OnDevicePromptEngine()
+    }
+    val agentOrchestrator: AircheckAgentOrchestrator by lazy {
+        AircheckAgentOrchestrator(appContext)
+    }
 
     fun bindVoiceStudioRuntime() {
         VoiceStudioRuntimeRegistry.otaBundleSyncManager = otaBundleSyncManager
@@ -97,6 +121,14 @@ class AircheckContainer(context: Context) {
         VoiceStudioRuntimeRegistry.configProvider = object : SyncConfigProvider {
             override suspend fun getTailscaleBaseUrl(): String =
                 profileStore.current().tailscaleRigUrl.ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+        }
+        ClipperManifestRegistry.store = object : ClipperManifestStore {
+            override suspend fun getManifest(projectId: String): VoiceProjectManifest? =
+                localRepo.getProjectManifest(projectId)
+
+            override suspend fun saveManifest(manifest: VoiceProjectManifest) {
+                localRepo.saveProjectManifest(manifest)
+            }
         }
     }
 }
@@ -111,10 +143,20 @@ class AircheckApplication : Application(), SingletonImageLoader.Factory {
         container = AircheckContainer(this)
         container.bindVoiceStudioRuntime()
         container.appScope.launch {
+            container.profilingCoordinator.registerDefaultTriggers()
             container.profileStore.preload()
             val rigUrl = runCatching { container.profileStore.current().tailscaleRigUrl }
                 .getOrDefault(DEFAULT_MAC_RIG_LAN_URL)
             container.otaBundleSyncManager.refreshLocalState(rigUrl)
+            val rigOnline = runCatching {
+                container.macRigGateway.resolveAndCheckHealth(rigUrl)
+            }.isSuccess
+            val bundleReady = container.otaBundleSyncManager.bundleState.value.status == OtaBundleStatus.READY
+            AppFunctionAvailabilitySync.syncDynamicFunctionStates(
+                context = this@AircheckApplication,
+                isMacRigOnline = rigOnline,
+                isLocalVoiceBundleReady = bundleReady
+            )
         }
     }
 

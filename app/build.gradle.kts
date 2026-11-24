@@ -19,8 +19,8 @@ android {
 
   defaultConfig {
     applicationId = "com.aistudio.aircheck.vqxkrm"
-    minSdk = 26
-    targetSdk = 36
+    minSdk = 37
+    targetSdk = 37
     versionCode = 2
     versionName = "2.0.0"
 
@@ -141,6 +141,24 @@ dependencies {
   implementation(libs.androidx.navigationevent)
   implementation(libs.androidx.navigationevent.compose)
 
+  // Stock Jetpack Agent-to-UI (A2UI Basic Catalog V1 + Compose Runtime)
+  implementation(libs.androidx.a2ui.model)
+  implementation(libs.androidx.a2ui.compose.runtime)
+  implementation(libs.androidx.a2ui.compose.ui)
+  implementation(libs.androidx.compose.material3.a2ui)
+
+  // Android 17 Multi-Module Jetpack AppFunctions + Platform AppSearch + ML Kit GenAI Agent & Prompt
+  implementation(libs.androidx.appfunctions)
+  ksp(libs.androidx.appfunctions.compiler)
+  implementation(libs.androidx.appsearch)
+  implementation(libs.androidx.appsearch.local.storage)
+  implementation(libs.androidx.appsearch.platform.storage)
+  ksp(libs.androidx.appsearch.compiler)
+  implementation(libs.mlkit.genai.agent)
+  implementation(libs.mlkit.genai.prompt)
+  implementation(libs.mlkit.genai.schema)
+  ksp(libs.mlkit.genai.schema.compiler)
+
   implementation(libs.androidx.room.runtime)
   implementation(libs.androidx.room.ktx)
   ksp(libs.androidx.room.compiler)
@@ -152,6 +170,8 @@ dependencies {
   implementation(libs.androidx.media3.ui)
   implementation(libs.androidx.media3.datasource.okhttp)
   implementation(libs.androidx.media3.database)
+  implementation(libs.androidx.media3.transformer)
+  implementation(libs.androidx.media3.effect)
 
   implementation(libs.coil3.compose)
   implementation(libs.coil3.network.okhttp)
@@ -170,9 +190,11 @@ dependencies {
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
+  testImplementation(libs.androidx.a2ui.compose.ui.testing)
 
   androidTestImplementation(platform(libs.androidx.compose.bom))
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+  androidTestImplementation(libs.androidx.a2ui.compose.ui.testing)
   androidTestImplementation(libs.androidx.espresso.core)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.runner)

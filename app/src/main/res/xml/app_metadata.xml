@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AppFunctionAppMetadata xmlns:appfn="http://schemas.android.com/apk/androidx.appfunctions"
+    appfn:instructions="Aircheck is a personal-voice drafting, hairline audio editing, and broadcast clip studio.
+    Operational Call Order:
+    - Call 'seedVoiceDraft' first to create or update a plain-text draft session before invoking studio settings or render actions.
+    - Call 'queryGraphPeers' to inspect local X archive contacts relevant to the draft text.
+    - Call 'inspectOfflineVoiceBundle' before 'triggerLocalVoiceSynthesis' to verify that the local VoiceStudio OTA bundle is ready on disk.
+    - Call 'inspectProjectClauses' before 'swapClauseTake' or 'updateGlobalGapScale' in the Hairline Clipper." />

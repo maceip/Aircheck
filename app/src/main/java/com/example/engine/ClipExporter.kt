@@ -1,10 +1,10 @@
 package com.example.engine
 
+import android.content.ClipData
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
@@ -53,10 +53,8 @@ class ClipExporter(
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/Aircheck")
-                    put(MediaStore.Video.Media.IS_PENDING, 1)
-                }
+                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/Aircheck")
+                put(MediaStore.Video.Media.IS_PENDING, 1)
             }
 
             val resolver = context.contentResolver
@@ -69,21 +67,21 @@ class ClipExporter(
                 }
             } ?: throw IllegalStateException("Unable to write MP4 bytes to MediaStore.")
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                values.clear()
-                values.put(MediaStore.Video.Media.IS_PENDING, 0)
-                resolver.update(uri, values, null, null)
-            }
+            values.clear()
+            values.put(MediaStore.Video.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
 
             val shareUri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
                 mp4File
             )
+            val label = projectTitle.ifBlank { "Aircheck Video" }
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
                 type = "video/mp4"
+                clipData = ClipData.newRawUri(label, shareUri)
                 putExtra(Intent.EXTRA_STREAM, shareUri)
-                putExtra(Intent.EXTRA_SUBJECT, projectTitle.ifBlank { "Aircheck Video" })
+                putExtra(Intent.EXTRA_SUBJECT, label)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
 

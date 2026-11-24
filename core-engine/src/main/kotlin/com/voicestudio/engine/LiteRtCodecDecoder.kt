@@ -2,6 +2,7 @@ package com.voicestudio.engine
 
 import android.content.Context
 import com.google.ai.edge.litert.Accelerator
+import com.google.ai.edge.litert.BuiltinNpuAcceleratorProvider
 import com.google.ai.edge.litert.CompiledModel
 import com.google.ai.edge.litert.Environment
 import com.google.ai.edge.litert.LiteRtException
@@ -91,7 +92,7 @@ class LiteRtCodecDecoder(
     suspend fun load(
         modelFile: File,
         cacheVersion: String = "v1",
-        preferredAccelerator: Accelerator = Accelerator.GPU
+        preferredAccelerator: Accelerator = Accelerator.NPU
     ): Result<Accelerator> = withContext(dispatcher) {
         val validation = validateTfliteModelFile(modelFile)
         if (validation.isFailure) {
@@ -113,11 +114,7 @@ class LiteRtCodecDecoder(
             cacheVersion = cacheVersion
         )
 
-        val attemptOrder = if (preferredAccelerator == Accelerator.CPU) {
-            listOf(Accelerator.CPU)
-        } else {
-            listOf(preferredAccelerator, Accelerator.CPU)
-        }
+        val attemptOrder = resolveAcceleratorCascade(preferredAccelerator)
 
         var lastError: Throwable? = null
         for (accel in attemptOrder) {
@@ -435,5 +432,22 @@ class LiteRtCodecDecoder(
                 )
             }
         }
+
+        /**
+         * Resolves the Android 17 NPU -> GPU -> CPU compilation fallback cascade.
+         */
+        fun resolveAcceleratorCascade(preferred: Accelerator): List<Accelerator> = when (preferred) {
+            Accelerator.NPU -> listOf(Accelerator.NPU, Accelerator.GPU, Accelerator.CPU)
+            Accelerator.GPU -> listOf(Accelerator.GPU, Accelerator.CPU)
+            Accelerator.CPU -> listOf(Accelerator.CPU)
+            else -> listOf(preferred, Accelerator.GPU, Accelerator.CPU).distinct()
+        }
+
+        /**
+         * Probes Android 17+ hardware NPU support via LiteRT's [BuiltinNpuAcceleratorProvider].
+         */
+        fun isHardwareNpuSupported(context: Context): Boolean = runCatching {
+            BuiltinNpuAcceleratorProvider(context.applicationContext).isDeviceSupported()
+        }.getOrDefault(false)
     }
 }

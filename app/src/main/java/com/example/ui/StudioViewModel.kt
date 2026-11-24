@@ -5,6 +5,7 @@ import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.AircheckApplication
+import com.example.appfunctions.AppFunctionAvailabilitySync
 import com.example.data.BrandChannel
 import com.example.data.ClipCardRow
 import com.example.data.ClipRecord
@@ -135,6 +136,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             otaBundleSyncManager.bundleState.collect { otaState ->
                 _uiState.update { it.copy(otaBundleState = otaState) }
+                AppFunctionAvailabilitySync.syncDynamicFunctionStates(
+                    context = getApplication(),
+                    isMacRigOnline = _uiState.value.rigHealth.status == RigConnectionStatus.ONLINE,
+                    isLocalVoiceBundleReady = otaState.status == com.voicestudio.edl.OtaBundleStatus.READY
+                )
             }
         }
 
@@ -593,6 +599,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     )
                 }
+                AppFunctionAvailabilitySync.syncDynamicFunctionStates(
+                    context = getApplication(),
+                    isMacRigOnline = true,
+                    isLocalVoiceBundleReady = _uiState.value.otaBundleState.status == com.voicestudio.edl.OtaBundleStatus.READY
+                )
                 val renders = runCatching { macRigGateway.listRemoteRenders(health.resolvedUrl) }.getOrNull()
                 if (renders != null) {
                     mergeRemoteRendersIntoRoom(renders)
@@ -608,6 +619,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     )
                 }
+                AppFunctionAvailabilitySync.syncDynamicFunctionStates(
+                    context = getApplication(),
+                    isMacRigOnline = false,
+                    isLocalVoiceBundleReady = _uiState.value.otaBundleState.status == com.voicestudio.edl.OtaBundleStatus.READY
+                )
             }
         }
     }

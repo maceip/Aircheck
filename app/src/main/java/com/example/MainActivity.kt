@@ -1,11 +1,17 @@
 package com.example
 
+import android.app.HandoffActivityData
+import android.app.HandoffActivityDataRequestInfo
+import android.app.HandoffActivityParams
+import android.content.ComponentName
 import android.content.Intent
 import android.os.Bundle
+import android.os.PersistableBundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,21 +35,62 @@ import com.example.ui.theme.AircheckTheme
 import com.example.ui.theme.OledVoid
 
 class MainActivity : ComponentActivity() {
+
+    private val activityDraftViewModel: DraftDeckViewModel by viewModels()
+    private val activityStudioViewModel: StudioViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK)
         )
+        runCatching {
+            setHandoffEnabled(true, HandoffActivityParams.Builder().build())
+        }
+        if (savedInstanceState == null) {
+            applyIncomingHandoffOrAppFunctionIntent(intent)
+        }
 
         setContent {
-            val draftViewModel: DraftDeckViewModel = viewModel()
-            val studioViewModel: StudioViewModel = viewModel()
             AircheckApp(
-                draftViewModel = draftViewModel,
-                studioViewModel = studioViewModel
+                draftViewModel = activityDraftViewModel,
+                studioViewModel = activityStudioViewModel
             )
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        applyIncomingHandoffOrAppFunctionIntent(intent)
+    }
+
+    override fun onHandoffActivityDataRequested(
+        requestInfo: HandoffActivityDataRequestInfo
+    ): HandoffActivityData {
+        val snapshot = activityDraftViewModel.uiState.value
+        val extras = PersistableBundle().apply {
+            putString(EXTRA_HANDOFF_STAGE, snapshot.document.stage.name)
+            putString(EXTRA_HANDOFF_SEED_TEXT, snapshot.activePlainText)
+        }
+        return HandoffActivityData.Builder(ComponentName(this, MainActivity::class.java))
+            .setExtras(extras)
+            .build()
+    }
+
+    private fun applyIncomingHandoffOrAppFunctionIntent(incoming: Intent?) {
+        if (incoming == null) return
+        val stageRaw = incoming.getStringExtra(EXTRA_HANDOFF_STAGE)
+        val seedText = incoming.getStringExtra(EXTRA_HANDOFF_SEED_TEXT)
+        if (!stageRaw.isNullOrBlank() || !seedText.isNullOrBlank()) {
+            activityDraftViewModel.restoreHandoffState(stageRaw, seedText)
+        }
+    }
+
+    companion object {
+        const val EXTRA_HANDOFF_STAGE: String = "com.example.extra.HANDOFF_STAGE"
+        const val EXTRA_HANDOFF_SEED_TEXT: String = "com.example.extra.HANDOFF_SEED_TEXT"
     }
 }
 

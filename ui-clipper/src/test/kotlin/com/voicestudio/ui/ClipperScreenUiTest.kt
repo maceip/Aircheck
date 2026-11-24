@@ -40,7 +40,7 @@ import org.robolectric.annotation.Config
  * [VernierScrubBar], and [GapCompressionRail].
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [37])
 class ClipperScreenUiTest {
 
     @get:Rule

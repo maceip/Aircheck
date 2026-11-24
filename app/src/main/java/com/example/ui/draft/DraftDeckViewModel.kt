@@ -108,6 +108,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
     private val localGraphDatabase = container.localGraphDatabase
     private val graphRadarEngine = container.graphRadarEngine
     private val xArchiveImporter = container.xArchiveImporter
+    private val graphAppSearchIndexer = container.graphAppSearchIndexer
     private val okHttpClient = container.okHttpClient
 
     @Volatile
@@ -1680,6 +1681,11 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                             fileName = fileName,
                             database = localGraphDatabase
                         )
+                    }.also {
+                        runCatching {
+                            val posts = localGraphDatabase.getAllPosts().map { stored -> stored.record }
+                            graphAppSearchIndexer.indexPosts(posts)
+                        }
                     }
                 }
                 val draftText = currentDraftPlainText()
@@ -1906,6 +1912,40 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun dismissNotice() {
         _uiState.update { it.copy(statusNotice = null) }
+    }
+
+    /**
+     * Restores a handed-off or AppFunction-prepared plain-text draft and stage cleanly without
+     * altering any UI structure.
+     */
+    fun restoreHandoffState(stageRaw: String?, seedText: String?) {
+        val cleanText = seedText?.trim().orEmpty()
+        val parsedStage = stageRaw?.trim()?.let { raw ->
+            Stage.entries.firstOrNull { it.name.equals(raw, ignoreCase = true) }
+        }
+        if (cleanText.isNotEmpty()) {
+            updateSeedTranscriptManual(cleanText)
+            if (parsedStage == Stage.CUT || parsedStage == Stage.SHIP) {
+                val cand = DraftStateReducer.createCandidateDraft(
+                    postureLabel = "DIRECT",
+                    text = cleanText
+                )
+                _uiState.update { state ->
+                    state.copy(
+                        document = state.document.copy(
+                            seedTranscript = cleanText,
+                            candidates = listOf(cand),
+                            activeCandidateIndex = 0,
+                            stage = parsedStage
+                        )
+                    )
+                }
+                return
+            }
+        }
+        if (parsedStage != null) {
+            setStage(parsedStage)
+        }
     }
 
     fun resetNewDraft() {
