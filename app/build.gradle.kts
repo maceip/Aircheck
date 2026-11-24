@@ -19,7 +19,7 @@ android {
 
   defaultConfig {
     applicationId = "com.aistudio.aircheck.vqxkrm"
-    minSdk = 37
+    minSdk = providers.gradleProperty("minSdkOverride").orNull?.toIntOrNull() ?: 35
     targetSdk = 37
     versionCode = 2
     versionName = "2.0.0"
@@ -69,7 +69,12 @@ android {
       enableUnitTestCoverage = true
       enableAndroidTestCoverage = true
       ndk {
-        abiFilters += listOf("arm64-v8a", "x86_64")
+        val singleAbi = findProperty("limrunAbiOnly")?.toString()?.trim()
+        if (!singleAbi.isNullOrEmpty()) {
+          abiFilters += listOf(singleAbi)
+        } else {
+          abiFilters += listOf("arm64-v8a", "x86_64")
+        }
       }
       val debugKs = signingConfigs.getByName("debugConfig").storeFile
       if (debugKs != null && debugKs.exists()) {

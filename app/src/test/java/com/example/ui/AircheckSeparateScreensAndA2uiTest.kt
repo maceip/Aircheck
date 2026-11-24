@@ -465,8 +465,14 @@ class AircheckSeparateScreensAndA2uiTest {
             }
         }
 
-        // Generate AI Overlay fields from a brief topic
-        studioVm.generateAiOverlayOnNewsroomPage("Texas battery storage dispatched 42% more power during peak evening load")
+        // Generate AI Overlay fields via the stock Jetpack A2UI "Generate AI Overlay" button
+        val topicField = onAllNodes(hasSetTextAction())[0]
+        topicField.performScrollTo()
+        topicField.performTextInput("Texas battery storage dispatched 42% more power during peak evening load")
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        onNodeWithText("Generate AI Overlay")
+            .performScrollTo()
+            .performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             aiAssistBodies.isNotEmpty() &&

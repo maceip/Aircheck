@@ -47,8 +47,10 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK)
         )
-        runCatching {
-            setHandoffEnabled(true, HandoffActivityParams.Builder().build())
+        if (android.os.Build.VERSION.SDK_INT >= 37) {
+            runCatching {
+                setHandoffEnabled(true, HandoffActivityParams.Builder().build())
+            }
         }
         if (savedInstanceState == null) {
             applyIncomingHandoffOrAppFunctionIntent(intent)

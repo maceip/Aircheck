@@ -361,7 +361,10 @@ fun VoiceModelCareScreen(
                                         "Stop Sample"
                                     } else {
                                         "Record Sample"
-                                    }
+                                    },
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
 
@@ -377,7 +380,12 @@ fun VoiceModelCareScreen(
                                     .height(46.dp)
                                     .testTag("import_local_lora_button")
                             ) {
-                                Text("Import LoRA / Model")
+                                Text(
+                                    text = "Import LoRA",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
 

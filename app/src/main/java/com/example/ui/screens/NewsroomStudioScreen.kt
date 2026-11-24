@@ -101,7 +101,7 @@ fun NewsroomStudioScreen(
             }
             Spacer(modifier = Modifier.width(4.dp))
             Text(
-                text = "Create Newsroom Overlays",
+                text = "Newsroom Overlays",
                 style = MaterialTheme.typography.titleMedium,
                 color = StudioCrisp,
                 maxLines = 1,

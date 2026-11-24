@@ -502,7 +502,8 @@ class AircheckA2uiController(
             type = "Button",
             properties = mapOf(
                 "child" to "overlay_ai_generate_button_label",
-                "variant" to "secondary",
+                // Stock A2uiBasicCatalogV1.Button.Variant.Secondary serializes as "default".
+                "variant" to "default",
                 "action" to mapOf(
                     "event" to mapOf(
                         "name" to EVENT_GENERATE_AI_OVERLAY,

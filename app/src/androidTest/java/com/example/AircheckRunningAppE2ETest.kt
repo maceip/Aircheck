@@ -202,7 +202,12 @@ class AircheckRunningAppE2ETest {
                 durationMillis = 350L
             )
         }
-        Thread.sleep(3_500L)
+        // Wait deterministically until the live /v1/draft/density pass finishes and re-enables -> 04 SHIP.
+        composeRule.waitUntil(timeoutMillis = 30_000L) {
+            assertNoErrorBanner("density scrubber")
+            val node = composeRule.onAllNodesWithTag("cut_to_ship_button").fetchSemanticsNodes().firstOrNull()
+            node != null && node.config.getOrNull(SemanticsProperties.Disabled) == null
+        }
         assertNoErrorBanner("density scrubber")
 
         // 4. Stage 4 (04 SHIP): Advance to Ship -> verify honest empty state -> import real test
