@@ -1,6 +1,9 @@
 package com.example.data.gateway
 
+import com.example.data.CoreStoryClause
+import com.example.data.OverlayObjectKind
 import com.example.data.RenderJobStatus
+import com.example.data.SavedNewsroomOverlay
 import com.example.data.ScriptProject
 import com.example.data.VoiceSource
 import com.example.data.local.CasMediaStore
@@ -172,7 +175,7 @@ class DirectMacRigGateway(
             ?.let { sha -> casStore.fileForSha(sha, "jpg") }
             ?.let { file -> Base64.getEncoder().encodeToString(file.readBytes()) }
 
-        val headline = project.stageConfig.chyronHeadline.ifBlank { project.title }.trim()
+        val headline = project.stageConfig.chyronHeadline.trim()
         val subline = project.stageConfig.chyronSubline.trim()
         val showBug = project.stageConfig.showBrandBug
 
@@ -205,6 +208,9 @@ class DirectMacRigGateway(
             .put("show_brand_bug", showBug)
         if (!audioWavBase64.isNullOrBlank()) {
             payload.put("audio_wav_base64", audioWavBase64)
+        }
+        if (!project.masterAudioSha.isNullOrBlank()) {
+            payload.put("master_audio_sha", project.masterAudioSha)
         }
         if (!photoJpegBase64.isNullOrBlank()) {
             payload.put("photo_jpeg_base64", photoJpegBase64)
@@ -280,35 +286,259 @@ class DirectMacRigGateway(
         }
 
     override suspend fun downloadRenderedMp4ToCas(videoUrl: String): CasStoredAsset =
-        withContext(Dispatchers.IO) {
-            val cleanUrl = videoUrl.trim()
-            require(cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")) {
-                "Invalid video URL: $videoUrl"
+        downloadRemoteAssetToCas(videoUrl, "mp4")
+
+    override suspend fun downloadAudioWavToCas(audioUrl: String): CasStoredAsset =
+        downloadRemoteAssetToCas(audioUrl, "wav")
+
+    private suspend fun downloadRemoteAssetToCas(
+        assetUrl: String,
+        ext: String
+    ): CasStoredAsset = withContext(Dispatchers.IO) {
+        val cleanUrl = assetUrl.trim()
+        require(cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")) {
+            "Invalid asset URL: $assetUrl"
+        }
+        val tmpFile = casStore.createTempScratchFile("mac_asset_", ext)
+        try {
+            val req = Request.Builder().url(cleanUrl).get().build()
+            okHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val detail = extractErrorDetail(resp.body?.string().orEmpty())
+                    throw IllegalStateException(
+                        "Failed downloading .$ext asset (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                    )
+                }
+                val bodyStream = resp.body?.byteStream()
+                    ?: throw IllegalStateException("Empty .$ext response.")
+                FileOutputStream(tmpFile).use { out ->
+                    bodyStream.copyTo(out, bufferSize = 64 * 1024)
+                }
             }
-            val tmpFile = casStore.createTempScratchFile("mac_render_", "mp4")
-            try {
-                val req = Request.Builder().url(cleanUrl).get().build()
-                okHttpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        val detail = extractErrorDetail(resp.body?.string().orEmpty())
-                        throw IllegalStateException(
-                            "Failed downloading video (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
-                        )
-                    }
-                    val bodyStream = resp.body?.byteStream()
-                        ?: throw IllegalStateException("Empty MP4 response.")
-                    FileOutputStream(tmpFile).use { out ->
-                        bodyStream.copyTo(out, bufferSize = 64 * 1024)
-                    }
-                }
-                if (!tmpFile.exists() || tmpFile.length() == 0L) {
-                    throw IllegalStateException("Downloaded MP4 is empty.")
-                }
-                casStore.putFile(tmpFile, "mp4")
-            } finally {
-                if (tmpFile.exists()) tmpFile.delete()
+            if (!tmpFile.exists() || tmpFile.length() == 0L) {
+                throw IllegalStateException("Downloaded .$ext asset is empty.")
+            }
+            casStore.putFile(tmpFile, ext)
+        } finally {
+            if (tmpFile.exists()) tmpFile.delete()
+        }
+    }
+
+    override suspend fun synthesizeCoreStoryTts(
+        rigBaseUrl: String,
+        projectId: String,
+        clauses: List<CoreStoryClause>
+    ): CoreTtsSynthesisResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val nonEmpty = clauses.filter { it.spokenText.isNotBlank() }
+        require(nonEmpty.isNotEmpty()) { "Write at least one story clause before running TTS." }
+
+        val clausesArr = JSONArray()
+        nonEmpty.forEach { c ->
+            clausesArr.put(
+                JSONObject()
+                    .put("id", c.id)
+                    .put("spoken_text", c.spokenText.trim())
+            )
+        }
+        val payload = JSONObject()
+            .put("project_id", projectId)
+            .put("spoken_text", nonEmpty.joinToString(" ") { it.spokenText.trim() })
+            .put("clauses", clausesArr)
+
+        val req = Request.Builder()
+            .url("$baseUrl/v1/core/tts")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = extractErrorDetail(bodyStr)
+                throw IllegalStateException(
+                    "TTS synthesis failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                )
+            }
+            if (bodyStr.isBlank()) {
+                throw IllegalStateException("Server /v1/core/tts returned an empty response.")
+            }
+            bodyStr
+        }
+
+        val json = JSONObject(rawBody)
+        val ttsId = json.optNullableString("tts_id")
+            ?: throw IllegalStateException("Server /v1/core/tts did not return tts_id.")
+        val rawAudioUrl = json.optNullableString("audio_url")
+            ?: throw IllegalStateException("Server /v1/core/tts did not return audio_url.")
+        val resolvedAudioUrl = resolveAbsoluteUrl(baseUrl, rawAudioUrl)
+        val durationMs = json.optLong("duration_ms", 0L).coerceAtLeast(1L)
+
+        val peaksArr = json.optJSONArray("waveform_peaks") ?: JSONArray()
+        val peaks = buildList {
+            for (i in 0 until peaksArr.length()) {
+                add(peaksArr.optDouble(i, 0.0).toFloat().coerceIn(0f, 1f))
             }
         }
+
+        val serverClausesArr = json.optJSONArray("clauses") ?: JSONArray()
+        val timedById = linkedMapOf<String, Pair<Long, Long>>()
+        for (i in 0 until serverClausesArr.length()) {
+            val obj = serverClausesArr.optJSONObject(i) ?: continue
+            val cid = obj.optNullableString("id") ?: continue
+            val sMs = obj.optLong("start_ms", 0L).coerceAtLeast(0L)
+            val eMs = obj.optLong("end_ms", durationMs).coerceAtLeast(sMs)
+            timedById[cid] = sMs to eMs
+        }
+
+        val timedClauses = nonEmpty.mapIndexed { idx, orig ->
+            val bounds = timedById[orig.id]
+            orig.copy(
+                index = idx,
+                startMs = bounds?.first ?: orig.startMs,
+                endMs = bounds?.second ?: orig.endMs
+            )
+        }
+
+        CoreTtsSynthesisResult(
+            ttsId = ttsId,
+            audioUrl = resolvedAudioUrl,
+            durationMs = durationMs,
+            waveformPeaks = peaks,
+            timedClauses = timedClauses
+        )
+    }
+
+    override suspend fun chopTalkingHeadIntoBroll(
+        rigBaseUrl: String,
+        scriptId: String,
+        title: String,
+        sourceJobId: String?,
+        sourceMp4Sha: String?,
+        clauses: List<CoreStoryClause>,
+        overlays: List<SavedNewsroomOverlay>
+    ): ChoppedBrollResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val mp4Base64: String? = if (sourceJobId.isNullOrBlank() && !sourceMp4Sha.isNullOrBlank()) {
+            val file = casStore.fileForSha(sourceMp4Sha, "mp4")
+                ?: throw IllegalStateException("Local talking-head MP4 is missing from CAS.")
+            Base64.getEncoder().encodeToString(file.readBytes())
+        } else {
+            null
+        }
+
+        val clausesArr = JSONArray()
+        clauses.forEach { c ->
+            clausesArr.put(
+                JSONObject()
+                    .put("id", c.id)
+                    .put("spoken_text", c.spokenText)
+                    .put("start_ms", c.startMs)
+                    .put("end_ms", c.endMs)
+                    .put("segment_mode", c.segmentMode.name)
+                    .put("broll_caption", c.brollCaption.ifBlank { c.spokenText })
+            )
+        }
+
+        val overlaysArr = JSONArray()
+        overlays.forEach { ovl ->
+            overlaysArr.put(
+                JSONObject()
+                    .put("id", ovl.id)
+                    .put("kind", ovl.kind.name)
+                    .put("headline", ovl.headline)
+                    .put("subline", ovl.subline)
+                    .put("callout_stat", ovl.calloutStat)
+                    .put("duration_sec", ovl.durationSec)
+            )
+        }
+
+        val payload = JSONObject()
+            .put("script_id", scriptId)
+            .put("title", title)
+            .put("clauses", clausesArr)
+            .put("overlays", overlaysArr)
+        if (!sourceJobId.isNullOrBlank()) {
+            payload.put("source_job_id", sourceJobId)
+        }
+        if (!mp4Base64.isNullOrBlank()) {
+            payload.put("source_mp4_base64", mp4Base64)
+        }
+
+        val req = Request.Builder()
+            .url("$baseUrl/v1/core/chop-broll")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = extractErrorDetail(bodyStr)
+                throw IllegalStateException(
+                    "B-roll chop failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                )
+            }
+            if (bodyStr.isBlank()) {
+                throw IllegalStateException("Server /v1/core/chop-broll returned an empty response.")
+            }
+            bodyStr
+        }
+
+        val json = JSONObject(rawBody)
+        val jobId = json.optNullableString("job_id")
+            ?: throw IllegalStateException("Server /v1/core/chop-broll missing job_id.")
+        val rawVideoUrl = json.optNullableString("video_url")
+            ?: throw IllegalStateException("Server /v1/core/chop-broll missing video_url.")
+        ChoppedBrollResult(
+            jobId = jobId,
+            videoUrl = resolveAbsoluteUrl(baseUrl, rawVideoUrl),
+            durationMs = json.optLong("duration_ms", 0L).coerceAtLeast(0L),
+            brollCutCount = json.optInt("broll_cut_count", 0),
+            appliedOverlayCount = json.optInt("applied_overlay_count", 0)
+        )
+    }
+
+    override suspend fun generateAiOverlayBrief(
+        rigBaseUrl: String,
+        briefPrompt: String
+    ): GeneratedOverlayBriefResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val cleanPrompt = briefPrompt.trim()
+        require(cleanPrompt.isNotEmpty()) { "Enter a news brief topic before generating an AI overlay." }
+
+        val payload = JSONObject()
+            .put("mode", "generate_overlay_brief")
+            .put("text", cleanPrompt)
+
+        val req = Request.Builder()
+            .url("$baseUrl/v1/ai-assist")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = extractErrorDetail(bodyStr)
+                throw IllegalStateException(
+                    "AI overlay generation failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                )
+            }
+            if (bodyStr.isBlank()) {
+                throw IllegalStateException("Server /v1/ai-assist returned an empty response.")
+            }
+            bodyStr
+        }
+
+        val json = JSONObject(rawBody)
+        val headline = json.optNullableString("headline")
+            ?: throw IllegalStateException("AI overlay brief missing headline.")
+        GeneratedOverlayBriefResult(
+            kind = OverlayObjectKind.fromRaw(json.optNullableString("kind")),
+            headline = headline,
+            subline = json.optNullableString("subline").orEmpty(),
+            calloutStat = json.optNullableString("callout_stat").orEmpty(),
+            durationSec = json.optInt("duration_sec", 4).coerceIn(2, 15)
+        )
+    }
 
     override suspend fun requestRemotionInstall(
         rigBaseUrl: String,

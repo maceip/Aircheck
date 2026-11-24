@@ -23,6 +23,7 @@ import com.example.draft.VadAudioCaptureEngine
 import com.example.engine.AircheckPlayerController
 import com.example.engine.AircheckProfilingCoordinator
 import com.example.engine.ClipExporter
+import com.example.engine.CoreStoryPipelineCoordinator
 import com.example.engine.VoiceModelCareManager
 import com.example.graph.GraphAppSearchIndexer
 import com.example.graph.GraphRadarEngine
@@ -116,6 +117,9 @@ class AircheckContainer(context: Context) {
     }
     val voiceModelCareManager: VoiceModelCareManager by lazy {
         VoiceModelCareManager(appContext, otaBundleSyncManager)
+    }
+    val corePipelineCoordinator: CoreStoryPipelineCoordinator by lazy {
+        CoreStoryPipelineCoordinator(localRepo, casStore, macRigGateway)
     }
 
     fun bindVoiceStudioRuntime() {

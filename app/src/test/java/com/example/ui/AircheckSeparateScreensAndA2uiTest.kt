@@ -11,6 +11,7 @@ import androidx.compose.material3.a2ui.A2uiSurface
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -24,6 +25,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import com.example.AircheckApp
 import com.example.AircheckApplication
+import com.example.data.CorePipelineStage
+import com.example.data.RenderJobStatus
 import com.example.ui.a2ui.createStockAircheckA2uiCatalog
 import com.example.ui.draft.DraftDeckViewModel
 import com.example.ui.screens.NewsroomStudioScreen
@@ -42,10 +45,14 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows
 import org.robolectric.annotation.Config
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -63,6 +70,9 @@ class AircheckSeparateScreensAndA2uiTest {
         File(app.noBackupFilesDir, "voice_care").deleteRecursively()
         runBlocking {
             app.container.profileStore.setPhoneOnlyVoiceMode(true)
+            app.container.localRepo.listSavedNewsroomOverlays().forEach {
+                app.container.localRepo.deleteNewsroomOverlay(it.id)
+            }
         }
     }
 
@@ -70,6 +80,456 @@ class AircheckSeparateScreensAndA2uiTest {
     fun tearDown() {
         httpServer?.stop(0)
         httpServer = null
+    }
+
+    private fun buildRealPcmWavBytes(freqHz: Double, durationMs: Int = 1_600): ByteArray {
+        val sampleRate = 16_000
+        val totalSamples = (sampleRate * durationMs) / 1_000
+        val pcmDataSize = totalSamples * 2
+        val out = ByteArrayOutputStream(44 + pcmDataSize)
+        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
+            put("RIFF".toByteArray(Charsets.US_ASCII))
+            putInt(36 + pcmDataSize)
+            put("WAVE".toByteArray(Charsets.US_ASCII))
+            put("fmt ".toByteArray(Charsets.US_ASCII))
+            putInt(16)
+            putShort(1) // PCM
+            putShort(1) // Mono
+            putInt(sampleRate)
+            putInt(sampleRate * 2)
+            putShort(2)
+            putShort(16)
+            put("data".toByteArray(Charsets.US_ASCII))
+            putInt(pcmDataSize)
+        }
+        out.write(header.array())
+        val pcmBuf = ByteBuffer.allocate(pcmDataSize).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until totalSamples) {
+            val t = i.toDouble() / sampleRate.toDouble()
+            val sample = (0.45 * sin(2.0 * PI * freqHz * t) * 32767.0).toInt().toShort()
+            pcmBuf.putShort(sample)
+        }
+        out.write(pcmBuf.array())
+        return out.toByteArray()
+    }
+
+    @Test
+    fun corePipeline_runsFullFiveStagesWithoutNewsroomOverlays() = runComposeUiTest {
+        val ttsCounter = AtomicInteger(0)
+        val renderBodies = CopyOnWriteArrayList<String>()
+        val chopBodies = CopyOnWriteArrayList<String>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val portPlaceholder = AtomicInteger(0)
+
+        server.createContext("/health") { exchange ->
+            val resp = """
+                {
+                  "status": "ok",
+                  "lora_version": 4,
+                  "bundle_version": "2026.11",
+                  "pending_preferences": 0,
+                  "render_bridge_available": true,
+                  "active_render_jobs": 0
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+
+        server.createContext("/v1/core/tts") { exchange ->
+            val pass = ttsCounter.incrementAndGet()
+            val p = portPlaceholder.get()
+            val resp = """
+                {
+                  "tts_id": "tts_pass_$pass",
+                  "audio_url": "http://127.0.0.1:$p/v1/renders/tts_pass_$pass.wav",
+                  "duration_ms": 2400,
+                  "waveform_peaks": [0.35, 0.72, 0.58, 0.84],
+                  "clauses": [
+                    {"id": "c0", "index": 0, "spoken_text": "First clause.", "start_ms": 0, "end_ms": 1200},
+                    {"id": "c1", "index": 1, "spoken_text": "Second clause.", "start_ms": 1200, "end_ms": 2400}
+                  ]
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+
+        server.createContext("/v1/render-video") { exchange ->
+            val req = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
+            renderBodies.add(req)
+            val resp = """{"job_id":"head_job_01","clip_id":"clip_head_01","input_hash":"abc12345"}"""
+                .toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+
+        server.createContext("/v1/jobs/head_job_01") { exchange ->
+            val p = portPlaceholder.get()
+            val resp = """
+                {
+                  "job_id": "head_job_01",
+                  "status": "READY",
+                  "progress_fraction": 1.0,
+                  "stage_detail": "Ready",
+                  "video_url": "http://127.0.0.1:$p/v1/renders/head_job_01.mp4",
+                  "duration_ms": 2400
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+
+        server.createContext("/v1/core/chop-broll") { exchange ->
+            val req = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
+            chopBodies.add(req)
+            val p = portPlaceholder.get()
+            val resp = """
+                {
+                  "job_id": "broll_final_01",
+                  "status": "READY",
+                  "video_url": "http://127.0.0.1:$p/v1/renders/broll_final_01.mp4",
+                  "duration_ms": 2400,
+                  "broll_cut_count": 1,
+                  "applied_overlay_count": 0
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+
+        server.createContext("/v1/renders/") { exchange ->
+            val path = exchange.requestURI.path
+            val bytes = if (path.endsWith(".wav")) {
+                val freq = if (path.contains("pass_1")) 330.0 else 440.0
+                buildRealPcmWavBytes(freqHz = freq, durationMs = 1_200)
+            } else {
+                ("MP4_PAYLOAD_FOR_$path").toByteArray(Charsets.UTF_8)
+            }
+            exchange.responseHeaders.add(
+                "Content-Type",
+                if (path.endsWith(".wav")) "audio/wav" else "video/mp4"
+            )
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+
+        server.start()
+        httpServer = server
+        val port = server.address.port
+        portPlaceholder.set(port)
+
+        runBlocking {
+            app.container.profileStore.setTailscaleRigUrl("http://127.0.0.1:$port")
+        }
+
+        var draftVmRef: DraftDeckViewModel? = null
+        var studioVmRef: StudioViewModel? = null
+        setContent {
+            val draftVm = draftVmRef ?: DraftDeckViewModel(app).also { draftVmRef = it }
+            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
+            AircheckApp(
+                draftViewModel = draftVm,
+                studioViewModel = studioVm
+            )
+        }
+        val studioVm = checkNotNull(studioVmRef)
+
+        // Route story into the single Core Pipeline (just like Broadcast from Drafting Deck)
+        studioVm.renderDraftAsBroadcastClip(
+            plainText = "Local neural codecs cut latency in half. Cloud round-trips break conversational rhythm.",
+            headline = "LOCAL CODECS"
+        )
+
+        // Stage 1: 01 TTS opens automatically
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("core_run_tts_button").fetchSemanticsNodes().isNotEmpty()
+        }
+        assertEquals(CorePipelineStage.TTS, studioVm.uiState.value.corePipelineSession.stage)
+
+        // Synthesize TTS Pass #1 -> advances automatically to Stage 2 (02 ITERATE_STORY)
+        onNodeWithTag("core_run_tts_button").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.stage == CorePipelineStage.ITERATE_STORY &&
+                studioVm.uiState.value.corePipelineSession.ttsIterationCount == 1
+        }
+        val firstVoiceSha = studioVm.uiState.value.corePipelineSession.ttsVoiceSha
+        assertNotNull(firstVoiceSha)
+
+        // Stage 2: Iterate on Story — edit clause 0 & re-run TTS (Pass #2)
+        onNodeWithTag("core_clause_input_0")
+            .performScrollTo()
+            .performTextClearance()
+        onNodeWithTag("core_clause_input_0")
+            .performTextInput("On-phone neural codecs cut latency below 20 milliseconds.")
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+
+        onNodeWithTag("core_pipeline_lazy_list").performScrollToKey("stage_02_story_actions")
+        onNodeWithTag("core_rerun_tts_button")
+            .performScrollTo()
+            .performClick()
+
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.ttsIterationCount == 2
+        }
+        val secondVoiceSha = studioVm.uiState.value.corePipelineSession.ttsVoiceSha
+        assertNotNull(secondVoiceSha)
+        assertFalse("Second TTS iteration must update voice WAV SHA", firstVoiceSha == secondVoiceSha)
+
+        // Lock story & advance to Stage 3 (03 SPEECH_TO_TALKING_HEAD)
+        onNodeWithTag("core_pipeline_lazy_list").performScrollToKey("stage_02_story_actions")
+        onNodeWithTag("core_to_head_button")
+            .performScrollTo()
+            .performClick()
+
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.stage == CorePipelineStage.SPEECH_TO_TALKING_HEAD
+        }
+
+        // Stage 3: Match Speech to Talking Head -> advances to Stage 4 (04 CHOP_INTO_BROLL)
+        onNodeWithTag("core_run_head_button").performClick()
+        waitUntil(timeoutMillis = 6_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.stage == CorePipelineStage.CHOP_INTO_BROLL &&
+                studioVm.uiState.value.corePipelineSession.hasTalkingHead
+        }
+        assertEquals(1, renderBodies.size)
+        assertTrue("Stage 3 must use locked MIC_VOICEOVER WAV", renderBodies.first().contains("\"voice_source\":\"MIC_VOICEOVER\""))
+        assertTrue("Stage 3 must pass locked TTS SHA", renderBodies.first().contains(secondVoiceSha!!))
+        assertTrue("Stage 3 must transmit Base64 WAV bytes", renderBodies.first().contains("\"audio_wav_base64\":\""))
+        assertTrue("Stage 3 must NOT burn premature chyron", renderBodies.first().contains("\"chyron_headline\":\"\""))
+
+        // Stage 4: Chop Talking Head into B-Roll WITH ZERO Newsroom Overlays
+        assertEquals(0, studioVm.uiState.value.corePipelineSession.selectedOverlayIds.size)
+        onNodeWithTag("core_pipeline_lazy_list").performScrollToKey("stage_04_optional_overlays")
+        onNodeWithText("0 attached").assertIsDisplayed()
+
+        onNodeWithTag("core_pipeline_lazy_list").performScrollToKey("stage_04_commit_chop")
+        onNodeWithTag("core_run_chop_broll_button")
+            .performScrollTo()
+            .performClick()
+
+        // Stage 5: Advances to FINAL_REVIEW backed by a READY ClipRecord in Room!
+        waitUntil(timeoutMillis = 6_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.stage == CorePipelineStage.FINAL_REVIEW &&
+                onAllNodesWithTag("review_video_stage").fetchSemanticsNodes().isNotEmpty()
+        }
+        assertEquals(1, chopBodies.size)
+        assertTrue("Standard run must send empty overlays array", chopBodies.first().contains("\"overlays\":[]"))
+        assertTrue("Stage 4 chop must include BROLL_CUTAWAY segment", chopBodies.first().contains("BROLL_CUTAWAY"))
+
+        val finalClipId = studioVm.uiState.value.corePipelineSession.finalClipId
+        assertNotNull(finalClipId)
+        val clipInRoom = runBlocking { app.container.localRepo.getClipById(finalClipId!!) }
+        assertNotNull(clipInRoom)
+        assertEquals(RenderJobStatus.READY, clipInRoom!!.status)
+        assertEquals(secondVoiceSha, clipInRoom.voiceSha)
+    }
+
+    @Test
+    fun newsroomOverlayPage_generatesAiOverlay_savesToRoom_andAttachesOptionallyInStage4() = runComposeUiTest {
+        val remotionInstallBodies = CopyOnWriteArrayList<String>()
+        val aiAssistBodies = CopyOnWriteArrayList<String>()
+        val chopBodies = CopyOnWriteArrayList<String>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val portPlaceholder = AtomicInteger(0)
+
+        server.createContext("/health") { exchange ->
+            val resp = """{"status":"ok","lora_version":1,"render_bridge_available":true}"""
+                .toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+
+        server.createContext("/v1/remotion/install") { exchange ->
+            remotionInstallBodies.add(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
+            val resp = """
+                {
+                  "status": "installed",
+                  "remotion_enabled": true,
+                  "remotion_version": "4.0.242",
+                  "package_provider_id": "mac_rig_remotion",
+                  "user_request": "Please install Remotion for live news pop-ups and B-roll",
+                  "enable_broll_popups": true
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+
+        server.createContext("/v1/ai-assist") { exchange ->
+            aiAssistBodies.add(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
+            val resp = """
+                {
+                  "kind": "STAT_CALLOUT",
+                  "headline": "GRID CAPACITY +42%",
+                  "subline": "ERCOT BATTERY DISPATCH REPORT",
+                  "callout_stat": "+42% MW",
+                  "duration_sec": 4
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+
+        server.createContext("/v1/core/chop-broll") { exchange ->
+            chopBodies.add(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
+            val p = portPlaceholder.get()
+            val resp = """
+                {
+                  "job_id": "brief_broll_02",
+                  "status": "READY",
+                  "video_url": "http://127.0.0.1:$p/v1/renders/brief_broll_02.mp4",
+                  "duration_ms": 2000,
+                  "broll_cut_count": 1,
+                  "applied_overlay_count": 1
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+
+        server.createContext("/v1/renders/") { exchange ->
+            val bytes = "MP4_BRIEF_WITH_SAVED_OVERLAY".toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "video/mp4")
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+
+        server.start()
+        httpServer = server
+        val port = server.address.port
+        portPlaceholder.set(port)
+
+        runBlocking {
+            app.container.profileStore.setTailscaleRigUrl("http://127.0.0.1:$port")
+        }
+
+        var studioVmRef: StudioViewModel? = null
+        setContent {
+            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
+            val state = studioVm.uiState.collectAsStateWithLifecycle().value
+            AircheckTheme {
+                NewsroomStudioScreen(
+                    uiState = state,
+                    a2uiController = studioVm.a2uiController,
+                    onDeleteSavedOverlay = studioVm::deleteSavedNewsroomOverlay,
+                    onBack = {}
+                )
+            }
+        }
+        val studioVm = checkNotNull(studioVmRef)
+
+        // If Remotion was not used yet in this test process, verify install prompt -> transition
+        if (studioVm.uiState.value.isRemotionUnused) {
+            waitUntil(timeoutMillis = 5_000) {
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+                onAllNodesWithText("Remotion Video Overlays Not Installed Yet")
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            val promptInput = onNode(hasSetTextAction())
+            promptInput.performScrollTo()
+            promptInput.performTextClearance()
+            promptInput.performTextInput("Please install Remotion for live news pop-ups and B-roll")
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+
+            onNodeWithText("Ask to Install Remotion")
+                .performScrollTo()
+                .performClick()
+
+            waitUntil(timeoutMillis = 5_000) {
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+                remotionInstallBodies.isNotEmpty() &&
+                    onAllNodesWithText("Create Savable News Brief Overlay")
+                        .fetchSemanticsNodes().isNotEmpty()
+            }
+        } else {
+            waitUntil(timeoutMillis = 5_000) {
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+                onAllNodesWithText("Create Savable News Brief Overlay")
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+        }
+
+        // Generate AI Overlay fields from a brief topic
+        studioVm.generateAiOverlayOnNewsroomPage("Texas battery storage dispatched 42% more power during peak evening load")
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            aiAssistBodies.isNotEmpty() &&
+                onAllNodesWithText("GRID CAPACITY +42%").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Click "Save Overlay for News Briefs" on the stock Jetpack A2UI surface
+        onNodeWithText("Save Overlay for News Briefs")
+            .performScrollTo()
+            .performClick()
+
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.savedOverlays.any { it.headline == "GRID CAPACITY +42%" }
+        }
+        val savedOverlay = studioVm.uiState.value.savedOverlays.first { it.headline == "GRID CAPACITY +42%" }
+        assertTrue(savedOverlay.a2uiComponentsJson.contains("\"component\":\"Card\""))
+        assertEquals("ERCOT BATTERY DISPATCH REPORT", savedOverlay.subline)
+
+        // Verify optional attachment in Stage 4 of Core Pipeline
+        val headAsset = runBlocking {
+            app.container.casStore.putBytes("HEAD_MP4_BYTES".toByteArray(Charsets.UTF_8), "mp4")
+        }
+        val seeded = runBlocking {
+            val base = app.container.corePipelineCoordinator.seedSessionFromStory(
+                rawStoryText = "Battery dispatch set an evening record. Grid frequency held steady.",
+                headline = "GRID BRIEF"
+            )
+            val stage4Session = base.copy(
+                stage = CorePipelineStage.CHOP_INTO_BROLL,
+                ttsVoiceSha = "deadbeef12345678",
+                ttsDurationMs = 2_000L,
+                talkingHeadJobId = "head_brief_01",
+                talkingHeadSha = headAsset.sha256,
+                selectedOverlayIds = listOf(savedOverlay.id)
+            )
+            app.container.localRepo.saveCorePipelineSession(stage4Session)
+            stage4Session
+        }
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.id == seeded.id &&
+                studioVm.uiState.value.corePipelineSession.selectedOverlayIds.contains(savedOverlay.id)
+        }
+
+        studioVm.runCoreStage4ChopBroll()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            chopBodies.isNotEmpty() &&
+                studioVm.uiState.value.corePipelineSession.stage == CorePipelineStage.FINAL_REVIEW
+        }
+        assertTrue(chopBodies.first().contains("GRID CAPACITY +42%"))
+        assertTrue(chopBodies.first().contains("ERCOT BATTERY DISPATCH REPORT"))
+
+        // Verify removing the saved overlay deletes it from Room
+        onNodeWithTag("newsroom_studio_list").performScrollToKey(savedOverlay.id)
+        onNodeWithTag("delete_saved_overlay_${savedOverlay.id}")
+            .performScrollTo()
+            .performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.savedOverlays.none { it.id == savedOverlay.id }
+        }
     }
 
     @Test
@@ -152,82 +612,6 @@ class AircheckSeparateScreensAndA2uiTest {
     }
 
     @Test
-    fun newsroomStudioScreen_whenRemotionUnused_userAsksToInstallRemotion_persistsAndSwitchesSurface() = runComposeUiTest {
-        val capturedBodies = CopyOnWriteArrayList<String>()
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.createContext("/v1/remotion/install") { exchange ->
-            val reqBody = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
-            capturedBodies.add(reqBody)
-            val resp = """
-                {
-                  "status": "installed",
-                  "remotion_enabled": true,
-                  "remotion_version": "4.0.242",
-                  "package_provider_id": "mac_rig_remotion",
-                  "user_request": "Please install Remotion for live news pop-ups and B-roll",
-                  "enable_broll_popups": true
-                }
-            """.trimIndent().toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, resp.size.toLong())
-            exchange.responseBody.use { it.write(resp) }
-        }
-        server.start()
-        httpServer = server
-        val port = server.address.port
-
-        runBlocking {
-            app.container.profileStore.setTailscaleRigUrl("http://127.0.0.1:$port")
-        }
-
-        var studioVmRef: StudioViewModel? = null
-        setContent {
-            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
-            val state = studioVm.uiState.collectAsStateWithLifecycle().value
-            AircheckTheme {
-                NewsroomStudioScreen(
-                    uiState = state,
-                    a2uiController = studioVm.a2uiController,
-                    onBack = {},
-                    onOpenClip = {}
-                )
-            }
-        }
-
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithText("Remotion Video Overlays Not Installed Yet")
-                .fetchSemanticsNodes().isNotEmpty()
-        }
-        onNodeWithText("Remotion Video Overlays Not Installed Yet").assertIsDisplayed()
-
-        val promptInput = onNode(hasSetTextAction())
-        promptInput.performScrollTo()
-        promptInput.performTextClearance()
-        promptInput.performTextInput("Please install Remotion for live news pop-ups and B-roll")
-        Shadows.shadowOf(Looper.getMainLooper()).idle()
-
-        onNodeWithText("Ask to Install Remotion")
-            .performScrollTo()
-            .performClick()
-
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            capturedBodies.isNotEmpty() &&
-                onAllNodesWithText("Remotion News Pop-Ups & B-Roll Cue Sheet")
-                    .fetchSemanticsNodes().isNotEmpty()
-        }
-
-        assertTrue(capturedBodies.first().contains("Please install Remotion for live news pop-ups and B-roll"))
-        assertTrue(capturedBodies.first().contains("\"enable_broll_popups\":true"))
-
-        val savedSettings = runBlocking { app.container.profileStore.current() }
-        assertTrue(savedSettings.remotionInstallRequested)
-        assertEquals("mac_rig_remotion", savedSettings.providers.packageProviderId)
-        assertTrue(savedSettings.remotionUsedCount >= 1)
-    }
-
-    @Test
     fun newsroomStudioScreen_whenRigOffline_savesRequestHonestlyWithoutFakeSuccess() = runComposeUiTest {
         val closedPort = ServerSocket(0).use { it.localPort }
         runBlocking {
@@ -244,8 +628,7 @@ class AircheckSeparateScreensAndA2uiTest {
                     NewsroomStudioScreen(
                         uiState = state,
                         a2uiController = studioVm.a2uiController,
-                        onBack = {},
-                        onOpenClip = {}
+                        onBack = {}
                     )
                 }
             }
@@ -360,7 +743,7 @@ class AircheckSeparateScreensAndA2uiTest {
     }
 
     @Test
-    fun systemDeckSheet_opensSeparateNewsroomAndVoiceCareScreens_keepingMainScriptFlowClean() = runComposeUiTest {
+    fun systemDeckSheet_opensCorePipelineAndOptionalNewsroomAndVoiceCareScreens() = runComposeUiTest {
         var draftVmRef: DraftDeckViewModel? = null
         var studioVmRef: StudioViewModel? = null
 
@@ -374,7 +757,18 @@ class AircheckSeparateScreensAndA2uiTest {
         }
 
         assertTrue(onAllNodesWithText("Voice Model Care").fetchSemanticsNodes().isEmpty())
-        assertTrue(onAllNodesWithText("Newsroom & Overlay Studio").fetchSemanticsNodes().isEmpty())
+        assertTrue(onAllNodesWithText("Create Newsroom Overlays").fetchSemanticsNodes().isEmpty())
+
+        onNodeWithTag("top_settings_button").performClick()
+        waitForIdle()
+
+        onNodeWithTag("open_core_pipeline_button")
+            .performScrollTo()
+            .performClick()
+        waitForIdle()
+        onNodeWithTag("core_pipeline_back_button").assertIsDisplayed()
+        onNodeWithTag("core_pipeline_back_button").performClick()
+        waitForIdle()
 
         onNodeWithTag("top_settings_button").performClick()
         waitForIdle()

@@ -21,9 +21,12 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.AlignedWord
 import com.example.data.ClipCardRow
 import com.example.data.ClipRecord
+import com.example.data.CorePipelineSession
 import com.example.data.NewsroomStageConfig
+import com.example.data.OverlayObjectKind
 import com.example.data.PoseGateResult
 import com.example.data.RenderJobStatus
+import com.example.data.SavedNewsroomOverlay
 import com.example.data.ScriptBeat
 import com.example.data.ScriptProject
 import com.example.data.Stage4Mode
@@ -251,6 +254,33 @@ data class VoicePreferenceEntity(
     val synced: Boolean = false
 )
 
+@Entity(
+    tableName = "saved_newsroom_overlays",
+    indices = [Index(value = ["createdAtMillis"])]
+)
+data class SavedNewsroomOverlayEntity(
+    @PrimaryKey val id: String,
+    val kind: String,
+    val headline: String,
+    val subline: String,
+    val calloutStat: String,
+    val durationSec: Int,
+    val a2uiComponentsJson: String,
+    val createdAtMillis: Long
+)
+
+@Entity(
+    tableName = "core_pipeline_sessions",
+    indices = [Index(value = ["updatedAtMillis"])]
+)
+data class CorePipelineSessionEntity(
+    @PrimaryKey val id: String,
+    val scriptId: String,
+    val stage: String,
+    val sessionJson: String,
+    val updatedAtMillis: Long
+)
+
 @Dao
 interface ScriptDao {
     @Transaction
@@ -389,6 +419,36 @@ interface VoicePreferenceDao {
     suspend fun getUnsyncedCount(): Int
 }
 
+@Dao
+interface SavedNewsroomOverlayDao {
+    @Query("SELECT * FROM saved_newsroom_overlays ORDER BY createdAtMillis DESC")
+    fun observeAll(): Flow<List<SavedNewsroomOverlayEntity>>
+
+    @Query("SELECT * FROM saved_newsroom_overlays ORDER BY createdAtMillis DESC")
+    suspend fun listAll(): List<SavedNewsroomOverlayEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: SavedNewsroomOverlayEntity)
+
+    @Query("DELETE FROM saved_newsroom_overlays WHERE id = :id")
+    suspend fun deleteById(id: String)
+}
+
+@Dao
+interface CorePipelineSessionDao {
+    @Query("SELECT * FROM core_pipeline_sessions ORDER BY updatedAtMillis DESC LIMIT 1")
+    fun observeLatest(): Flow<CorePipelineSessionEntity?>
+
+    @Query("SELECT * FROM core_pipeline_sessions ORDER BY updatedAtMillis DESC LIMIT 1")
+    suspend fun getLatest(): CorePipelineSessionEntity?
+
+    @Query("SELECT * FROM core_pipeline_sessions WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): CorePipelineSessionEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: CorePipelineSessionEntity)
+}
+
 @Database(
     entities = [
         ScriptEntity::class,
@@ -397,9 +457,11 @@ interface VoicePreferenceDao {
         OutboxOpEntity::class,
         CasEntryEntity::class,
         VoiceProjectManifestEntity::class,
-        VoicePreferenceEntity::class
+        VoicePreferenceEntity::class,
+        SavedNewsroomOverlayEntity::class,
+        CorePipelineSessionEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AircheckDatabase : RoomDatabase() {
@@ -409,6 +471,8 @@ abstract class AircheckDatabase : RoomDatabase() {
     abstract fun casDao(): CasDao
     abstract fun voiceProjectManifestDao(): VoiceProjectManifestDao
     abstract fun voicePreferenceDao(): VoicePreferenceDao
+    abstract fun savedNewsroomOverlayDao(): SavedNewsroomOverlayDao
+    abstract fun corePipelineSessionDao(): CorePipelineSessionDao
 
     companion object {
         @Volatile
@@ -451,6 +515,46 @@ abstract class AircheckDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `saved_newsroom_overlays` (
+                        `id` TEXT NOT NULL,
+                        `kind` TEXT NOT NULL,
+                        `headline` TEXT NOT NULL,
+                        `subline` TEXT NOT NULL,
+                        `calloutStat` TEXT NOT NULL,
+                        `durationSec` INTEGER NOT NULL,
+                        `a2uiComponentsJson` TEXT NOT NULL,
+                        `createdAtMillis` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_saved_newsroom_overlays_createdAtMillis` " +
+                        "ON `saved_newsroom_overlays` (`createdAtMillis`)"
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `core_pipeline_sessions` (
+                        `id` TEXT NOT NULL,
+                        `scriptId` TEXT NOT NULL,
+                        `stage` TEXT NOT NULL,
+                        `sessionJson` TEXT NOT NULL,
+                        `updatedAtMillis` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_core_pipeline_sessions_updatedAtMillis` " +
+                        "ON `core_pipeline_sessions` (`updatedAtMillis`)"
+                )
+            }
+        }
+
         fun getInstance(context: Context): AircheckDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -459,7 +563,7 @@ abstract class AircheckDatabase : RoomDatabase() {
                     "aircheck_v2.db"
                 )
                     .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                    .addMigrations(MIGRATION_2_3)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }
@@ -504,6 +608,49 @@ class AircheckLocalRepository(private val db: AircheckDatabase) :
     val pendingOutboxCount: Flow<Int> = db.outboxDao().observePendingCount()
 
     val unsyncedPreferenceCount: Flow<Int> = db.voicePreferenceDao().observeUnsyncedCount()
+
+    val savedNewsroomOverlays: Flow<List<SavedNewsroomOverlay>> =
+        db.savedNewsroomOverlayDao().observeAll().map { rows ->
+            rows.map { it.toDomain() }
+        }
+
+    val latestCorePipelineSession: Flow<CorePipelineSession?> =
+        db.corePipelineSessionDao().observeLatest().map { entity ->
+            entity?.let { decodeCorePipelineSessionOrNull(it.sessionJson) }
+        }
+
+    suspend fun listSavedNewsroomOverlays(): List<SavedNewsroomOverlay> =
+        db.savedNewsroomOverlayDao().listAll().map { it.toDomain() }
+
+    suspend fun saveNewsroomOverlay(overlay: SavedNewsroomOverlay) {
+        db.savedNewsroomOverlayDao().upsert(overlay.toEntity())
+    }
+
+    suspend fun deleteNewsroomOverlay(id: String) {
+        db.savedNewsroomOverlayDao().deleteById(id)
+    }
+
+    suspend fun getLatestCorePipelineSession(): CorePipelineSession? =
+        db.corePipelineSessionDao().getLatest()?.let { decodeCorePipelineSessionOrNull(it.sessionJson) }
+
+    suspend fun saveCorePipelineSession(session: CorePipelineSession) {
+        val stamped = session.copy(updatedAtMillis = System.currentTimeMillis())
+        val encoded = json.encodeToString(CorePipelineSession.serializer(), stamped)
+        db.corePipelineSessionDao().upsert(
+            CorePipelineSessionEntity(
+                id = stamped.id,
+                scriptId = stamped.scriptId,
+                stage = stamped.stage.name,
+                sessionJson = encoded,
+                updatedAtMillis = stamped.updatedAtMillis
+            )
+        )
+    }
+
+    private fun decodeCorePipelineSessionOrNull(rawJson: String): CorePipelineSession? =
+        runCatching {
+            json.decodeFromString(CorePipelineSession.serializer(), rawJson)
+        }.getOrNull()
 
     fun observeVoiceManifest(projectId: String): Flow<VoiceProjectManifest?> =
         db.voiceProjectManifestDao().observeByProjectId(projectId).map { entity ->
@@ -828,3 +975,27 @@ private fun ClipEntity.toDomain(json: Json): ClipRecord {
         updatedAtMillis = updatedAtMillis
     )
 }
+
+private fun SavedNewsroomOverlay.toEntity(): SavedNewsroomOverlayEntity =
+    SavedNewsroomOverlayEntity(
+        id = id,
+        kind = kind.name,
+        headline = headline,
+        subline = subline,
+        calloutStat = calloutStat,
+        durationSec = durationSec,
+        a2uiComponentsJson = a2uiComponentsJson,
+        createdAtMillis = createdAtMillis
+    )
+
+private fun SavedNewsroomOverlayEntity.toDomain(): SavedNewsroomOverlay =
+    SavedNewsroomOverlay(
+        id = id,
+        kind = OverlayObjectKind.fromRaw(kind),
+        headline = headline,
+        subline = subline,
+        calloutStat = calloutStat,
+        durationSec = durationSec,
+        a2uiComponentsJson = a2uiComponentsJson,
+        createdAtMillis = createdAtMillis
+    )

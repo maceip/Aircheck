@@ -436,6 +436,16 @@ def test_grpo_v2_report_completeness_logp_delta_and_gate5_hotswap() -> None:
     assert g5["atomic_swap_v1_v2_v1"]["v1_vs_v2_logit_max_abs_diff"] > 1e-4
     assert g5["atomic_swap_v1_v2_v1"]["v1_restore_max_abs_diff"] <= 1e-3
 
-    # Must NOT have overwritten bundles/v001 or prematurely written bundles/v002/bundle_manifest.json
+    # Must NOT have overwritten bundles/v001; if v002 is already packaged, its manifest must match v002.
     assert VOICE_LORA_V001.is_file()
-    assert not (VOICE_LORA_V002.parent / "bundle_manifest.json").exists()
+    v001_manifest_path = VOICE_LORA_V001.parent / "bundle_manifest.json"
+    if v001_manifest_path.is_file():
+        v001_manifest = json.loads(v001_manifest_path.read_text(encoding="utf-8"))
+        assert v001_manifest.get("bundle_version") == "v001"
+    v002_manifest_path = VOICE_LORA_V002.parent / "bundle_manifest.json"
+    if v002_manifest_path.is_file():
+        v002_manifest = json.loads(v002_manifest_path.read_text(encoding="utf-8"))
+        assert v002_manifest.get("bundle_version") == "v002"
+        lora_arts = [a for a in v002_manifest.get("artifacts", []) if a.get("role") == "voice_lora_gguf"]
+        assert len(lora_arts) == 1
+        assert lora_arts[0]["sha256"] == til.sha256_file(VOICE_LORA_V002)

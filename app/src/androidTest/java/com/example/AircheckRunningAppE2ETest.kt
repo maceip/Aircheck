@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToKey
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
@@ -258,6 +259,10 @@ class AircheckRunningAppE2ETest {
 
         // 5. Verify Settings modal still connects cleanly to Mac :8443.
         composeRule.onNodeWithTag("top_settings_button").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodesWithTag("system_deck_lazy_list").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("system_deck_lazy_list").performScrollToKey("studio_server_card")
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             composeRule.onAllNodesWithTag("test_rig_connection_button").fetchSemanticsNodes().isNotEmpty()
         }

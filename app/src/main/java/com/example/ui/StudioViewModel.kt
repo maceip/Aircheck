@@ -8,20 +8,26 @@ import androidx.lifecycle.viewModelScope
 import com.example.AircheckApplication
 import com.example.appfunctions.AppFunctionAvailabilitySync
 import com.example.data.BrandChannel
+import com.example.data.BrollSegmentMode
 import com.example.data.ClipCardRow
 import com.example.data.ClipRecord
+import com.example.data.CorePipelineSession
+import com.example.data.CorePipelineStage
+import com.example.data.CoreStoryClause
 import com.example.data.ExportState
+import com.example.data.OverlayObjectKind
 import com.example.data.RenderJobStatus
+import com.example.data.SavedNewsroomOverlay
 import com.example.data.ScriptBeat
 import com.example.data.ScriptProject
 import com.example.data.VoiceSource
 import com.example.data.estimateDurationSeconds
-import com.example.data.gateway.MacRigJobSnapshot
 import com.example.data.gateway.RemoteRenderSummary
 import com.example.data.local.CasMediaStore
 import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.data.local.StudioSettings
 import com.example.engine.AircheckPlayerController
+import com.example.engine.CoreStoryPipelineCoordinator
 import com.example.engine.VoiceModelCareManager
 import com.example.engine.VoiceQualityReport
 import com.example.engine.VoiceStorageSnapshot
@@ -31,13 +37,11 @@ import com.voicestudio.edl.OtaBundleState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -71,6 +75,13 @@ data class StudioUiState(
     val exportState: ExportState = ExportState.IDLE,
     val pendingShareIntent: Intent? = null,
     val liveNavToClipId: String? = null,
+    val openCorePipelineEvent: Boolean = false,
+    val corePipelineSession: CorePipelineSession = CorePipelineSession(),
+    val savedOverlays: List<SavedNewsroomOverlay> = emptyList(),
+    val isCoreStageBusy: Boolean = false,
+    val coreStageProgress: Float = 0f,
+    val coreStageStatusLabel: String? = null,
+    val isRecordingCoreVoiceover: Boolean = false,
     val errorMessage: String? = null,
     val statusNotice: String? = null,
     val otaBundleState: OtaBundleState = OtaBundleState(),
@@ -99,6 +110,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val macRigGateway = container.macRigGateway
     private val otaBundleSyncManager = container.otaBundleSyncManager
     val voiceModelCareManager: VoiceModelCareManager = container.voiceModelCareManager
+    private val corePipelineCoordinator: CoreStoryPipelineCoordinator = container.corePipelineCoordinator
+    private val onDevicePromptEngine = container.onDevicePromptEngine
     private val vadAudioEngine = container.vadAudioEngine
 
     private val _uiState = MutableStateFlow(StudioUiState())
@@ -111,7 +124,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     )
 
     private var rigHealthCheckJob: Job? = null
-    private val macRigPollingJobs = mutableMapOf<String, Job>()
     private val scriptSaveMutex = Mutex()
     private var initializedProject = false
     private var didInitialAutoHealthCheck = false
@@ -127,7 +139,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 val remotionUnused = settings.remotionUsedCount <= 0 &&
                     settings.providers.packageProviderId != "mac_rig_remotion"
                 val nextRemotionMsg = when {
-                    !remotionUnused -> "Remotion enabled (${settings.remotionUsedCount} uses)."
+                    !remotionUnused -> "Remotion active (${settings.remotionUsedCount} uses). Save reusable overlays for News Briefs."
                     settings.remotionInstallRequested -> "Install requested (${settings.remotionInstallNote}); waiting on studio rig."
                     else -> "Remotion has not been used yet."
                 }
@@ -142,8 +154,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     remotionUnused = remotionUnused,
                     statusMessage = nextRemotionMsg,
                     defaultHeadline = activeProj.stageConfig.chyronHeadline.ifBlank { activeProj.title },
-                    defaultSubline = activeProj.stageConfig.chyronSubline.ifBlank { "AIRCHECK LIVE DESK" },
-                    defaultScript = activeProj.ideaSpark
+                    defaultSubline = activeProj.stageConfig.chyronSubline.ifBlank { "AIRCHECK NEWS BRIEF" },
+                    defaultBriefTopic = activeProj.ideaSpark
                 )
                 if (!didInitialAutoHealthCheck) {
                     didInitialAutoHealthCheck = true
@@ -163,6 +175,28 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             localRepo.clipCards.collect { cards ->
                 _uiState.update { it.copy(clipCards = cards) }
+            }
+        }
+
+        viewModelScope.launch {
+            localRepo.savedNewsroomOverlays.collect { overlays ->
+                _uiState.update { it.copy(savedOverlays = overlays) }
+            }
+        }
+
+        viewModelScope.launch {
+            localRepo.latestCorePipelineSession.collect { session ->
+                if (session != null) {
+                    _uiState.update { current ->
+                        if (session.updatedAtMillis >= current.corePipelineSession.updatedAtMillis ||
+                            current.corePipelineSession.clauses.isEmpty()
+                        ) {
+                            current.copy(corePipelineSession = session)
+                        } else {
+                            current
+                        }
+                    }
+                }
             }
         }
 
@@ -215,11 +249,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
 
-            is NewsroomA2uiAction.GenerateNewsroomOverlayClip -> {
-                generateNewsroomClipFromOverlay(
-                    headline = action.chyronHeadline,
-                    subline = action.chyronSubline,
-                    scriptText = action.spokenScript
+            is NewsroomA2uiAction.GenerateAiOverlayBrief -> {
+                generateAiOverlayOnNewsroomPage(action.briefTopic)
+            }
+
+            is NewsroomA2uiAction.SaveOverlayObject -> {
+                saveNewsroomOverlayObject(
+                    kind = action.kind,
+                    headline = action.headline,
+                    subline = action.subline,
+                    calloutStat = action.calloutStat,
+                    durationSec = action.durationSec,
+                    a2uiComponentsJson = action.a2uiComponentsJson
                 )
             }
         }
@@ -277,8 +318,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     remotionUnused = !res.installed,
                     statusMessage = statusMsg,
                     defaultHeadline = activeProj.stageConfig.chyronHeadline.ifBlank { activeProj.title },
-                    defaultSubline = activeProj.stageConfig.chyronSubline.ifBlank { "AIRCHECK LIVE DESK" },
-                    defaultScript = activeProj.ideaSpark
+                    defaultSubline = activeProj.stageConfig.chyronSubline.ifBlank { "AIRCHECK NEWS BRIEF" },
+                    defaultBriefTopic = activeProj.ideaSpark
                 )
             }.onFailure { err ->
                 if (err is CancellationException) throw err
@@ -304,37 +345,540 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun generateNewsroomClipFromOverlay(
+    /**
+     * Generates AI-authored overlay fields on the optional Newsroom Overlay Studio page:
+     * tries on-device Gemini Nano (`OnDevicePromptEngine`) first if installed, otherwise queries
+     * Mac Studio `POST /v1/ai-assist` (`mode = "generate_overlay_brief"`). Reports honest status if offline.
+     */
+    fun generateAiOverlayOnNewsroomPage(briefTopic: String) {
+        val cleanTopic = briefTopic.trim().ifBlank {
+            _uiState.value.corePipelineSession.fullStoryText.ifBlank {
+                _uiState.value.activeProject.ideaSpark.trim()
+            }
+        }
+        if (cleanTopic.isEmpty()) {
+            val msg = "Enter a news brief topic before generating an AI overlay."
+            _uiState.update { it.copy(errorMessage = msg) }
+            a2uiController.syncNewsroomSurface(remotionUnused = false, statusMessage = msg)
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(errorMessage = null) }
+            a2uiController.syncNewsroomSurface(
+                remotionUnused = false,
+                statusMessage = "Generating AI overlay draft…"
+            )
+
+            val onDeviceResult = onDevicePromptEngine.generateBroadcastPackaging(cleanTopic)
+            if (onDeviceResult.isSuccess) {
+                val pkg = onDeviceResult.getOrThrow()
+                val msg = "Generated on-device AI overlay — review and click Save Overlay."
+                a2uiController.updateOverlayDraftFields(
+                    headline = pkg.chyronHeadline,
+                    subline = pkg.chyronSubline,
+                    calloutStat = pkg.primaryAngleLabel,
+                    statusMessage = msg
+                )
+                _uiState.update { it.copy(statusNotice = msg) }
+                return@launch
+            }
+
+            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+            val remoteRes = runCatching {
+                val health = macRigGateway.resolveAndCheckHealth(rigUrl)
+                macRigGateway.generateAiOverlayBrief(health.resolvedUrl, cleanTopic)
+            }
+            remoteRes.onSuccess { brief ->
+                val msg = "AI overlay draft generated — review and save for News Briefs."
+                a2uiController.updateOverlayDraftFields(
+                    headline = brief.headline,
+                    subline = brief.subline,
+                    calloutStat = brief.calloutStat,
+                    statusMessage = msg
+                )
+                _uiState.update { it.copy(statusNotice = msg) }
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                val honestMsg = "AI overlay service offline (${err.localizedMessage ?: "unreachable"}) — edit overlay fields directly and save."
+                _uiState.update { it.copy(errorMessage = honestMsg) }
+                a2uiController.syncNewsroomSurface(remotionUnused = false, statusMessage = honestMsg)
+            }
+        }
+    }
+
+    fun saveNewsroomOverlayObject(
+        kind: OverlayObjectKind,
         headline: String,
         subline: String,
-        scriptText: String
+        calloutStat: String,
+        durationSec: Int = 4,
+        a2uiComponentsJson: String = ""
     ) {
-        val cleanScript = scriptText.trim().ifBlank {
-            _uiState.value.activeProject.ideaSpark.trim()
+        val cleanHeadline = headline.trim()
+        if (cleanHeadline.isEmpty()) {
+            val msg = "Enter an overlay headline before saving."
+            _uiState.update { it.copy(errorMessage = msg) }
+            a2uiController.syncNewsroomSurface(remotionUnused = false, statusMessage = msg)
+            return
         }
-        if (cleanScript.isBlank()) {
+        val cleanSubline = subline.trim()
+        val cleanStat = calloutStat.trim()
+        val jsonPayload = a2uiComponentsJson.ifBlank {
+            AircheckA2uiController.serializeOverlayAsA2uiComponentsJson(
+                headline = cleanHeadline,
+                subline = cleanSubline,
+                calloutStat = cleanStat
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val saved = SavedNewsroomOverlay(
+                kind = kind,
+                headline = cleanHeadline,
+                subline = cleanSubline,
+                calloutStat = cleanStat,
+                durationSec = durationSec.coerceIn(2, 15),
+                a2uiComponentsJson = jsonPayload
+            )
+            localRepo.saveNewsroomOverlay(saved)
+            profileStore.incrementRemotionUsedCount()
+            val msg = "Saved '${saved.headline}' for News Briefs."
             _uiState.update {
-                it.copy(errorMessage = "Enter spoken newsroom copy before generating a clip.")
+                it.copy(
+                    errorMessage = null,
+                    statusNotice = msg,
+                    remotionStatusMessage = msg
+                )
+            }
+            a2uiController.syncNewsroomSurface(remotionUnused = false, statusMessage = msg)
+        }
+    }
+
+    fun deleteSavedNewsroomOverlay(overlayId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            localRepo.deleteNewsroomOverlay(overlayId)
+            val current = _uiState.value.corePipelineSession
+            if (overlayId in current.selectedOverlayIds) {
+                val updated = current.copy(
+                    selectedOverlayIds = current.selectedOverlayIds - overlayId,
+                    updatedAtMillis = System.currentTimeMillis()
+                )
+                localRepo.saveCorePipelineSession(updated)
+                _uiState.update { it.copy(corePipelineSession = updated) }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Single Canonical 5-Stage Core Pipeline Actions
+    // (`TTS -> Iterate on Story -> Speech to Talking Head -> Chop into B-Roll -> Final Review`)
+    // =========================================================================
+
+    /**
+     * Routes any drafted story into Stage 1 (`01 TTS`) of the single canonical Core Pipeline
+     * instead of bypassing straight to a one-shot clip render.
+     */
+    fun openStoryInCorePipeline(
+        plainText: String,
+        headline: String = ""
+    ) {
+        val clean = plainText.trim()
+        if (clean.isBlank()) {
+            _uiState.update {
+                it.copy(errorMessage = "Write or speak a story draft before entering the Core Pipeline.")
             }
             return
         }
-        val cleanSubline = subline.trim().ifBlank { "AIRCHECK LIVE DESK" }
+        val effectiveHeadline = headline.trim().ifBlank {
+            clean.split('.', '!', '?').firstOrNull().orEmpty().trim().take(40)
+        }
         val project = _uiState.value.activeProject
         persistProject(
             project.copy(
-                stageConfig = project.stageConfig.copy(
-                    chyronSubline = cleanSubline
+                title = effectiveHeadline.ifBlank { "Story Draft" },
+                ideaSpark = clean,
+                beats = listOf(
+                    ScriptBeat(
+                        index = 0,
+                        spokenText = clean,
+                        durationSec = estimateDurationSeconds(clean, 8).coerceIn(4, 30)
+                    )
                 )
             )
         )
-        viewModelScope.launch {
-            profileStore.incrementRemotionUsedCount()
+        viewModelScope.launch(Dispatchers.IO) {
+            val session = corePipelineCoordinator.seedSessionFromStory(
+                rawStoryText = clean,
+                headline = effectiveHeadline,
+                scriptId = project.id
+            )
+            _uiState.update {
+                it.copy(
+                    corePipelineSession = session,
+                    openCorePipelineEvent = true,
+                    errorMessage = null,
+                    statusNotice = "Story loaded in Core Pipeline (01 TTS)."
+                )
+            }
         }
-        renderDraftAsBroadcastClip(
-            plainText = cleanScript,
-            headline = headline.trim()
+    }
+
+    /**
+     * Retained as a forwarding alias so any existing caller routes strictly into [openStoryInCorePipeline].
+     */
+    fun renderDraftAsBroadcastClip(
+        plainText: String,
+        headline: String = ""
+    ) {
+        openStoryInCorePipeline(plainText = plainText, headline = headline)
+    }
+
+    fun consumeOpenCorePipelineEvent() {
+        _uiState.update { it.copy(openCorePipelineEvent = false) }
+    }
+
+    fun updateCoreStoryRawText(rawText: String) {
+        val current = _uiState.value.corePipelineSession
+        val split = CoreStoryPipelineCoordinator.splitStoryIntoClauses(rawText, current.clauses)
+        val optimistic = current.copy(
+            clauses = split,
+            title = current.title.ifBlank { split.firstOrNull()?.spokenText?.take(40).orEmpty() },
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _uiState.update { it.copy(corePipelineSession = optimistic) }
+        viewModelScope.launch(Dispatchers.IO) {
+            localRepo.saveCorePipelineSession(optimistic)
+        }
+    }
+
+    fun updateCoreClauseText(index: Int, updatedText: String) {
+        val current = _uiState.value.corePipelineSession
+        if (index !in current.clauses.indices) return
+        val nextClauses = current.clauses.mapIndexed { idx, clause ->
+            if (idx == index) clause.copy(spokenText = updatedText) else clause
+        }
+        val optimistic = current.copy(
+            clauses = nextClauses,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _uiState.update { it.copy(corePipelineSession = optimistic) }
+        viewModelScope.launch(Dispatchers.IO) {
+            corePipelineCoordinator.updateStoryClauses(optimistic, nextClauses)
+        }
+    }
+
+    fun addCoreClause(initialText: String = "") {
+        val current = _uiState.value.corePipelineSession
+        val nextClauses = current.clauses + CoreStoryClause(
+            index = current.clauses.size,
+            spokenText = initialText,
+            segmentMode = BrollSegmentMode.TALKING_HEAD
+        )
+        val optimistic = current.copy(
+            clauses = nextClauses,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _uiState.update { it.copy(corePipelineSession = optimistic) }
+        viewModelScope.launch(Dispatchers.IO) {
+            corePipelineCoordinator.updateStoryClauses(optimistic, nextClauses)
+        }
+    }
+
+    fun removeCoreClause(index: Int) {
+        val current = _uiState.value.corePipelineSession
+        if (current.clauses.size <= 1 || index !in current.clauses.indices) return
+        val nextClauses = current.clauses.filterIndexed { idx, _ -> idx != index }
+            .mapIndexed { idx, c -> c.copy(index = idx) }
+        val optimistic = current.copy(
+            clauses = nextClauses,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _uiState.update { it.copy(corePipelineSession = optimistic) }
+        viewModelScope.launch(Dispatchers.IO) {
+            corePipelineCoordinator.updateStoryClauses(optimistic, nextClauses)
+        }
+    }
+
+    fun startCoreVoiceoverRecording() {
+        if (_uiState.value.isRecordingCoreVoiceover) return
+        _uiState.update { it.copy(isRecordingCoreVoiceover = true, errorMessage = null) }
+        vadAudioEngine.startMomentaryClutch(
+            scope = viewModelScope,
+            onError = { err ->
+                _uiState.update {
+                    it.copy(
+                        isRecordingCoreVoiceover = false,
+                        errorMessage = err
+                    )
+                }
+            }
         )
     }
+
+    fun stopCoreVoiceoverRecordingAndRunTts() {
+        if (!_uiState.value.isRecordingCoreVoiceover) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val scratchWav = casStore.createTempScratchFile("core_voiceover_", "wav")
+            val saved = vadAudioEngine.stopMomentaryClutch(scratchWav)
+            _uiState.update { it.copy(isRecordingCoreVoiceover = false) }
+            if (saved == null || !saved.exists()) {
+                _uiState.update { it.copy(errorMessage = "No voiced speech captured from microphone.") }
+                return@launch
+            }
+            runCoreStage1Tts(localMicWavFile = saved)
+        }
+    }
+
+    fun runCoreStage1Tts(localMicWavFile: File? = null) {
+        if (_uiState.value.isCoreStageBusy) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentSession = _uiState.value.corePipelineSession
+            _uiState.update {
+                it.copy(
+                    isCoreStageBusy = true,
+                    coreStageProgress = 0.25f,
+                    coreStageStatusLabel = "Synthesizing story TTS…",
+                    errorMessage = null
+                )
+            }
+            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+            val result = corePipelineCoordinator.synthesizeStage1Tts(
+                session = currentSession,
+                rigBaseUrl = rigUrl,
+                localMicWavFile = localMicWavFile
+            )
+            result.onSuccess { updated ->
+                _uiState.update {
+                    it.copy(
+                        corePipelineSession = updated,
+                        isCoreStageBusy = false,
+                        coreStageProgress = 1f,
+                        coreStageStatusLabel = null,
+                        statusNotice = "TTS Pass #${updated.ttsIterationCount} ready (${updated.ttsDurationMs} ms)."
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isCoreStageBusy = false,
+                        coreStageProgress = 0f,
+                        coreStageStatusLabel = null,
+                        errorMessage = err.localizedMessage ?: "TTS synthesis failed."
+                    )
+                }
+            }
+        }
+    }
+
+    fun playCoreTtsPreview() {
+        val session = _uiState.value.corePipelineSession
+        val localWav = casStore.fileForSha(session.ttsVoiceSha, "wav")
+        val uri = when {
+            localWav != null -> Uri.fromFile(localWav)
+            !session.ttsAudioUrl.isNullOrBlank() -> Uri.parse(session.ttsAudioUrl)
+            else -> null
+        } ?: return
+        playerController.prepareUri(uri, autoPlay = true)
+    }
+
+    fun selectCoreStage(targetStage: CorePipelineStage) {
+        val current = _uiState.value.corePipelineSession
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = corePipelineCoordinator.advanceToStage(current, targetStage)
+            res.onSuccess { updated ->
+                _uiState.update {
+                    it.copy(
+                        corePipelineSession = updated,
+                        errorMessage = null
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(errorMessage = err.localizedMessage ?: "Complete the current stage first.")
+                }
+            }
+        }
+    }
+
+    fun lockStoryAndAdvanceToHead() {
+        selectCoreStage(CorePipelineStage.SPEECH_TO_TALKING_HEAD)
+    }
+
+    fun runCoreStage3SpeechToHead(pollIntervalMs: Long = 300L) {
+        if (_uiState.value.isCoreStageBusy) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentSession = _uiState.value.corePipelineSession
+            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+            val photoSha = _uiState.value.activeProject.stageConfig.activePhotoSha
+                ?: persisted.persona.defaultPhotoSha.ifBlank { null }
+
+            _uiState.update {
+                it.copy(
+                    isCoreStageBusy = true,
+                    coreStageProgress = 0.08f,
+                    coreStageStatusLabel = "Matching speech to talking head…",
+                    errorMessage = null
+                )
+            }
+
+            val result = corePipelineCoordinator.matchSpeechToTalkingHeadStage3(
+                session = currentSession,
+                rigBaseUrl = rigUrl,
+                photoSha = photoSha,
+                pollIntervalMs = pollIntervalMs,
+                onProgress = { progress, detail ->
+                    _uiState.update {
+                        it.copy(
+                            coreStageProgress = progress,
+                            coreStageStatusLabel = detail
+                        )
+                    }
+                }
+            )
+            result.onSuccess { updated ->
+                _uiState.update {
+                    it.copy(
+                        corePipelineSession = updated,
+                        isCoreStageBusy = false,
+                        coreStageProgress = 1f,
+                        coreStageStatusLabel = null,
+                        statusNotice = "Speech matched to talking head — choose B-roll cuts."
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isCoreStageBusy = false,
+                        coreStageProgress = 0f,
+                        coreStageStatusLabel = null,
+                        errorMessage = err.localizedMessage ?: "Speech-to-talking-head render failed."
+                    )
+                }
+            }
+        }
+    }
+
+    fun toggleClauseBrollMode(index: Int) {
+        val current = _uiState.value.corePipelineSession
+        if (index !in current.clauses.indices) return
+        val updatedClauses = current.clauses.mapIndexed { idx, clause ->
+            if (idx != index) {
+                clause
+            } else {
+                val nextMode = if (clause.segmentMode == BrollSegmentMode.TALKING_HEAD) {
+                    BrollSegmentMode.BROLL_CUTAWAY
+                } else {
+                    BrollSegmentMode.TALKING_HEAD
+                }
+                clause.copy(
+                    segmentMode = nextMode,
+                    brollCaption = if (nextMode == BrollSegmentMode.BROLL_CUTAWAY && clause.brollCaption.isBlank()) {
+                        clause.spokenText.take(48)
+                    } else {
+                        clause.brollCaption
+                    }
+                )
+            }
+        }
+        val optimistic = current.copy(
+            clauses = updatedClauses,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _uiState.update { it.copy(corePipelineSession = optimistic) }
+        viewModelScope.launch(Dispatchers.IO) {
+            corePipelineCoordinator.updateStoryClauses(optimistic, updatedClauses)
+        }
+    }
+
+    fun updateClauseBrollCaption(index: Int, caption: String) {
+        val current = _uiState.value.corePipelineSession
+        if (index !in current.clauses.indices) return
+        val updatedClauses = current.clauses.mapIndexed { idx, clause ->
+            if (idx == index) clause.copy(brollCaption = caption) else clause
+        }
+        val optimistic = current.copy(
+            clauses = updatedClauses,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _uiState.update { it.copy(corePipelineSession = optimistic) }
+        viewModelScope.launch(Dispatchers.IO) {
+            corePipelineCoordinator.updateStoryClauses(optimistic, updatedClauses)
+        }
+    }
+
+    fun toggleSavedOverlayForPipeline(overlayId: String) {
+        val current = _uiState.value.corePipelineSession
+        val nextIds = if (overlayId in current.selectedOverlayIds) {
+            current.selectedOverlayIds - overlayId
+        } else {
+            current.selectedOverlayIds + overlayId
+        }
+        val updated = current.copy(
+            selectedOverlayIds = nextIds,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _uiState.update { it.copy(corePipelineSession = updated) }
+        viewModelScope.launch(Dispatchers.IO) {
+            localRepo.saveCorePipelineSession(updated)
+        }
+    }
+
+    fun runCoreStage4ChopBroll() {
+        if (_uiState.value.isCoreStageBusy) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentSession = _uiState.value.corePipelineSession
+            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+            val photoSha = _uiState.value.activeProject.stageConfig.activePhotoSha
+                ?: persisted.persona.defaultPhotoSha.ifBlank { null }
+            val savedOverlays = localRepo.listSavedNewsroomOverlays()
+
+            _uiState.update {
+                it.copy(
+                    isCoreStageBusy = true,
+                    coreStageProgress = 0.35f,
+                    coreStageStatusLabel = "Chopping talking head into B-roll…",
+                    errorMessage = null
+                )
+            }
+
+            val result = corePipelineCoordinator.chopTalkingHeadIntoBrollStage4(
+                session = currentSession,
+                rigBaseUrl = rigUrl,
+                allSavedOverlays = savedOverlays,
+                photoSha = photoSha
+            )
+            result.onSuccess { (updatedSession, _) ->
+                if (updatedSession.selectedOverlayIds.isNotEmpty()) {
+                    profileStore.incrementRemotionUsedCount()
+                }
+                _uiState.update {
+                    it.copy(
+                        corePipelineSession = updatedSession,
+                        isCoreStageBusy = false,
+                        coreStageProgress = 1f,
+                        coreStageStatusLabel = null,
+                        statusNotice = "Final video ready for review."
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isCoreStageBusy = false,
+                        coreStageProgress = 0f,
+                        coreStageStatusLabel = null,
+                        errorMessage = err.localizedMessage ?: "B-roll chop failed."
+                    )
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Phone-Only Voice Model Care & Studio Settings
+    // =========================================================================
 
     fun setPhoneOnlyVoiceMode(enabled: Boolean) {
         if (enabled) {
@@ -610,299 +1154,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun renderDraftAsBroadcastClip(
-        plainText: String,
-        headline: String = "",
-        pollIntervalMs: Long = MAC_RIG_POLL_INTERVAL_MS
-    ) {
-        val clean = plainText.trim()
-        if (clean.isBlank()) return
-        val effectiveHeadline = headline.trim().ifBlank {
-            clean.split('.', '!', '?').firstOrNull().orEmpty().trim().take(36).uppercase()
-        }
-        val project = _uiState.value.activeProject
-        persistProject(
-            project.copy(
-                title = effectiveHeadline.ifBlank { "BREAKING NEWS" },
-                ideaSpark = clean,
-                voiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
-                masterAudioSha = null,
-                stageConfig = project.stageConfig.copy(
-                    chyronHeadline = effectiveHeadline,
-                    chyronSubline = project.stageConfig.chyronSubline.ifBlank { "AIRCHECK LIVE DESK" },
-                    showBrandBug = true
-                ),
-                beats = listOf(
-                    ScriptBeat(
-                        index = 0,
-                        spokenText = clean,
-                        durationSec = estimateDurationSeconds(clean, 8).coerceIn(4, 15)
-                    )
-                )
-            )
-        )
-        renderActiveProject(pollIntervalMs = pollIntervalMs)
-    }
-
-    fun renderActiveProject(pollIntervalMs: Long = MAC_RIG_POLL_INTERVAL_MS) {
-        val current = _uiState.value.activeProject
-        val settings = _uiState.value.settings
-        val photoSha = current.stageConfig.activePhotoSha ?: settings.persona.defaultPhotoSha.ifBlank { null }
-
-        val effectiveProject = when {
-            current.activeBeats.isNotEmpty() -> current.copy(voiceSource = VoiceSource.ENROLLED_VOICE_CLONE)
-            current.ideaSpark.isNotBlank() -> current.copy(
-                voiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
-                beats = listOf(ScriptBeat(index = 0, spokenText = current.ideaSpark.trim()))
-            )
-            else -> current
-        }
-
-        if (effectiveProject.activeBeats.isEmpty()) {
-            _uiState.update {
-                it.copy(errorMessage = "Draft text is empty; write or speak a draft before broadcasting.")
-            }
-            return
-        }
-
-        viewModelScope.launch {
-            _uiState.update { it.copy(isEnqueuingRender = true, errorMessage = null) }
-            try {
-                val resolvedUrl = resolveRigUrlOrThrow()
-                val enqueued = macRigGateway.enqueueMacRigRender(
-                    rigBaseUrl = resolvedUrl,
-                    project = effectiveProject,
-                    photoSha = photoSha,
-                    resolution = "720P",
-                    ratio = "9:16",
-                    maxDurationSec = effectiveProject.totalActiveSeconds.coerceIn(5, 10)
-                )
-                val now = System.currentTimeMillis()
-                val displayTitle = effectiveProject.stageConfig.chyronHeadline
-                    .ifBlank { effectiveProject.title }
-                    .ifBlank { effectiveProject.ideaSpark.take(36) }
-                    .ifBlank { "Breaking News" }
-                val clip = ClipRecord(
-                    id = enqueued.clipId,
-                    scriptId = effectiveProject.id,
-                    jobId = enqueued.jobId,
-                    title = displayTitle,
-                    photoSha = photoSha,
-                    voiceSha = effectiveProject.masterAudioSha,
-                    alignSha = null,
-                    lipsyncSha = null,
-                    finalSha = null,
-                    status = RenderJobStatus.QUEUED,
-                    progressFraction = 0.08f,
-                    stageDetail = "Preparing broadcast",
-                    errorMessage = null,
-                    durationMs = effectiveProject.totalActiveSeconds * 1000L,
-                    waveformPeaks = emptyList(),
-                    thumbHash = null,
-                    alignedWords = emptyList(),
-                    chyronHeadline = effectiveProject.stageConfig.chyronHeadline.ifBlank { displayTitle },
-                    chyronSubline = effectiveProject.stageConfig.chyronSubline,
-                    remoteLipsyncUrl = null,
-                    remoteFinalUrl = null,
-                    exportedUri = null,
-                    createdAtMillis = now,
-                    updatedAtMillis = now
-                )
-                localRepo.upsertClip(clip)
-                _uiState.update {
-                    it.copy(
-                        isEnqueuingRender = false,
-                        liveNavToClipId = clip.id,
-                        statusNotice = "Generating news clip…"
-                    )
-                }
-                startMacRigJobPolling(
-                    rigBaseUrl = resolvedUrl,
-                    initialClip = clip,
-                    pollIntervalMs = pollIntervalMs
-                )
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                _uiState.update {
-                    it.copy(
-                        isEnqueuingRender = false,
-                        errorMessage = e.localizedMessage ?: "Unable to connect to your Mac studio."
-                    )
-                }
-            }
-        }
-    }
-
-    private suspend fun resolveRigUrlOrThrow(): String {
-        val configured = _uiState.value.settings.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
-        val health = macRigGateway.resolveAndCheckHealth(configured)
-        _uiState.update {
-            it.copy(
-                rigHealth = RigHealthUiState(
-                    status = RigConnectionStatus.ONLINE,
-                    resolvedUrl = health.resolvedUrl,
-                    loraVersion = health.loraVersion,
-                    bundleVersion = health.bundleVersion,
-                    pendingPreferences = health.pendingPreferences,
-                    renderBridgeAvailable = health.renderBridgeAvailable,
-                    errorMessage = null
-                )
-            )
-        }
-        return health.resolvedUrl
-    }
-
-    private fun startMacRigJobPolling(
-        rigBaseUrl: String,
-        initialClip: ClipRecord,
-        pollIntervalMs: Long
-    ) {
-        macRigPollingJobs.remove(initialClip.id)?.cancel()
-        val intervalMs = pollIntervalMs.coerceAtLeast(25L)
-        macRigPollingJobs[initialClip.id] = viewModelScope.launch {
-            var consecutiveErrors = 0
-            try {
-                while (isActive) {
-                    delay(intervalMs)
-                    val pollResult = runCatching {
-                        macRigGateway.pollMacRigJob(rigBaseUrl, initialClip.jobId)
-                    }
-                    if (pollResult.isFailure) {
-                        val err = pollResult.exceptionOrNull()
-                        if (err is CancellationException) throw err
-                        consecutiveErrors++
-                        if (consecutiveErrors >= 5) {
-                            val latest = localRepo.getClipById(initialClip.id) ?: initialClip
-                            val errMsg = err?.localizedMessage ?: "Lost connection to Mac studio while rendering."
-                            localRepo.upsertClip(
-                                latest.copy(
-                                    status = RenderJobStatus.FAILED,
-                                    stageDetail = "Connection lost",
-                                    errorMessage = errMsg,
-                                    updatedAtMillis = System.currentTimeMillis()
-                                )
-                            )
-                            _uiState.update { it.copy(errorMessage = errMsg) }
-                            break
-                        }
-                        continue
-                    }
-
-                    consecutiveErrors = 0
-                    val snapshot = pollResult.getOrThrow()
-                    val latest = localRepo.getClipById(initialClip.id) ?: initialClip
-
-                    when (snapshot.status) {
-                        RenderJobStatus.READY -> {
-                            val videoUrl = snapshot.videoUrl
-                            if (videoUrl.isNullOrBlank()) {
-                                val msg = "Render finished without a video URL."
-                                localRepo.upsertClip(
-                                    latest.copy(
-                                        status = RenderJobStatus.FAILED,
-                                        stageDetail = "Missing video",
-                                        errorMessage = msg,
-                                        updatedAtMillis = System.currentTimeMillis()
-                                    )
-                                )
-                                _uiState.update { it.copy(errorMessage = msg) }
-                                break
-                            }
-
-                            val resolvedDuration = if (snapshot.durationMs > 0L) snapshot.durationMs else latest.durationMs
-                            localRepo.upsertClip(
-                                latest.copy(
-                                    status = RenderJobStatus.PACKAGING,
-                                    progressFraction = 0.95f,
-                                    stageDetail = "Saving video to phone",
-                                    remoteFinalUrl = videoUrl,
-                                    durationMs = resolvedDuration,
-                                    errorMessage = null,
-                                    updatedAtMillis = System.currentTimeMillis()
-                                )
-                            )
-
-                            val downloadRes = runCatching {
-                                macRigGateway.downloadRenderedMp4ToCas(videoUrl)
-                            }
-                            downloadRes.onSuccess { stored ->
-                                val currentClip = localRepo.getClipById(initialClip.id) ?: latest
-                                localRepo.upsertClip(
-                                    currentClip.copy(
-                                        status = RenderJobStatus.READY,
-                                        progressFraction = 1f,
-                                        stageDetail = "Ready",
-                                        finalSha = stored.sha256,
-                                        remoteFinalUrl = videoUrl,
-                                        durationMs = resolvedDuration,
-                                        errorMessage = null,
-                                        updatedAtMillis = System.currentTimeMillis()
-                                    )
-                                )
-                                _uiState.update {
-                                    it.copy(statusNotice = "News clip ready.")
-                                }
-                                refreshRemoteClips()
-                            }.onFailure { err ->
-                                if (err is CancellationException) throw err
-                                val msg = err.localizedMessage ?: "Failed to download video."
-                                val currentClip = localRepo.getClipById(initialClip.id) ?: latest
-                                localRepo.upsertClip(
-                                    currentClip.copy(
-                                        status = RenderJobStatus.FAILED,
-                                        stageDetail = "Download failed",
-                                        remoteFinalUrl = videoUrl,
-                                        errorMessage = msg,
-                                        updatedAtMillis = System.currentTimeMillis()
-                                    )
-                                )
-                                _uiState.update { it.copy(errorMessage = msg) }
-                            }
-                            break
-                        }
-
-                        RenderJobStatus.FAILED -> {
-                            val msg = snapshot.errorMessage ?: "Video generation failed."
-                            localRepo.upsertClip(
-                                latest.copy(
-                                    status = RenderJobStatus.FAILED,
-                                    progressFraction = snapshot.progressFraction,
-                                    stageDetail = snapshot.stageDetail.ifBlank { "Failed" },
-                                    errorMessage = msg,
-                                    updatedAtMillis = System.currentTimeMillis()
-                                )
-                            )
-                            _uiState.update { it.copy(errorMessage = msg) }
-                            break
-                        }
-
-                        else -> {
-                            localRepo.upsertClip(
-                                latest.copy(
-                                    status = snapshot.status,
-                                    progressFraction = snapshot.progressFraction.coerceIn(0.08f, 0.95f),
-                                    stageDetail = friendlyStageDetail(snapshot),
-                                    errorMessage = null,
-                                    updatedAtMillis = System.currentTimeMillis()
-                                )
-                            )
-                        }
-                    }
-                }
-            } finally {
-                macRigPollingJobs.remove(initialClip.id)
-            }
-        }
-    }
-
-    private fun friendlyStageDetail(snapshot: MacRigJobSnapshot): String = when (snapshot.status) {
-        RenderJobStatus.QUEUED -> "Starting studio render"
-        RenderJobStatus.VOICE -> "Generating anchor voice"
-        RenderJobStatus.LIPSYNC -> "Filming news anchor"
-        RenderJobStatus.PACKAGING -> "Adding breaking news graphics"
-        else -> snapshot.stageDetail.ifBlank { snapshot.status.label }
-    }
-
     fun exportClip(clip: ClipRecord, openShareSheet: Boolean = false) {
         viewModelScope.launch {
             _uiState.update { it.copy(exportState = ExportState.EXPORTING, errorMessage = null) }
@@ -1013,8 +1264,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         super.onCleared()
         rigHealthCheckJob?.cancel()
-        macRigPollingJobs.values.forEach { it.cancel() }
-        macRigPollingJobs.clear()
     }
 
     companion object {

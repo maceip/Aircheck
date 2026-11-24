@@ -57,7 +57,7 @@ data class AircheckProfileProto(
     @ProtoNumber(17) val trainingJobId: String = "",
     @ProtoNumber(18) val trainingStatus: String = "",
     @ProtoNumber(19) val trainingError: String = "",
-    @ProtoNumber(20) val fcmToken: String = "",
+    // @ProtoNumber(20) reserved (legacy push token removed)
     @ProtoNumber(21) val tailscaleRigUrl: String = DEFAULT_MAC_RIG_LAN_URL,
     @ProtoNumber(22) val remotionUsedCount: Int = 0,
     @ProtoNumber(23) val remotionInstallRequested: Boolean = false,
@@ -72,7 +72,6 @@ data class StudioSettings(
     val activeScriptId: String = "",
     val persona: PersonaProfile = PersonaProfile(),
     val providers: StageProviderSettings = StageProviderSettings(),
-    val fcmToken: String = "",
     val tailscaleRigUrl: String = DEFAULT_MAC_RIG_LAN_URL,
     val remotionUsedCount: Int = 0,
     val remotionInstallRequested: Boolean = false,
@@ -197,7 +196,6 @@ class AircheckProfileStore(
             useLanHead = useLanHead,
             useLanPackage = useLanPackage
         ),
-        fcmToken = fcmToken,
         tailscaleRigUrl = tailscaleRigUrl.ifBlank { DEFAULT_MAC_RIG_LAN_URL },
         remotionUsedCount = remotionUsedCount.coerceAtLeast(0),
         remotionInstallRequested = remotionInstallRequested,

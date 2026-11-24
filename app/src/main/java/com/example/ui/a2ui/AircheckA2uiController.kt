@@ -42,9 +42,15 @@ import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
+import com.example.data.OverlayObjectKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 
 sealed interface NewsroomA2uiAction {
     data class AskInstallRemotion(
@@ -52,10 +58,17 @@ sealed interface NewsroomA2uiAction {
         val enableBrollPopups: Boolean
     ) : NewsroomA2uiAction
 
-    data class GenerateNewsroomOverlayClip(
-        val chyronHeadline: String,
-        val chyronSubline: String,
-        val spokenScript: String
+    data class GenerateAiOverlayBrief(
+        val briefTopic: String
+    ) : NewsroomA2uiAction
+
+    data class SaveOverlayObject(
+        val kind: OverlayObjectKind,
+        val headline: String,
+        val subline: String,
+        val calloutStat: String,
+        val durationSec: Int,
+        val a2uiComponentsJson: String
     ) : NewsroomA2uiAction
 }
 
@@ -149,11 +162,12 @@ fun createStockAircheckA2uiCatalog(context: Context): A2uiCatalog {
 }
 
 /**
- * Stock Jetpack A2UI controller managing the Newsroom Studio agent surface:
+ * Stock Jetpack A2UI controller managing the optional Newsroom Overlay Studio surface:
  * - When Remotion has NOT been used yet (`remotionUnused == true`), renders a stock Basic Catalog V1
  *   surface prompting the user to ask to install Remotion for speaking pop-ups, transitions, and B-roll.
- * - Once Remotion is active (`remotionUnused == false`), transitions the surface to the Newsroom
- *   overlay cue-sheet (`chyronHeadline`, `chyronSubline`, `spokenScript`) for broadcast generation.
+ * - Once Remotion is active (`remotionUnused == false`), renders the Savable News Brief Overlay Builder
+ *   where AI-generated or user-edited stock A2UI objects are previewed and saved to Room (`SavedNewsroomOverlay`)
+ *   for optional attachment in Stage 4 (`04 B-ROLL`) of the Core Pipeline.
  */
 class AircheckA2uiController(
     context: Context,
@@ -201,15 +215,37 @@ class AircheckA2uiController(
                 )
             }
 
-            EVENT_GENERATE_NEWSROOM_CLIP -> {
-                val headline = (event.context["chyronHeadline"] as? String)?.trim().orEmpty()
-                val subline = (event.context["chyronSubline"] as? String)?.trim().orEmpty()
-                val script = (event.context["spokenScript"] as? String)?.trim().orEmpty()
+            EVENT_GENERATE_AI_OVERLAY -> {
+                val topic = (event.context["briefTopic"] as? String)?.trim().orEmpty()
                 onAction(
-                    NewsroomA2uiAction.GenerateNewsroomOverlayClip(
-                        chyronHeadline = headline,
-                        chyronSubline = subline,
-                        spokenScript = script
+                    NewsroomA2uiAction.GenerateAiOverlayBrief(
+                        briefTopic = topic
+                    )
+                )
+            }
+
+            EVENT_SAVE_OVERLAY_OBJECT -> {
+                val headline = (event.context["headline"] as? String)?.trim().orEmpty()
+                val subline = (event.context["subline"] as? String)?.trim().orEmpty()
+                val calloutStat = (event.context["calloutStat"] as? String)?.trim().orEmpty()
+                val kind = if (calloutStat.isNotEmpty()) {
+                    OverlayObjectKind.STAT_CALLOUT
+                } else {
+                    OverlayObjectKind.LOWER_THIRD
+                }
+                val serialized = serializeOverlayAsA2uiComponentsJson(
+                    headline = headline,
+                    subline = subline,
+                    calloutStat = calloutStat
+                )
+                onAction(
+                    NewsroomA2uiAction.SaveOverlayObject(
+                        kind = kind,
+                        headline = headline,
+                        subline = subline,
+                        calloutStat = calloutStat,
+                        durationSec = 4,
+                        a2uiComponentsJson = serialized
                     )
                 )
             }
@@ -220,8 +256,8 @@ class AircheckA2uiController(
         remotionUnused: Boolean,
         statusMessage: String,
         defaultHeadline: String = "",
-        defaultSubline: String = "AIRCHECK LIVE DESK",
-        defaultScript: String = ""
+        defaultSubline: String = "AIRCHECK NEWS BRIEF",
+        defaultBriefTopic: String = ""
     ) {
         val modeChanged = currentSurfaceModeIsRemotionUnused != remotionUnused
         if (modeChanged) {
@@ -261,9 +297,10 @@ class AircheckA2uiController(
                         surfaceId = SURFACE_ID_NEWSROOM,
                         path = "/overlay",
                         value = mapOf(
-                            "chyronHeadline" to defaultHeadline.ifBlank { "BREAKING NEWS" },
-                            "chyronSubline" to defaultSubline.ifBlank { "AIRCHECK LIVE DESK" },
-                            "spokenScript" to defaultScript,
+                            "briefTopic" to defaultBriefTopic,
+                            "headline" to defaultHeadline.ifBlank { "BREAKING BRIEF" },
+                            "subline" to defaultSubline.ifBlank { "AIRCHECK NEWS BRIEF" },
+                            "calloutStat" to "",
                             "statusMessage" to statusMessage
                         )
                     )
@@ -271,7 +308,7 @@ class AircheckA2uiController(
                 processor.processMessage(
                     A2uiUpdateComponentsMessage(
                         surfaceId = SURFACE_ID_NEWSROOM,
-                        components = buildActiveOverlayStudioComponents()
+                        components = buildSavableOverlayStudioComponents()
                     )
                 )
             }
@@ -285,6 +322,43 @@ class AircheckA2uiController(
                 )
             )
         }
+    }
+
+    fun updateOverlayDraftFields(
+        headline: String,
+        subline: String,
+        calloutStat: String,
+        statusMessage: String
+    ) {
+        if (currentSurfaceModeIsRemotionUnused != false) return
+        processor.processMessage(
+            A2uiUpdateDataModelMessage(
+                surfaceId = SURFACE_ID_NEWSROOM,
+                path = "/overlay/headline",
+                value = headline
+            )
+        )
+        processor.processMessage(
+            A2uiUpdateDataModelMessage(
+                surfaceId = SURFACE_ID_NEWSROOM,
+                path = "/overlay/subline",
+                value = subline
+            )
+        )
+        processor.processMessage(
+            A2uiUpdateDataModelMessage(
+                surfaceId = SURFACE_ID_NEWSROOM,
+                path = "/overlay/calloutStat",
+                value = calloutStat
+            )
+        )
+        processor.processMessage(
+            A2uiUpdateDataModelMessage(
+                surfaceId = SURFACE_ID_NEWSROOM,
+                path = "/overlay/statusMessage",
+                value = statusMessage
+            )
+        )
     }
 
     private fun buildRemotionInstallPromptComponents(): List<A2uiComponentPayload> = listOf(
@@ -319,7 +393,7 @@ class AircheckA2uiController(
             id = "remotion_subtitle",
             type = "Text",
             properties = mapOf(
-                "text" to "Ask to install Remotion so Newsroom clips can render timed speaking pop-ups, transitions, and B-roll.",
+                "text" to "Ask to install Remotion so News Briefs can attach reusable A2UI pop-up overlays.",
                 "variant" to "body"
             )
         ),
@@ -375,7 +449,7 @@ class AircheckA2uiController(
         )
     )
 
-    private fun buildActiveOverlayStudioComponents(): List<A2uiComponentPayload> = listOf(
+    private fun buildSavableOverlayStudioComponents(): List<A2uiComponentPayload> = listOf(
         A2uiComponentPayload(
             id = "root",
             type = "Card",
@@ -387,11 +461,14 @@ class AircheckA2uiController(
             properties = mapOf(
                 "children" to listOf(
                     "overlay_title",
+                    "overlay_topic_field",
+                    "overlay_ai_generate_button",
                     "overlay_headline_field",
                     "overlay_subline_field",
-                    "overlay_script_field",
+                    "overlay_stat_field",
+                    "overlay_preview_card",
                     "overlay_status_text",
-                    "overlay_generate_button"
+                    "overlay_save_button"
                 )
             )
         ),
@@ -399,16 +476,49 @@ class AircheckA2uiController(
             id = "overlay_title",
             type = "Text",
             properties = mapOf(
-                "text" to "Remotion News Pop-Ups & B-Roll Cue Sheet",
+                "text" to "Create Savable News Brief Overlay",
                 "variant" to "h4"
+            )
+        ),
+        A2uiComponentPayload(
+            id = "overlay_topic_field",
+            type = "TextField",
+            properties = mapOf(
+                "label" to "News brief topic for AI draft",
+                "value" to mapOf("path" to "/overlay/briefTopic"),
+                "variant" to "longText"
+            )
+        ),
+        A2uiComponentPayload(
+            id = "overlay_ai_generate_button_label",
+            type = "Text",
+            properties = mapOf(
+                "text" to "Generate AI Overlay",
+                "variant" to "body"
+            )
+        ),
+        A2uiComponentPayload(
+            id = "overlay_ai_generate_button",
+            type = "Button",
+            properties = mapOf(
+                "child" to "overlay_ai_generate_button_label",
+                "variant" to "secondary",
+                "action" to mapOf(
+                    "event" to mapOf(
+                        "name" to EVENT_GENERATE_AI_OVERLAY,
+                        "context" to mapOf(
+                            "briefTopic" to mapOf("path" to "/overlay/briefTopic")
+                        )
+                    )
+                )
             )
         ),
         A2uiComponentPayload(
             id = "overlay_headline_field",
             type = "TextField",
             properties = mapOf(
-                "label" to "Chyron headline",
-                "value" to mapOf("path" to "/overlay/chyronHeadline"),
+                "label" to "Overlay headline",
+                "value" to mapOf("path" to "/overlay/headline"),
                 "variant" to "shortText"
             )
         ),
@@ -416,18 +526,49 @@ class AircheckA2uiController(
             id = "overlay_subline_field",
             type = "TextField",
             properties = mapOf(
-                "label" to "Lower-third subline",
-                "value" to mapOf("path" to "/overlay/chyronSubline"),
+                "label" to "Overlay subline",
+                "value" to mapOf("path" to "/overlay/subline"),
                 "variant" to "shortText"
             )
         ),
         A2uiComponentPayload(
-            id = "overlay_script_field",
+            id = "overlay_stat_field",
             type = "TextField",
             properties = mapOf(
-                "label" to "Spoken newsroom copy",
-                "value" to mapOf("path" to "/overlay/spokenScript"),
-                "variant" to "longText"
+                "label" to "Callout stat (optional)",
+                "value" to mapOf("path" to "/overlay/calloutStat"),
+                "variant" to "shortText"
+            )
+        ),
+        A2uiComponentPayload(
+            id = "overlay_preview_card",
+            type = "Card",
+            properties = mapOf("child" to "overlay_preview_col")
+        ),
+        A2uiComponentPayload(
+            id = "overlay_preview_col",
+            type = "Column",
+            properties = mapOf(
+                "children" to listOf(
+                    "overlay_preview_headline",
+                    "overlay_preview_subline"
+                )
+            )
+        ),
+        A2uiComponentPayload(
+            id = "overlay_preview_headline",
+            type = "Text",
+            properties = mapOf(
+                "text" to mapOf("path" to "/overlay/headline"),
+                "variant" to "h5"
+            )
+        ),
+        A2uiComponentPayload(
+            id = "overlay_preview_subline",
+            type = "Text",
+            properties = mapOf(
+                "text" to mapOf("path" to "/overlay/subline"),
+                "variant" to "caption"
             )
         ),
         A2uiComponentPayload(
@@ -439,26 +580,26 @@ class AircheckA2uiController(
             )
         ),
         A2uiComponentPayload(
-            id = "overlay_generate_button_label",
+            id = "overlay_save_button_label",
             type = "Text",
             properties = mapOf(
-                "text" to "Generate Newsroom Broadcast",
+                "text" to "Save Overlay for News Briefs",
                 "variant" to "body"
             )
         ),
         A2uiComponentPayload(
-            id = "overlay_generate_button",
+            id = "overlay_save_button",
             type = "Button",
             properties = mapOf(
-                "child" to "overlay_generate_button_label",
+                "child" to "overlay_save_button_label",
                 "variant" to "primary",
                 "action" to mapOf(
                     "event" to mapOf(
-                        "name" to EVENT_GENERATE_NEWSROOM_CLIP,
+                        "name" to EVENT_SAVE_OVERLAY_OBJECT,
                         "context" to mapOf(
-                            "chyronHeadline" to mapOf("path" to "/overlay/chyronHeadline"),
-                            "chyronSubline" to mapOf("path" to "/overlay/chyronSubline"),
-                            "spokenScript" to mapOf("path" to "/overlay/spokenScript")
+                            "headline" to mapOf("path" to "/overlay/headline"),
+                            "subline" to mapOf("path" to "/overlay/subline"),
+                            "calloutStat" to mapOf("path" to "/overlay/calloutStat")
                         )
                     )
                 )
@@ -469,8 +610,74 @@ class AircheckA2uiController(
     companion object {
         const val SURFACE_ID_NEWSROOM: String = "newsroom_remotion_surface"
         const val EVENT_ASK_INSTALL_REMOTION: String = "ask_install_remotion"
-        const val EVENT_GENERATE_NEWSROOM_CLIP: String = "generate_newsroom_clip"
+        const val EVENT_GENERATE_AI_OVERLAY: String = "generate_ai_overlay"
+        const val EVENT_SAVE_OVERLAY_OBJECT: String = "save_overlay_object"
         const val DEFAULT_REMOTION_INSTALL_PROMPT: String =
             "Install Remotion for live speaking news pop-ups, transitions, and B-roll."
+
+        fun serializeOverlayAsA2uiComponentsJson(
+            headline: String,
+            subline: String,
+            calloutStat: String
+        ): String {
+            val childIds = buildList {
+                add("saved_headline")
+                if (subline.isNotBlank()) add("saved_subline")
+                if (calloutStat.isNotBlank()) add("saved_stat")
+            }
+            val array = buildJsonArray {
+                add(
+                    buildJsonObject {
+                        put("id", "root")
+                        put("component", "Card")
+                        put("child", "saved_col")
+                    }
+                )
+                add(
+                    buildJsonObject {
+                        put("id", "saved_col")
+                        put("component", "Column")
+                        putJsonArray("children") {
+                            childIds.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) }
+                        }
+                    }
+                )
+                add(
+                    buildJsonObject {
+                        put("id", "saved_headline")
+                        put("component", "Text")
+                        putJsonObject("properties") {
+                            put("text", headline)
+                            put("variant", "h5")
+                        }
+                    }
+                )
+                if (subline.isNotBlank()) {
+                    add(
+                        buildJsonObject {
+                            put("id", "saved_subline")
+                            put("component", "Text")
+                            putJsonObject("properties") {
+                                put("text", subline)
+                                put("variant", "caption")
+                            }
+                        }
+                    )
+                }
+                if (calloutStat.isNotBlank()) {
+                    add(
+                        buildJsonObject {
+                            put("id", "saved_stat")
+                            put("component", "Text")
+                            putJsonObject("properties") {
+                                put("text", calloutStat)
+                                put("variant", "body")
+                            }
+                        }
+                    )
+                }
+            }
+            return array.toString()
+        }
     }
 }

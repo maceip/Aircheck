@@ -76,6 +76,7 @@ VALID_AI_ASSIST_MODES = frozenset({
     "polish_headline",
     "polish_subline",
     "polish_segment",
+    "generate_overlay_brief",
 })
 
 _TAILSCALE_IPV4_NET = ipaddress.ip_network("100.64.0.0/10")
@@ -591,6 +592,7 @@ class RenderJobManager:
         default_avatar_path: Path | str = DEFAULT_AVATAR_PATH,
         max_render_body_bytes: int = MAX_RENDER_BODY_BYTES,
         render_runner: RenderRunnerFn | None = None,
+        tts_runner: Callable[[str, Path], dict[str, Any] | None] | None = None,
     ) -> None:
         self.renders_dir = Path(renders_dir).resolve()
         self.bundles_root = Path(bundles_root).resolve()
@@ -607,6 +609,7 @@ class RenderJobManager:
         self.default_avatar_path = Path(default_avatar_path)
         self.max_render_body_bytes = max_render_body_bytes
         self._render_runner = render_runner
+        self._tts_runner = tts_runner
 
         if python_bin is not None:
             self.python_bin = Path(python_bin)
@@ -1231,6 +1234,355 @@ class RenderJobManager:
             "metrics": metrics,
         }
 
+    def synthesize_story_tts(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Stage 1 of the Core Pipeline: synthesizes spoken WAV + real waveform & clause timings."""
+        if not isinstance(payload, dict):
+            raise ValueError("TTS request body must be a JSON object")
+
+        raw_clauses = payload.get("clauses")
+        clauses_in: list[dict[str, str]] = []
+        if isinstance(raw_clauses, list):
+            for idx, item in enumerate(raw_clauses):
+                if isinstance(item, dict):
+                    txt = str(item.get("spoken_text") or "").strip()
+                    cid = str(item.get("id") or f"clause_{idx}")
+                    if txt:
+                        clauses_in.append({"id": cid, "spoken_text": txt})
+
+        spoken_text = str(payload.get("spoken_text") or "").strip()
+        if not clauses_in and spoken_text:
+            parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", spoken_text) if p.strip()]
+            clauses_in = [
+                {"id": f"clause_{idx}", "spoken_text": part}
+                for idx, part in enumerate(parts)
+            ]
+        if not clauses_in:
+            raise ValueError("Provide non-empty spoken_text or clauses for TTS synthesis.")
+
+        joined_text = " ".join(c["spoken_text"] for c in clauses_in).strip()
+        tts_id = f"tts_{uuid.uuid4().hex[:16]}"
+        self.renders_dir.mkdir(parents=True, exist_ok=True)
+        work_dir = self.jobs_dir / tts_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        out_wav = self.renders_dir / f"{tts_id}.wav"
+
+        metrics: dict[str, Any] | None = None
+        if self._tts_runner is not None:
+            metrics = self._tts_runner(joined_text, out_wav)
+        else:
+            daemon_dir = Path(__file__).resolve().parent
+            synth_script = daemon_dir / "synthesize_and_render.py"
+            if not synth_script.is_file():
+                raise FileNotFoundError(f"synthesize_and_render.py not found at {synth_script}")
+            assets = resolve_latest_synthesis_assets(self.models_root, self.bundles_root)
+            report_json = work_dir / "tts_report.json"
+            synth_cmd = [
+                str(self.python_bin),
+                str(synth_script),
+                "--target-text",
+                joined_text,
+                "--seeds",
+                "948101,948102",
+                "--output-wav",
+                str(out_wav),
+                "--report-json",
+                str(report_json),
+                "--skip-video",
+            ]
+            if assets.get("lora_dir") is not None:
+                synth_cmd.extend(["--lora-dir", str(assets["lora_dir"])])
+            if assets.get("codec_tflite") is not None:
+                synth_cmd.extend(["--codec-tflite", str(assets["codec_tflite"])])
+            if assets.get("master_centroid") is not None:
+                synth_cmd.extend(["--master-centroid", str(assets["master_centroid"])])
+            if assets.get("room_ir") is not None:
+                synth_cmd.extend(["--room-ir", str(assets["room_ir"])])
+            if assets.get("room_tone") is not None:
+                synth_cmd.extend(["--room-tone", str(assets["room_tone"])])
+            proc = subprocess.run(synth_cmd, capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                raise RuntimeError(_summarize_subprocess_error("synthesize_and_render.py", proc))
+
+        if not out_wav.is_file() or out_wav.stat().st_size <= 44:
+            raise RuntimeError("TTS synthesis did not produce a valid WAV file.")
+
+        duration_ms, peaks = _measure_wav_duration_and_peaks(out_wav, num_bins=64)
+        timed_clauses = _distribute_clause_timings(clauses_in, duration_ms)
+        return {
+            "tts_id": tts_id,
+            "audio_url": f"/v1/renders/{tts_id}.wav",
+            "duration_ms": duration_ms,
+            "waveform_peaks": peaks,
+            "clauses": timed_clauses,
+            "metrics": metrics,
+        }
+
+    def chop_talking_head_into_broll(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Stage 4 of the Core Pipeline: chops speech-matched talking head into B-roll + optional saved overlays."""
+        if not isinstance(payload, dict):
+            raise ValueError("Chop B-roll request body must be a JSON object")
+
+        source_job_id = str(payload.get("source_job_id") or "").strip()
+        raw_mp4_b64 = payload.get("source_mp4_base64")
+        title = str(payload.get("title") or "Story Cut").strip() or "Story Cut"
+
+        final_id = f"clip_{uuid.uuid4().hex[:16]}"
+        work_dir = self.jobs_dir / final_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        self.renders_dir.mkdir(parents=True, exist_ok=True)
+
+        if raw_mp4_b64 is not None and str(raw_mp4_b64).strip() != "":
+            src_bytes = _decode_strict_base64(raw_mp4_b64, "source_mp4_base64")
+            src_mp4 = work_dir / "source_head.mp4"
+            src_mp4.write_bytes(src_bytes)
+        elif source_job_id:
+            resolved = self.resolve_render_file(f"{source_job_id}.mp4")
+            if resolved is None:
+                raise ValueError(f"Talking-head render '{source_job_id}.mp4' not found on rig.")
+            src_mp4 = resolved
+        else:
+            raise ValueError("Either source_job_id or source_mp4_base64 is required.")
+
+        raw_clauses = payload.get("clauses")
+        clauses = raw_clauses if isinstance(raw_clauses, list) else []
+        raw_overlays = payload.get("overlays")
+        overlays = raw_overlays if isinstance(raw_overlays, list) else []
+
+        staged_out = work_dir / "chopped_final.mp4"
+        produced_mp4, broll_cuts, applied_overlays = _compose_broll_and_saved_overlays_mp4(
+            src_mp4=src_mp4,
+            out_mp4=staged_out,
+            work_dir=work_dir,
+            clauses=clauses,
+            overlays=overlays,
+        )
+        target_mp4 = self.renders_dir / f"{final_id}.mp4"
+        _atomic_publish_mp4(produced_mp4, target_mp4)
+        duration_ms = _probe_media_duration_ms(target_mp4)
+        now_iso = _utc_now_iso()
+        with self._lock:
+            self._jobs[final_id] = {
+                "job_id": final_id,
+                "script_id": str(payload.get("script_id") or ""),
+                "title": title,
+                "voice_source": "ENROLLED_VOICE_CLONE",
+                "status": "READY",
+                "progress_fraction": 1.0,
+                "stage_detail": "Ready",
+                "error_message": None,
+                "video_url": f"/v1/renders/{final_id}.mp4",
+                "duration_ms": duration_ms,
+                "metrics": None,
+                "created_at_utc": now_iso,
+                "updated_at_utc": now_iso,
+            }
+            self._persist_job_locked(self._jobs[final_id])
+
+        return {
+            "job_id": final_id,
+            "status": "READY",
+            "video_url": f"/v1/renders/{final_id}.mp4",
+            "duration_ms": duration_ms,
+            "broll_cut_count": broll_cuts,
+            "applied_overlay_count": applied_overlays,
+        }
+
+
+def _measure_wav_duration_and_peaks(wav_path: Path, *, num_bins: int = 64) -> tuple[int, list[float]]:
+    import struct
+    import wave
+
+    with wave.open(str(wav_path), "rb") as wf:
+        sr = max(1, wf.getframerate())
+        channels = max(1, wf.getnchannels())
+        sampwidth = wf.getsampwidth()
+        nframes = wf.getnframes()
+        duration_ms = max(1, int(round((nframes * 1000.0) / sr)))
+        raw = wf.readframes(nframes)
+
+    if sampwidth == 2 and len(raw) >= 2:
+        total_shorts = len(raw) // 2
+        shorts = struct.unpack(f"<{total_shorts}h", raw[: total_shorts * 2])
+        mono = [abs(shorts[i]) / 32768.0 for i in range(0, len(shorts), channels)]
+    else:
+        mono = []
+
+    if not mono:
+        return duration_ms, []
+
+    bins = max(1, min(num_bins, len(mono)))
+    step = max(1, len(mono) // bins)
+    peaks: list[float] = []
+    for b in range(bins):
+        start = b * step
+        end = len(mono) if b == bins - 1 else min(len(mono), (b + 1) * step)
+        window = mono[start:end]
+        peaks.append(round(min(1.0, max(window) if window else 0.0), 4))
+    return duration_ms, peaks
+
+
+def _distribute_clause_timings(
+    clauses: list[dict[str, str]],
+    total_duration_ms: int,
+) -> list[dict[str, Any]]:
+    weights = [max(1, len(c["spoken_text"])) for c in clauses]
+    total_w = max(1, sum(weights))
+    cursor = 0
+    out: list[dict[str, Any]] = []
+    for idx, c in enumerate(clauses):
+        if idx == len(clauses) - 1:
+            end_ms = max(cursor + 1, total_duration_ms)
+        else:
+            span = max(200, int(round((total_duration_ms * weights[idx]) / total_w)))
+            end_ms = min(total_duration_ms, cursor + span)
+        out.append(
+            {
+                "id": c["id"],
+                "index": idx,
+                "spoken_text": c["spoken_text"],
+                "start_ms": cursor,
+                "end_ms": end_ms,
+            }
+        )
+        cursor = end_ms
+    return out
+
+
+def _compose_broll_and_saved_overlays_mp4(
+    *,
+    src_mp4: Path,
+    out_mp4: Path,
+    work_dir: Path,
+    clauses: list[Any],
+    overlays: list[Any],
+) -> tuple[Path, int, int]:
+    """Chops talking head into B-roll cutaway windows + optional saved news-brief overlays via PIL + ffmpeg."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    total_ms = max(1000, _probe_media_duration_ms(src_mp4))
+    repo_root = Path(__file__).resolve().parents[2]
+    font_bold_path = repo_root / "app" / "src" / "main" / "res" / "font" / "space_grotesk.ttf"
+    try:
+        f_title = ImageFont.truetype(str(font_bold_path), 40)
+        f_body = ImageFont.truetype(str(font_bold_path), 28)
+        f_tag = ImageFont.truetype(str(font_bold_path), 22)
+    except Exception:
+        f_title = ImageFont.load_default()
+        f_body = ImageFont.load_default()
+        f_tag = ImageFont.load_default()
+
+    timed_pngs: list[tuple[Path, float, float]] = []
+    broll_count = 0
+    overlay_count = 0
+
+    for idx, item in enumerate(clauses):
+        if not isinstance(item, dict):
+            continue
+        mode = str(item.get("segment_mode") or "TALKING_HEAD").upper()
+        if mode != "BROLL_CUTAWAY":
+            continue
+        start_ms = max(0, int(item.get("start_ms") or 0))
+        end_ms = min(total_ms, int(item.get("end_ms") or total_ms))
+        if end_ms <= start_ms:
+            continue
+        caption = str(item.get("broll_caption") or item.get("spoken_text") or "").strip()[:88]
+        png_path = work_dir / f"broll_plate_{idx}.png"
+        img = Image.new("RGBA", (720, 1280), (10, 12, 18, 242))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([(40, 220), (680, 760)], fill=(18, 22, 32, 255), outline=(184, 255, 0, 220), width=3)
+        draw.text((68, 256), "B-ROLL CUTAWAY", font=f_tag, fill=(184, 255, 0, 255))
+        words = caption.split()
+        lines: list[str] = []
+        cur = ""
+        for w in words:
+            cand = f"{cur} {w}".strip()
+            if len(cand) <= 26:
+                cur = cand
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        for line_i, line_txt in enumerate(lines[:5]):
+            draw.text((68, 330 + line_i * 58), line_txt, font=f_title, fill=(244, 246, 250, 255))
+        img.save(png_path)
+        timed_pngs.append((png_path, start_ms / 1000.0, end_ms / 1000.0))
+        broll_count += 1
+
+    for idx, ovl in enumerate(overlays):
+        if not isinstance(ovl, dict):
+            continue
+        headline = str(ovl.get("headline") or "").strip()[:48]
+        subline = str(ovl.get("subline") or "").strip()[:64]
+        stat = str(ovl.get("callout_stat") or "").strip()[:32]
+        dur_sec = max(1, min(30, int(ovl.get("duration_sec") or 4)))
+        if not headline and not subline and not stat:
+            continue
+        start_s = min(max(0.0, idx * 1.5), max(0.0, (total_ms / 1000.0) - 0.5))
+        end_s = min(total_ms / 1000.0, start_s + float(dur_sec))
+        png_path = work_dir / f"saved_ovl_{idx}.png"
+        img = Image.new("RGBA", (720, 1280), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.rounded_rectangle([(32, 1020), (688, 1208)], radius=14, fill=(12, 15, 22, 232), outline=(0, 136, 255, 220), width=2)
+        if stat:
+            draw.text((54, 1038), stat.upper(), font=f_tag, fill=(184, 255, 0, 255))
+        if headline:
+            draw.text((54, 1074), headline.upper(), font=f_title, fill=(255, 255, 255, 255))
+        if subline:
+            draw.text((54, 1134), subline, font=f_body, fill=(180, 192, 210, 255))
+        img.save(png_path)
+        timed_pngs.append((png_path, start_s, max(start_s + 0.25, end_s)))
+        overlay_count += 1
+
+    if not timed_pngs:
+        shutil.copy2(src_mp4, out_mp4)
+        return out_mp4, 0, 0
+
+    cmd = ["ffmpeg", "-y", "-i", str(src_mp4)]
+    for png_path, _, _ in timed_pngs:
+        cmd.extend(["-loop", "1", "-i", str(png_path)])
+
+    filter_parts = ["[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30[v0]"]
+    for idx, (_, s_sec, e_sec) in enumerate(timed_pngs):
+        in_idx = idx + 1
+        prev_label = f"v{idx}"
+        next_label = f"v{idx + 1}"
+        filter_parts.append(
+            f"[{prev_label}][{in_idx}:v]overlay=0:0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[{next_label}]"
+        )
+    final_v = f"v{len(timed_pngs)}"
+    filter_complex = ";".join(filter_parts)
+    cmd.extend(
+        [
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            f"[{final_v}]",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            str(out_mp4),
+        ]
+    )
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0 or not out_mp4.is_file() or out_mp4.stat().st_size == 0:
+        raise RuntimeError(_summarize_subprocess_error("ffmpeg chop-broll", proc))
+    return out_mp4, broll_count, overlay_count
+
 
 def _burn_breaking_news_chyron(
     *,
@@ -1420,6 +1772,15 @@ def _run_ai_assist(payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) ->
             f"Draft: {text}\nStory context: {context}\n"
             f'Return STRICT JSON ONLY: {{"text":"SUBLINE HERE"}}'
         )
+    elif mode == "generate_overlay_brief":
+        seed = text or context
+        user_prompt = (
+            f"Design a concise broadcast news-brief graphic overlay card for this topic:\n"
+            f"BRIEF: {seed}\n\n"
+            f"Return STRICT JSON ONLY with this exact schema:\n"
+            f'{{"kind":"LOWER_THIRD","headline":"ALL CAPS MAX 32 CHARS",'
+            f'"subline":"CONCISE SUBLINE MAX 48 CHARS","callout_stat":"SHORT TAG OR METRIC MAX 20 CHARS","duration_sec":4}}'
+        )
     else:  # polish_segment
         user_prompt = (
             f"Rewrite or flesh out this single spoken news anchor segment (14-22 words, deadpan serious cable news tone, "
@@ -1480,6 +1841,28 @@ def _run_ai_assist(payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) ->
             "headline": headline or seed[:34].upper(),
             "subline": subline or "DEVELOPING STORY · LIVE",
             "segments": segments,
+        }
+
+    if mode == "generate_overlay_brief":
+        headline = str(inner.get("headline") or "").strip().upper()[:40]
+        subline = str(inner.get("subline") or "").strip()[:56]
+        callout_stat = str(inner.get("callout_stat") or "").strip()[:24]
+        kind = str(inner.get("kind") or "LOWER_THIRD").strip().upper()
+        if kind not in ("LOWER_THIRD", "STAT_CALLOUT", "QUOTE_BRIEF"):
+            kind = "LOWER_THIRD"
+        try:
+            dur_sec = max(2, min(15, int(inner.get("duration_sec") or 4)))
+        except (TypeError, ValueError):
+            dur_sec = 4
+        if not headline:
+            raise RuntimeError("AI overlay brief missing headline.")
+        return {
+            "mode": mode,
+            "kind": kind,
+            "headline": headline,
+            "subline": subline,
+            "callout_stat": callout_stat,
+            "duration_sec": dur_sec,
         }
 
     polished = str(inner.get("text") or "").strip()
@@ -2075,6 +2458,12 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/remotion/install":
             self._handle_post_remotion_install()
             return
+        if parsed.path == "/v1/core/tts":
+            self._handle_post_core_tts()
+            return
+        if parsed.path == "/v1/core/chop-broll":
+            self._handle_post_core_chop_broll()
+            return
 
         self._send_json(
             HTTPStatus.NOT_FOUND,
@@ -2245,6 +2634,68 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
 
         self._send_json(HTTPStatus.OK, result)
 
+    def _handle_post_core_tts(self) -> None:
+        text_body = self._read_post_utf8_body(
+            max_bytes=256 * 1024,
+            empty_detail="Empty /v1/core/tts payload",
+        )
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"},
+            )
+            return
+        try:
+            result = self.server.render_manager.synthesize_story_tts(decoded)
+        except ValueError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "invalid_tts_request", "detail": str(exc)},
+            )
+            return
+        except Exception as exc:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY,
+                {"error": "tts_failed", "detail": str(exc)},
+            )
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _handle_post_core_chop_broll(self) -> None:
+        text_body = self._read_post_utf8_body(
+            max_bytes=self.server.render_manager.max_render_body_bytes,
+            empty_detail="Empty /v1/core/chop-broll payload",
+        )
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"},
+            )
+            return
+        try:
+            result = self.server.render_manager.chop_talking_head_into_broll(decoded)
+        except ValueError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "invalid_chop_request", "detail": str(exc)},
+            )
+            return
+        except Exception as exc:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY,
+                {"error": "chop_broll_failed", "detail": str(exc)},
+            )
+            return
+        self._send_json(HTTPStatus.OK, result)
+
 
 def create_ota_server(
     host: str,
@@ -2258,6 +2709,7 @@ def create_ota_server(
     python_bin: Path | str | None = None,
     default_avatar_path: Path | str = DEFAULT_AVATAR_PATH,
     render_runner: RenderRunnerFn | None = None,
+    tts_runner: Callable[[str, Path], dict[str, Any] | None] | None = None,
     draft_engine: DraftPassEngine | None = None,
     quiet: bool = False,
 ) -> OtaHttpServer:
@@ -2283,6 +2735,7 @@ def create_ota_server(
         python_bin=python_bin,
         default_avatar_path=default_avatar_path,
         render_runner=render_runner,
+        tts_runner=tts_runner,
     )
     return OtaHttpServer(
         (host, port),

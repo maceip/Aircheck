@@ -79,6 +79,7 @@ fun SystemDeckSheet(
     onTestRigConnection: (String) -> Unit,
     onOpenVoiceModelCare: () -> Unit = {},
     onOpenNewsroomStudio: () -> Unit = {},
+    onOpenCorePipeline: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
@@ -147,6 +148,29 @@ fun SystemDeckSheet(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            // Canonical 5-Stage Core Story Pipeline
+            item(key = "core_pipeline_entry") {
+                StudioCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenCorePipeline)
+                        .testTag("open_core_pipeline_button")
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "Core Story Pipeline",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = StudioCrisp
+                        )
+                        Text(
+                            text = "TTS -> Iterate Story -> Talking Head -> B-Roll -> Final Review",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TelemetryMuted
+                        )
+                    }
+                }
+            }
+
             // Dedicated Phone-Only Voice Model Care Page
             item(key = "voice_model_care_entry") {
                 StudioCard(
@@ -170,7 +194,7 @@ fun SystemDeckSheet(
                 }
             }
 
-            // Dedicated Newsroom & Jetpack A2UI Video Overlay Studio Page
+            // Optional Savable Newsroom Overlays Page
             item(key = "newsroom_studio_entry") {
                 StudioCard(
                     modifier = Modifier
@@ -180,12 +204,12 @@ fun SystemDeckSheet(
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
-                            text = "Newsroom & Overlay Studio",
+                            text = "Create Newsroom Overlays (Optional)",
                             style = MaterialTheme.typography.titleSmall,
                             color = StudioCrisp
                         )
                         Text(
-                            text = "Jetpack A2UI cue sheet, Remotion pop-ups & B-roll",
+                            text = "Savable AI A2UI overlays for news briefs & Remotion setup",
                             style = MaterialTheme.typography.bodySmall,
                             color = TelemetryMuted
                         )

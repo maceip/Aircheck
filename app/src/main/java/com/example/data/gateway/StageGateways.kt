@@ -1,6 +1,9 @@
 package com.example.data.gateway
 
+import com.example.data.CoreStoryClause
+import com.example.data.OverlayObjectKind
 import com.example.data.RenderJobStatus
+import com.example.data.SavedNewsroomOverlay
 import com.example.data.ScriptProject
 import com.example.data.local.CasStoredAsset
 
@@ -30,6 +33,30 @@ data class RemotionInstallResult(
     val packageProviderId: String,
     val userRequest: String,
     val enableBrollPopups: Boolean
+)
+
+data class CoreTtsSynthesisResult(
+    val ttsId: String,
+    val audioUrl: String,
+    val durationMs: Long,
+    val waveformPeaks: List<Float>,
+    val timedClauses: List<CoreStoryClause>
+)
+
+data class ChoppedBrollResult(
+    val jobId: String,
+    val videoUrl: String,
+    val durationMs: Long,
+    val brollCutCount: Int,
+    val appliedOverlayCount: Int
+)
+
+data class GeneratedOverlayBriefResult(
+    val kind: OverlayObjectKind,
+    val headline: String,
+    val subline: String,
+    val calloutStat: String,
+    val durationSec: Int
 )
 
 data class MacRigJobSnapshot(
@@ -73,6 +100,29 @@ interface MacRigRenderGateway {
     suspend fun pollMacRigJob(rigBaseUrl: String, jobId: String): MacRigJobSnapshot
 
     suspend fun downloadRenderedMp4ToCas(videoUrl: String): CasStoredAsset
+
+    suspend fun downloadAudioWavToCas(audioUrl: String): CasStoredAsset
+
+    suspend fun synthesizeCoreStoryTts(
+        rigBaseUrl: String,
+        projectId: String,
+        clauses: List<CoreStoryClause>
+    ): CoreTtsSynthesisResult
+
+    suspend fun chopTalkingHeadIntoBroll(
+        rigBaseUrl: String,
+        scriptId: String,
+        title: String,
+        sourceJobId: String?,
+        sourceMp4Sha: String?,
+        clauses: List<CoreStoryClause>,
+        overlays: List<SavedNewsroomOverlay> = emptyList()
+    ): ChoppedBrollResult
+
+    suspend fun generateAiOverlayBrief(
+        rigBaseUrl: String,
+        briefPrompt: String
+    ): GeneratedOverlayBriefResult
 
     suspend fun requestRemotionInstall(
         rigBaseUrl: String,

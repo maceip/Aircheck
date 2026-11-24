@@ -25,11 +25,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.StudioViewModel
 import com.example.ui.draft.DraftDeckViewModel
 import com.example.ui.draft.TactileDraftingDeckScreen
 import com.example.ui.screens.ClipReviewScreen
+import com.example.ui.screens.CorePipelineScreen
 import com.example.ui.screens.NewsroomStudioScreen
 import com.example.ui.screens.SystemDeckSheet
 import com.example.ui.screens.VoiceModelCareScreen
@@ -97,10 +97,13 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Single non-scrolling 100% viewport height Tactile Plain-Text Drafting Engine activity.
- * The legacy 3-tab shell (`Script` / `Photo` / `Clips`) has been completely replaced by the
- * 4-stage fixed-viewport instrument deck (`01 SEED` · `02 PICK` · `03 CUT` · `04 SHIP`),
- * with clean full-screen modals for Studio Settings and rendered Broadcast Clip playback.
+ * Aircheck top-level navigation shell:
+ * - Default surface: Tactile Plain-Text Drafting Engine (`01 SEED` · `02 PICK` · `03 CUT` · `04 SHIP`).
+ * - Single canonical video pipeline (`CorePipelineScreen`):
+ *   `01 TTS -> 02 Iterate Story -> 03 Speech to Talking Head -> 04 Chop into B-Roll -> 05 Final Review`.
+ * - Separate optional screens kept outside the main flow:
+ *   - `VoiceModelCareScreen` (phone-only voice lock, local LoRA care, quality check)
+ *   - `NewsroomStudioScreen` (savable AI-generated Jetpack A2UI overlays for news briefs)
  */
 @Composable
 fun AircheckApp(
@@ -114,6 +117,7 @@ fun AircheckApp(
     var showSettingsModal by rememberSaveable { mutableStateOf(false) }
     var showVoiceModelCareModal by rememberSaveable { mutableStateOf(false) }
     var showNewsroomStudioModal by rememberSaveable { mutableStateOf(false) }
+    var showCorePipelineModal by rememberSaveable { mutableStateOf(false) }
     var activeReviewClipId by rememberSaveable { mutableStateOf<String?>(null) }
 
     LaunchedEffect(studioState.pendingShareIntent) {
@@ -123,6 +127,15 @@ fun AircheckApp(
                 context.startActivity(Intent.createChooser(shareIntent, "Share Aircheck"))
             }
             studioViewModel.clearPendingShareIntent()
+        }
+    }
+
+    LaunchedEffect(studioState.openCorePipelineEvent) {
+        if (studioState.openCorePipelineEvent) {
+            showSettingsModal = false
+            showNewsroomStudioModal = false
+            showCorePipelineModal = true
+            studioViewModel.consumeOpenCorePipelineEvent()
         }
     }
 
@@ -161,12 +174,17 @@ fun AircheckApp(
                     NewsroomStudioScreen(
                         uiState = studioState,
                         a2uiController = studioViewModel.a2uiController,
-                        onBack = { showNewsroomStudioModal = false },
-                        onOpenClip = { clipId ->
-                            showNewsroomStudioModal = false
-                            showSettingsModal = false
-                            activeReviewClipId = clipId
-                        }
+                        onDeleteSavedOverlay = studioViewModel::deleteSavedNewsroomOverlay,
+                        onBack = { showNewsroomStudioModal = false }
+                    )
+                }
+
+                showCorePipelineModal -> {
+                    CorePipelineScreen(
+                        uiState = studioState,
+                        viewModel = studioViewModel,
+                        onBack = { showCorePipelineModal = false },
+                        onOpenOptionalOverlayBuilder = { showNewsroomStudioModal = true }
                     )
                 }
 
@@ -191,6 +209,16 @@ fun AircheckApp(
                         },
                         onOpenNewsroomStudio = {
                             showNewsroomStudioModal = true
+                        },
+                        onOpenCorePipeline = {
+                            if (studioState.corePipelineSession.clauses.isEmpty()) {
+                                val draftText = draftViewModel.currentDraftPlainText()
+                                if (draftText.isNotBlank()) {
+                                    studioViewModel.openStoryInCorePipeline(draftText)
+                                }
+                            }
+                            showSettingsModal = false
+                            showCorePipelineModal = true
                         },
                         onClose = { showSettingsModal = false }
                     )
@@ -220,7 +248,7 @@ fun AircheckApp(
                         viewModel = draftViewModel,
                         onOpenSettings = { showSettingsModal = true },
                         onBroadcastClip = { plainText, headline ->
-                            studioViewModel.renderDraftAsBroadcastClip(plainText, headline)
+                            studioViewModel.openStoryInCorePipeline(plainText, headline)
                         }
                     )
                 }

@@ -242,8 +242,10 @@ class TestRealOtaV001BundleOnDisk(unittest.TestCase):
                 self.assertEqual(tar_sha, src_sha)
 
         # 4. Live HTTP verification against real ota_server.py on ephemeral port
+        # Point bundles_root directly at v001 dir so this v001 contract test stays deterministic
+        # even when newer bundles (e.g. v002) also live alongside v001 under bundles/.
         http_res = verify_live_ota_server(
-            bundles_root=DEFAULT_MODELS_ROOT / "bundles",
+            bundles_root=bdir,
             bundle_version="v001",
             lora_version=DEFAULT_LORA_VERSION,
             range_end_byte=65_535,

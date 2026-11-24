@@ -71,30 +71,40 @@ class GraphAppSearchIndexer(
 
     private suspend fun getOrOpenSession(): AppSearchSession = sessionMutex.withLock {
         activeSession?.let { return@withLock it }
-        val opened = openSessionInternal()
         val schemaReq = SetSchemaRequest.Builder()
             .addSchemas(GRAPH_POST_SCHEMA)
             .setForceOverride(true)
             .build()
-        opened.setSchemaAsync(schemaReq).get()
+        val opened = openAndConfigureSessionInternal(schemaReq)
         activeSession = opened
         opened
     }
 
-    private fun openSessionInternal(): AppSearchSession {
+    private fun openAndConfigureSessionInternal(schemaReq: SetSchemaRequest): AppSearchSession {
         if (!forceLocalStorage) {
-            val platformAttempt = runCatching {
+            val platformSession = runCatching {
                 PlatformStorage.createSearchSessionAsync(
                     PlatformStorage.SearchContext.Builder(appContext, databaseName).build()
                 ).get()
-            }
-            if (platformAttempt.isSuccess) {
-                return platformAttempt.getOrThrow()
+            }.getOrNull()
+            if (platformSession != null) {
+                val configured = runCatching {
+                    platformSession.setSchemaAsync(schemaReq).get()
+                    platformSession
+                }
+                if (configured.isSuccess) {
+                    return configured.getOrThrow()
+                }
+                // Older OS builds (e.g. Android 15 without embedding APEX) throw on EmbeddingPropertyConfig;
+                // close platform session and fall back cleanly to bundled LocalStorage Icing.
+                runCatching { platformSession.close() }
             }
         }
-        return LocalStorage.createSearchSessionAsync(
+        val localSession = LocalStorage.createSearchSessionAsync(
             LocalStorage.SearchContext.Builder(appContext, databaseName).build()
         ).get()
+        localSession.setSchemaAsync(schemaReq).get()
+        return localSession
     }
 
     suspend fun indexPosts(posts: List<GraphPostRecord>): Int = withContext(Dispatchers.IO) {
