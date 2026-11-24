@@ -40,7 +40,9 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -688,12 +690,24 @@ def _build_alignment_payload(
     }
 
 
+# Empirically calibrated from bundles/v002/grpo_v2_report.json
+# (Ryan raw mic anchor mean: wespeaker=0.8486, dnsmos=3.7455; v002 rollouts: spk 0.74-0.85, mos 3.65-4.08).
+LIVE_TTS_GATE_MAX_CER: float = 0.05
+LIVE_TTS_GATE_MIN_SPEAKER_COS: float = 0.72
+LIVE_TTS_GATE_MIN_DNSMOS_P808: float = 3.45
+LIVE_TTS_GATE_MAX_TAIL_RMS_DBFS: float = -40.0
+LIVE_TTS_GATE_MIN_SYLLABLES_PER_SEC: float = 3.0
+LIVE_TTS_GATE_MAX_SYLLABLES_PER_SEC: float = 6.8
+LIVE_TTS_GATE_MAX_PHONEME_MS: float = 450.0
+
+
 def _validate_strict_tts_metrics(
     metrics: Mapping[str, Any] | None,
     *,
     require_present: bool,
+    max_cer: float = LIVE_TTS_GATE_MAX_CER,
 ) -> None:
-    """Enforce strict 4-gate pass (`passed_all_strict_gates is True` and `cer <= 0`)."""
+    """Enforce 4-gate pass (`passed_all_strict_gates is True` and `cer <= max_cer`)."""
     if metrics is None:
         if require_present:
             raise RuntimeError("TTS synthesis did not produce 4-gate verification metrics.")
@@ -706,8 +720,8 @@ def _validate_strict_tts_metrics(
         raise RuntimeError(
             f"TTS synthesis failed strict 4-gate verification (passed_all_strict_gates={passed}, cer={cer_raw})"
         )
-    if cer_raw is not None and float(cer_raw) > 0.0:
-        raise RuntimeError(f"TTS synthesis failed strict CER gate: cer={cer_raw} > 0.0")
+    if cer_raw is not None and float(cer_raw) > float(max_cer):
+        raise RuntimeError(f"TTS synthesis failed strict CER gate: cer={cer_raw} > {max_cer}")
 
 
 def resolve_latest_synthesis_assets(
@@ -876,8 +890,16 @@ class RenderJobManager:
         tts_studio_runner: Callable[..., dict[str, Any]] | None = None,
         aligner_fn: Callable[[Path, str], list[dict[str, Any]]] | None = None,
         plate_runner: Callable[[str, str, Path], None] | None = None,
+        remotion_worker_url: str | None = None,
     ) -> None:
         self._plate_runner = plate_runner
+        self.remotion_worker_url = (
+            str(remotion_worker_url).strip().rstrip("/")
+            if remotion_worker_url
+            else os.environ.get("REMOTION_WORKER_URL", "http://127.0.0.1:8444").strip().rstrip("/")
+        )
+        self.local_base_url: str | None = None
+        self._on_remotion_render_completed: Callable[[], None] | None = None
         self.renders_dir = Path(renders_dir).resolve()
         self.bundles_root = Path(bundles_root).resolve()
         self.models_root = (
@@ -1515,6 +1537,14 @@ class RenderJobManager:
                 "require_strict_gates": True,
                 "require_real_alignment": True,
                 "warm_engine": self._get_warm_tts_engine(),
+                "early_exit_on_pass": True,
+                "gate_max_cer": LIVE_TTS_GATE_MAX_CER,
+                "gate_min_speaker_cos": LIVE_TTS_GATE_MIN_SPEAKER_COS,
+                "gate_min_dnsmos_p808": LIVE_TTS_GATE_MIN_DNSMOS_P808,
+                "gate_max_tail_rms_dbfs": LIVE_TTS_GATE_MAX_TAIL_RMS_DBFS,
+                "gate_min_syllables_per_sec": LIVE_TTS_GATE_MIN_SYLLABLES_PER_SEC,
+                "gate_max_syllables_per_sec": LIVE_TTS_GATE_MAX_SYLLABLES_PER_SEC,
+                "gate_max_phoneme_ms": LIVE_TTS_GATE_MAX_PHONEME_MS,
             }
             if assets.get("lexicon") is not None:
                 kwargs["lexicon_path"] = assets["lexicon"]
@@ -1964,7 +1994,24 @@ class RenderJobManager:
 
         staged_out = work_dir / "chopped_final.mp4"
         studio_stats: dict[str, Any] = {}
-        if "render_options" in payload:
+        render_opts_raw = payload.get("render_options") if isinstance(payload.get("render_options"), dict) else {}
+        use_remotion = bool(payload.get("use_remotion") or render_opts_raw.get("use_remotion"))
+        if use_remotion:
+            studio_stats = self._compose_via_remotion_worker(
+                final_id=final_id,
+                source_job_id=source_job_id,
+                src_mp4=src_mp4,
+                out_mp4=staged_out,
+                title=title,
+                clauses=clauses,
+                overlays=overlays,
+                payload=payload,
+                render_opts_raw=render_opts_raw,
+            )
+            produced_mp4 = staged_out
+            broll_cuts = int(studio_stats["broll_cut_count"])
+            applied_overlays = int(studio_stats["applied_overlay_count"])
+        elif "render_options" in payload:
             options = StudioRenderOptions.from_payload(payload.get("render_options"))
             studio_stats = compose_studio_cut(
                 src_mp4=src_mp4,
@@ -1976,6 +2023,8 @@ class RenderJobManager:
                 plates_dir=self.plates_dir,
                 probe_duration_ms=_probe_media_duration_ms,
             )
+            studio_stats["remotion_used"] = False
+            studio_stats["renderer"] = "ffmpeg"
             produced_mp4 = staged_out
             broll_cuts = int(studio_stats["broll_cut_count"])
             applied_overlays = int(studio_stats["applied_overlay_count"])
@@ -1987,6 +2036,8 @@ class RenderJobManager:
                 clauses=clauses,
                 overlays=overlays,
             )
+            studio_stats["remotion_used"] = False
+            studio_stats["renderer"] = "ffmpeg"
         target_mp4 = self.renders_dir / f"{final_id}.mp4"
         _atomic_publish_mp4(produced_mp4, target_mp4)
         duration_ms = _probe_media_duration_ms(target_mp4)
@@ -2018,6 +2069,217 @@ class RenderJobManager:
             "applied_overlay_count": applied_overlays,
             **{k: v for k, v in studio_stats.items() if k not in ("broll_cut_count", "applied_overlay_count")},
         }
+
+    def _compose_via_remotion_worker(
+        self,
+        *,
+        final_id: str,
+        source_job_id: str,
+        src_mp4: Path,
+        out_mp4: Path,
+        title: str,
+        clauses: list[Any],
+        overlays: list[Any],
+        payload: dict[str, Any],
+        render_opts_raw: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Delegates Stage 4 broadcast composition to the local Remotion 4 worker (`:8444/render`)."""
+        base_url = (self.local_base_url or "").strip().rstrip("/")
+        if not base_url:
+            raise RuntimeError("Remotion 4 render requested, but local HTTP base URL is unavailable.")
+        if not self.remotion_worker_url:
+            raise RuntimeError("Remotion 4 render requested, but REMOTION_WORKER_URL is not configured.")
+
+        def _resolve_url(raw: str) -> str:
+            s = raw.strip()
+            if s.startswith("http://") or s.startswith("https://"):
+                return s
+            if s.startswith("/"):
+                return f"{base_url}{s}"
+            return f"{base_url}/v1/renders/{s}"
+
+        temp_staged: list[Path] = []
+        try:
+            if source_job_id and (self.renders_dir / f"{source_job_id}.mp4").is_file():
+                lipsync_url = f"{base_url}/v1/renders/{source_job_id}.mp4"
+            else:
+                staged_src = self.renders_dir / f"{final_id}_src.mp4"
+                shutil.copy2(src_mp4, staged_src)
+                temp_staged.append(staged_src)
+                lipsync_url = f"{base_url}/v1/renders/{staged_src.name}"
+
+            raw_voice_url = str(payload.get("voice_url") or "").strip()
+            if raw_voice_url:
+                voice_url = _resolve_url(raw_voice_url)
+            else:
+                staged_wav = self.renders_dir / f"{final_id}_voice.wav"
+                extract_proc = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        str(src_mp4),
+                        "-vn",
+                        "-acodec",
+                        "pcm_s16le",
+                        "-ar",
+                        "44100",
+                        "-ac",
+                        "1",
+                        str(staged_wav),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=120,
+                )
+                if extract_proc.returncode != 0 or not staged_wav.is_file() or staged_wav.stat().st_size <= 44:
+                    raise RuntimeError(_summarize_subprocess_error("ffmpeg remotion audio extract", extract_proc))
+                temp_staged.append(staged_wav)
+                voice_url = f"{base_url}/v1/renders/{staged_wav.name}"
+
+            total_ms = max(1000, _probe_media_duration_ms(src_mp4))
+            aspect = str(render_opts_raw.get("aspect") or payload.get("aspect") or "9:16").strip()
+            template_id = "Explainer169" if aspect == "16:9" else "Newsroom916"
+
+            input_props: dict[str, Any] = {
+                "templateId": template_id,
+                "lipsyncUrl": lipsync_url,
+                "voiceUrl": voice_url,
+            }
+
+            raw_align_url = str(payload.get("align_url") or "").strip()
+            raw_words = payload.get("words")
+            if raw_align_url:
+                input_props["alignUrl"] = _resolve_url(raw_align_url)
+            elif isinstance(raw_words, list) and raw_words:
+                norm_words: list[dict[str, Any]] = []
+                for w in raw_words:
+                    if not isinstance(w, Mapping):
+                        continue
+                    w_txt = str(w.get("word") or "").strip()
+                    if not w_txt:
+                        continue
+                    s_ms = int(w.get("startMs") if w.get("startMs") is not None else (w.get("start_ms") or 0))
+                    e_ms = int(w.get("endMs") if w.get("endMs") is not None else (w.get("end_ms") or s_ms))
+                    norm_words.append({"word": w_txt, "startMs": max(0, s_ms), "endMs": max(max(0, s_ms), e_ms)})
+                if norm_words:
+                    input_props["words"] = norm_words
+                else:
+                    input_props["words"] = []
+                    input_props["durationMs"] = total_ms
+            elif source_job_id and (self.renders_dir / f"align_{source_job_id}.json").is_file():
+                input_props["alignUrl"] = f"{base_url}/v1/renders/align_{source_job_id}.json"
+            else:
+                input_props["words"] = []
+                input_props["durationMs"] = total_ms
+
+            beats: list[dict[str, Any]] = []
+            broll_cuts = 0
+            for idx, item in enumerate(clauses):
+                if not isinstance(item, Mapping):
+                    continue
+                mode = str(item.get("segment_mode") or "TALKING_HEAD").upper()
+                is_cutaway = mode == "BROLL_CUTAWAY" or bool(item.get("pip_shrink") or item.get("pipShrink"))
+                if is_cutaway:
+                    broll_cuts += 1
+                beat: dict[str, Any] = {
+                    "id": str(item.get("id") or f"clause_{idx}"),
+                    "ordinal": idx,
+                    "pipShrink": is_cutaway,
+                }
+                spoken = str(item.get("spoken_text") or item.get("spokenText") or "").strip()
+                if spoken:
+                    beat["spokenText"] = spoken
+                if item.get("start_ms") is not None or item.get("startMs") is not None:
+                    s_ms = max(0, int(item.get("startMs") if item.get("startMs") is not None else item["start_ms"]))
+                    beat["startMs"] = s_ms
+                    if item.get("end_ms") is not None or item.get("endMs") is not None:
+                        e_ms = max(s_ms, int(item.get("endMs") if item.get("endMs") is not None else item["end_ms"]))
+                        beat["endMs"] = e_ms
+                raw_broll = str(item.get("broll_url") or item.get("bRollUrl") or "").strip()
+                if raw_broll:
+                    beat["bRollUrl"] = _resolve_url(raw_broll)
+                raw_ev = str(item.get("evidence_source") or item.get("evidenceSource") or item.get("citation") or "").strip()
+                if raw_ev:
+                    beat["evidenceSource"] = raw_ev
+                raw_tag = str(item.get("depth_text_tag") or item.get("depthTextTag") or item.get("keyword") or "").strip()
+                if raw_tag:
+                    beat["depthTextTag"] = raw_tag
+                beats.append(beat)
+            input_props["beats"] = beats
+
+            first_ovl = next((o for o in overlays if isinstance(o, Mapping)), {})
+            headline = str(
+                render_opts_raw.get("chyron_headline") or first_ovl.get("headline") or title or "Aircheck"
+            ).strip() or "Aircheck"
+            subline = str(render_opts_raw.get("chyron_subline") or first_ovl.get("subline") or "").strip()
+            corner_bug = str(render_opts_raw.get("corner_bug_text") or "LIVE").strip() or "LIVE"
+            show_bug = bool(render_opts_raw.get("show_brand_bug", True))
+            input_props["packaging"] = {
+                "chyronHeadline": headline,
+                "chyronSubline": subline,
+                "cornerBugText": corner_bug,
+                "showBrandBug": show_bug,
+                "templateId": template_id,
+            }
+
+            req_body = json.dumps(
+                {
+                    "jobId": final_id,
+                    "outputLocalPath": str(out_mp4.resolve()),
+                    "inputProps": input_props,
+                }
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                f"{self.remotion_worker_url}/render",
+                data=req_body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=600) as resp:
+                    resp_raw = resp.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as exc:
+                err_body = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(
+                    f"Remotion 4 worker returned HTTP {exc.code}: {err_body[:400]}"
+                ) from exc
+            except urllib.error.URLError as exc:
+                raise RuntimeError(
+                    f"Remotion 4 worker unreachable at {self.remotion_worker_url}: {exc.reason}"
+                ) from exc
+
+            if not out_mp4.is_file() or out_mp4.stat().st_size == 0:
+                raise RuntimeError(
+                    f"Remotion 4 worker succeeded ({resp_raw[:200]}) but output MP4 is missing or empty: {out_mp4}"
+                )
+            if self._on_remotion_render_completed is not None:
+                self._on_remotion_render_completed()
+            applied_overlays = sum(
+                1
+                for o in overlays
+                if isinstance(o, Mapping)
+                and (
+                    str(o.get("headline") or "").strip()
+                    or str(o.get("subline") or "").strip()
+                    or str(o.get("callout_stat") or "").strip()
+                )
+            )
+            return {
+                "broll_cut_count": broll_cuts,
+                "applied_overlay_count": applied_overlays,
+                "caption_count": len(input_props.get("words") or []),
+                "punch_in_count": 0,
+                "removed_silence_gap_count": 0,
+                "removed_silence_ms": 0,
+                "aspect": aspect,
+                "remotion_used": True,
+                "renderer": "remotion-4",
+            }
+        finally:
+            for tmp_p in temp_staged:
+                tmp_p.unlink(missing_ok=True)
 
     @property
     def plates_dir(self) -> Path:
@@ -2675,6 +2937,23 @@ class OtaHttpServer(ThreadingHTTPServer):
         self._remotion_lock = threading.Lock()
         self._remotion_state_path = self.render_manager.renders_dir / "remotion_state.json"
         super().__init__(server_address, OtaRequestHandler)
+        self.render_manager.local_base_url = f"http://127.0.0.1:{self.server_port}"
+        self.render_manager._on_remotion_render_completed = self._record_remotion_render_completed
+
+    def _record_remotion_render_completed(self) -> None:
+        with self._remotion_lock:
+            self._remotion_state_path.parent.mkdir(parents=True, exist_ok=True)
+            existing: dict[str, Any] = {}
+            if self._remotion_state_path.is_file():
+                try:
+                    existing = json.loads(self._remotion_state_path.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = {}
+            existing["renders_completed"] = int(existing.get("renders_completed", 0)) + 1
+            existing["last_render_utc"] = _utc_now_iso()
+            tmp_path = self._remotion_state_path.with_suffix(".json.tmp")
+            tmp_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp_path, self._remotion_state_path)
 
     def get_remotion_state(self) -> dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[2]

@@ -29,6 +29,7 @@ import contextlib
 import dataclasses
 import datetime
 import json
+import logging
 import math
 import os
 import re
@@ -51,6 +52,8 @@ import enroll_voice_assets as eva  # noqa: E402
 import generate_talking_head as gth  # noqa: E402
 import s2_pro_infer  # noqa: E402
 import synthesize_and_render as sar  # noqa: E402
+
+LOGGER = logging.getLogger(__name__)
 
 # Canonical 44.1 kHz Aircheck / VoiceStudio constants (matching ClauseNode.kt & dsp_mastering.h)
 SAMPLE_RATE_HZ: int = 44_100
@@ -1484,6 +1487,14 @@ def render_broadcast_studio(
     max_retries_per_clause: int = 2,
     require_real_alignment: bool | None = None,
     warm_engine: Any | None = None,
+    early_exit_on_pass: bool = False,
+    gate_max_cer: float = sar.GATE_MAX_CER,
+    gate_min_speaker_cos: float = sar.GATE_MIN_SPEAKER_COS,
+    gate_min_dnsmos_p808: float = sar.GATE_MIN_DNSMOS_P808,
+    gate_max_tail_rms_dbfs: float = sar.GATE_MAX_TAIL_RMS_DBFS,
+    gate_min_syllables_per_sec: float = sar.GATE_MIN_SYLLABLES_PER_SEC,
+    gate_max_syllables_per_sec: float = sar.GATE_MAX_SYLLABLES_PER_SEC,
+    gate_max_phoneme_ms: float = DEFAULT_MAX_PHONEME_MS,
     # Dependency-injection hooks strictly for automated unit testing (None = real models)
     synthesizer_fn: Callable[[PlannedClause, int], Sequence[SynthesizedTakeData]] | None = None,
     verifier_fn: Callable[[np.ndarray, str], dict[str, Any]] | None = None,
@@ -1613,8 +1624,9 @@ def render_broadcast_studio(
     warm_lock_stack = contextlib.ExitStack()
     try:
         if synthesizer_fn is not None:
-            for clause in planned_clauses:
-                clause_raw_takes[clause.clause_id] = list(synthesizer_fn(clause, takes_per_clause))
+            if not early_exit_on_pass:
+                for clause in planned_clauses:
+                    clause_raw_takes[clause.clause_id] = list(synthesizer_fn(clause, takes_per_clause))
         else:
             ref_specs: list[tuple[Path, str | None]] = [(Path(ref_wav), ref_text)]
             if extra_ref_wav is not None and str(extra_ref_wav).strip() and Path(extra_ref_wav).is_file():
@@ -1653,39 +1665,43 @@ def render_broadcast_studio(
             if lora_stats is not None:
                 lora_stats_dict = dataclasses.asdict(lora_stats)
 
-            all_gen_items: list[tuple[str, s2_pro_infer.GenerationResult]] = []
-            for clause in planned_clauses:
-                prompt = s2_pro_infer.build_s2_pro_prompt_tensor(
-                    tokenizer,
-                    clause.raw_text,
-                    ref_turns=ref_turns,
-                    prompt_style=prompt_style,
-                )
-                clause_tokens_cap = _dynamic_clause_tokens(clause)
-                for t_idx in range(takes_per_clause):
-                    seed = int(base_seed) + clause.index * 100 + t_idx
-                    gen_res = s2_pro_infer.generate_dual_ar_codes(
-                        model,
-                        prompt,
-                        seed=seed,
-                        max_new_tokens=clause_tokens_cap,
-                        temperature=temperature,
-                        top_p=top_p,
-                        top_k=top_k,
+            if not early_exit_on_pass:
+                all_gen_items: list[tuple[str, s2_pro_infer.GenerationResult]] = []
+                for clause in planned_clauses:
+                    prompt = s2_pro_infer.build_s2_pro_prompt_tensor(
+                        tokenizer,
+                        clause.raw_text,
+                        ref_turns=ref_turns,
+                        prompt_style=prompt_style,
                     )
-                    all_gen_items.append((clause.clause_id, gen_res))
+                    clause_tokens_cap = _dynamic_clause_tokens(clause)
+                    for t_idx in range(takes_per_clause):
+                        seed = int(base_seed) + clause.index * 100 + t_idx
+                        gen_res = s2_pro_infer.generate_dual_ar_codes(
+                            model,
+                            prompt,
+                            seed=seed,
+                            max_new_tokens=clause_tokens_cap,
+                            temperature=temperature,
+                            top_p=top_p,
+                            top_k=top_k,
+                        )
+                        all_gen_items.append((clause.clause_id, gen_res))
 
-            clause_raw_takes.update(_decode_gen_items_to_takes(all_gen_items))
+                clause_raw_takes.update(_decode_gen_items_to_takes(all_gen_items))
 
         # 4. Master each take, score through 4-Gate Verifier, retry failed clauses while model is warm.
+        total_clauses = len(planned_clauses)
         for clause in planned_clauses:
-            initial_takes = clause_raw_takes.get(clause.clause_id, [])
-            if not initial_takes:
-                raise RuntimeError(f"Zero synthesized takes produced for clause {clause.clause_id}")
-
             candidate_manifest_entries: list[dict[str, Any]] = []
             candidate_scoring_records: list[dict[str, Any]] = []
             mastered_take_pcms: list[np.ndarray] = []
+
+            def _has_strict_pass() -> bool:
+                return any(
+                    bool(r["gates"]["passed_all_strict_gates"]) and float(r["gates"]["cer"]) <= float(gate_max_cer)
+                    for r in candidate_scoring_records
+                )
 
             def _score_takes(takes_batch: Sequence[SynthesizedTakeData]) -> None:
                 for take in takes_batch:
@@ -1757,12 +1773,12 @@ def render_broadcast_studio(
                     syl_s = max(0.0, float(gate_res["syllables_per_sec"]))
 
                     passed_all = (
-                        cer_val <= sar.GATE_MAX_CER
-                        and max_ph_ms <= DEFAULT_MAX_PHONEME_MS
-                        and spk_cos >= sar.GATE_MIN_SPEAKER_COS
-                        and mos_val >= sar.GATE_MIN_DNSMOS_P808
-                        and tail_db <= sar.GATE_MAX_TAIL_RMS_DBFS
-                        and (sar.GATE_MIN_SYLLABLES_PER_SEC <= syl_s <= sar.GATE_MAX_SYLLABLES_PER_SEC)
+                        cer_val <= float(gate_max_cer)
+                        and max_ph_ms <= float(gate_max_phoneme_ms)
+                        and spk_cos >= float(gate_min_speaker_cos)
+                        and mos_val >= float(gate_min_dnsmos_p808)
+                        and tail_db <= float(gate_max_tail_rms_dbfs)
+                        and (float(gate_min_syllables_per_sec) <= syl_s <= float(gate_max_syllables_per_sec))
                     )
                     ranking_score = float(
                         gate_res.get(
@@ -1813,20 +1829,81 @@ def render_broadcast_studio(
                     )
                     mastered_take_pcms.append(mastered_pcm)
 
-            _score_takes(initial_takes)
+            if early_exit_on_pass:
+                if synthesizer_fn is not None:
+                    for t_idx in range(takes_per_clause):
+                        batch = list(synthesizer_fn(clause, 1))
+                        if batch:
+                            _score_takes(batch)
+                        if _has_strict_pass():
+                            break
+                else:
+                    prompt = s2_pro_infer.build_s2_pro_prompt_tensor(
+                        tokenizer,
+                        clause.raw_text,
+                        ref_turns=ref_turns,
+                        prompt_style=prompt_style,
+                    )
+                    clause_tokens_cap = _dynamic_clause_tokens(clause)
+                    for t_idx in range(takes_per_clause):
+                        seed = int(base_seed) + clause.index * 100 + t_idx
+                        gen_res = s2_pro_infer.generate_dual_ar_codes(
+                            model,
+                            prompt,
+                            seed=seed,
+                            max_new_tokens=clause_tokens_cap,
+                            temperature=temperature,
+                            top_p=top_p,
+                            top_k=top_k,
+                        )
+                        decoded_takes = _decode_gen_items_to_takes([(clause.clause_id, gen_res)]).get(
+                            clause.clause_id, []
+                        )
+                        if decoded_takes:
+                            _score_takes(decoded_takes)
+                            last_g = candidate_scoring_records[-1]["gates"]
+                            LOGGER.info(
+                                "Broadcast TTS clause %d/%d (%s) take %d/%d: gen=%.1fs cer=%.4f spk=%.3f mos=%.2f tail=%.1f syl=%.2f maxph=%.0fms pass=%s",
+                                clause.index + 1,
+                                total_clauses,
+                                clause.clause_id,
+                                t_idx + 1,
+                                takes_per_clause,
+                                float(gen_res.elapsed_sec),
+                                float(last_g["cer"]),
+                                float(last_g["wespeaker_cosine"]),
+                                float(last_g["dnsmos_p808"]),
+                                float(last_g["tail_rms_dbfs"]),
+                                float(last_g["syllables_per_sec"]),
+                                float(last_g["max_phoneme_duration_ms"]),
+                                bool(last_g["passed_all_strict_gates"]),
+                            )
+                        if _has_strict_pass():
+                            break
+                if not candidate_scoring_records:
+                    raise RuntimeError(f"Zero synthesized takes produced for clause {clause.clause_id}")
+            else:
+                initial_takes = clause_raw_takes.get(clause.clause_id, [])
+                if not initial_takes:
+                    raise RuntimeError(f"Zero synthesized takes produced for clause {clause.clause_id}")
+                _score_takes(initial_takes)
 
             # Warm retry loop if strict gates failed on all initial takes for this clause
-            def _has_strict_pass() -> bool:
-                return any(
-                    bool(r["gates"]["passed_all_strict_gates"]) and float(r["gates"]["cer"]) <= sar.GATE_MAX_CER
-                    for r in candidate_scoring_records
-                )
-
             for retry_idx in range(1, max(0, int(max_retries_per_clause)) + 1):
                 if not require_strict_gates or _has_strict_pass():
                     break
                 if synthesizer_fn is not None:
-                    retry_takes = list(synthesizer_fn(clause, takes_per_clause))
+                    if early_exit_on_pass:
+                        for _ in range(takes_per_clause):
+                            retry_batch = list(synthesizer_fn(clause, 1))
+                            if retry_batch:
+                                _score_takes(retry_batch)
+                            if _has_strict_pass():
+                                break
+                    else:
+                        retry_takes = list(synthesizer_fn(clause, takes_per_clause))
+                        if retry_takes:
+                            _score_takes(retry_takes)
                 else:
                     prompt = s2_pro_infer.build_s2_pro_prompt_tensor(
                         tokenizer,
@@ -1836,27 +1913,62 @@ def render_broadcast_studio(
                     )
                     clause_tokens_cap = _dynamic_clause_tokens(clause)
                     retry_temp = max(0.55, float(temperature) - 0.05 * retry_idx)
-                    retry_gen_items: list[tuple[str, s2_pro_infer.GenerationResult]] = []
-                    for t_idx in range(takes_per_clause):
-                        retry_seed = int(base_seed) + clause.index * 100 + retry_idx * 1000 + t_idx
-                        gen_res = s2_pro_infer.generate_dual_ar_codes(
-                            model,
-                            prompt,
-                            seed=retry_seed,
-                            max_new_tokens=clause_tokens_cap,
-                            temperature=retry_temp,
-                            top_p=top_p,
-                            top_k=top_k,
-                        )
-                        retry_gen_items.append((clause.clause_id, gen_res))
-                    retry_takes = _decode_gen_items_to_takes(retry_gen_items).get(clause.clause_id, [])
-                if retry_takes:
-                    _score_takes(retry_takes)
+                    if early_exit_on_pass:
+                        for t_idx in range(takes_per_clause):
+                            retry_seed = int(base_seed) + clause.index * 100 + retry_idx * 1000 + t_idx
+                            gen_res = s2_pro_infer.generate_dual_ar_codes(
+                                model,
+                                prompt,
+                                seed=retry_seed,
+                                max_new_tokens=clause_tokens_cap,
+                                temperature=retry_temp,
+                                top_p=top_p,
+                                top_k=top_k,
+                            )
+                            retry_batch = _decode_gen_items_to_takes([(clause.clause_id, gen_res)]).get(
+                                clause.clause_id, []
+                            )
+                            if retry_batch:
+                                _score_takes(retry_batch)
+                                last_g = candidate_scoring_records[-1]["gates"]
+                                LOGGER.info(
+                                    "Broadcast TTS retry %d clause %d/%d (%s) take %d/%d: gen=%.1fs cer=%.4f spk=%.3f mos=%.2f pass=%s",
+                                    retry_idx,
+                                    clause.index + 1,
+                                    total_clauses,
+                                    clause.clause_id,
+                                    t_idx + 1,
+                                    takes_per_clause,
+                                    float(gen_res.elapsed_sec),
+                                    float(last_g["cer"]),
+                                    float(last_g["wespeaker_cosine"]),
+                                    float(last_g["dnsmos_p808"]),
+                                    bool(last_g["passed_all_strict_gates"]),
+                                )
+                            if _has_strict_pass():
+                                break
+                    else:
+                        retry_gen_items: list[tuple[str, s2_pro_infer.GenerationResult]] = []
+                        for t_idx in range(takes_per_clause):
+                            retry_seed = int(base_seed) + clause.index * 100 + retry_idx * 1000 + t_idx
+                            gen_res = s2_pro_infer.generate_dual_ar_codes(
+                                model,
+                                prompt,
+                                seed=retry_seed,
+                                max_new_tokens=clause_tokens_cap,
+                                temperature=retry_temp,
+                                top_p=top_p,
+                                top_k=top_k,
+                            )
+                            retry_gen_items.append((clause.clause_id, gen_res))
+                        retry_takes = _decode_gen_items_to_takes(retry_gen_items).get(clause.clause_id, [])
+                        if retry_takes:
+                            _score_takes(retry_takes)
 
             winner_rec = sar.select_best_candidate(candidate_scoring_records)
             win_gates = winner_rec["gates"]
             if require_strict_gates and (
-                not bool(win_gates["passed_all_strict_gates"]) or float(win_gates["cer"]) > sar.GATE_MAX_CER
+                not bool(win_gates["passed_all_strict_gates"]) or float(win_gates["cer"]) > float(gate_max_cer)
             ):
                 raise RuntimeError(
                     f"Clause {clause.clause_id} failed strict 4-gate verification after retries: "

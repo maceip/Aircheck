@@ -1474,3 +1474,324 @@ def test_synthesize_and_render_accepts_none_codec_pth_and_warm_engine_lock(
     t_unload.join(timeout=2.0)
     assert unloaded.is_set()
 
+
+def test_early_exit_on_pass_stops_at_first_passing_take_and_retries_on_failure(tmp_path: Path) -> None:
+    ir_path, tone_path = _make_room_ir_and_tone(tmp_path)
+    lexicon_path = tmp_path / "lexicon.json"
+    lexicon_path.write_text("{}", encoding="utf-8")
+
+    caller_clauses = [
+        {"id": "c_fast", "spoken_text": "First clause passes immediately on take zero."},
+        {"id": "c_retry", "spoken_text": "Second clause fails take zero then passes take one."},
+    ]
+    call_counts: dict[str, int] = {"c_fast": 0, "c_retry": 0}
+
+    def _synth(clause: rbs.PlannedClause, n_takes: int) -> list[rbs.SynthesizedTakeData]:
+        parent = clause.parent_clause_id or clause.clause_id
+        out = []
+        for _ in range(n_takes):
+            call_counts[parent] = call_counts.get(parent, 0) + 1
+            attempt = call_counts[parent]
+            pcm = _make_speech_wave(3.0, f0_hz=165.0 + 10.0 * attempt)
+            out.append(
+                rbs.SynthesizedTakeData(
+                    pcm44k=pcm,
+                    discrete_audio_tokens=[151678 + attempt],
+                    seed=9000 + attempt,
+                    temperature=0.7,
+                )
+            )
+        return out
+
+    verify_calls: dict[str, int] = {}
+
+    def _verify(pcm: np.ndarray, expected_text: str) -> dict[str, Any]:
+        verify_calls[expected_text] = verify_calls.get(expected_text, 0) + 1
+        attempt = verify_calls[expected_text]
+        tokens = [w for w in expected_text.replace(".", "").split() if w]
+        spans = [(tok, 1000 + i * 2000, 2800 + i * 2000) for i, tok in enumerate(tokens)]
+        # Make c_retry fail CER on attempt 1 and pass on attempt 2
+        bad_first = "Second clause" in expected_text and attempt == 1
+        return {
+            "recognized_text": "garbled" if bad_first else expected_text,
+            "cer": 0.45 if bad_first else 0.0,
+            "max_phoneme_duration_ms": 140.0,
+            "wespeaker_cosine": 0.90,
+            "dnsmos_p808": 4.25,
+            "tail_rms_dbfs": sar.compute_tail_rms_dbfs(pcm),
+            "syllables_per_sec": 4.8,
+            "word_spans": spans,
+        }
+
+    report = rbs.render_broadcast_studio(
+        caller_clauses=caller_clauses,
+        project_id="early_exit_test",
+        output_dir=tmp_path / "studio_early_exit",
+        takes_per_clause=4,
+        lexicon_path=lexicon_path,
+        room_ir_path=ir_path,
+        room_tone_path=tone_path,
+        skip_video=True,
+        require_strict_gates=True,
+        require_real_alignment=True,
+        early_exit_on_pass=True,
+        schema_path=SCHEMA_PATH,
+        synthesizer_fn=_synth,
+        verifier_fn=_verify,
+    )
+
+    assert report["metrics"]["passed_all_strict_gates"] is True
+    assert call_counts["c_fast"] == 1, f"Expected early exit after 1 passing take, got {call_counts['c_fast']}"
+    assert call_counts["c_retry"] == 2, f"Expected 2 takes (fail take 0, pass take 1), got {call_counts['c_retry']}"
+
+
+def test_chop_broll_use_remotion_delegates_to_worker_and_fails_loudly(tmp_path: Path) -> None:
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    bundles_dir = tmp_path / "bundles"
+    _write_minimal_bundle(bundles_dir / "v002", lora_version=2)
+    renders_dir = tmp_path / "renders"
+    renders_dir.mkdir(parents=True, exist_ok=True)
+    src_mp4 = renders_dir / "head_rem_test.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x112233:s=360x640:d=2:r=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2:sample_rate=44100",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(src_mp4),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+    received_payloads: list[dict[str, Any]] = []
+    fail_worker = {"flag": False}
+
+    class _StubRemotionHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def do_POST(self) -> None:
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = json.loads(raw.decode("utf-8"))
+            received_payloads.append(body)
+            if fail_worker["flag"]:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"remotion_crash"}')
+                return
+            out_path = Path(body["outputLocalPath"])
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_mp4, out_path)
+            resp = json.dumps({"status": "READY", "outputLocalPath": str(out_path)}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+    remotion_srv = ThreadingHTTPServer(("127.0.0.1", 0), _StubRemotionHandler)
+    remotion_port = remotion_srv.server_port
+    remotion_thread = threading.Thread(target=remotion_srv.serve_forever, daemon=True)
+    remotion_thread.start()
+
+    store = ota_server.OtaBundleStore(bundles_dir, tmp_path / "prefs.jsonl")
+    rm = ota_server.RenderJobManager(
+        renders_dir=renders_dir,
+        bundles_root=bundles_dir,
+        remotion_worker_url=f"http://127.0.0.1:{remotion_port}",
+    )
+    ota_srv = ota_server.OtaHttpServer(("127.0.0.1", 0), store, render_manager=rm, quiet=True)
+    ota_port = ota_srv.server_port
+    ota_thread = threading.Thread(target=ota_srv.serve_forever, daemon=True)
+    ota_thread.start()
+
+    try:
+        req_body = {
+            "source_job_id": "head_rem_test",
+            "script_id": "story_rem",
+            "title": "REMOTION DESK",
+            "use_remotion": True,
+            "words": [
+                {"word": "Breaking", "start_ms": 0, "end_ms": 500},
+                {"word": "news", "start_ms": 500, "end_ms": 1100},
+            ],
+            "clauses": [
+                {
+                    "id": "c0",
+                    "spoken_text": "Breaking news.",
+                    "start_ms": 0,
+                    "end_ms": 1100,
+                    "segment_mode": "BROLL_CUTAWAY",
+                    "broll_url": "/v1/renders/broll_globe.jpg",
+                    "evidence_source": "LAB REPORT",
+                    "depth_text_tag": "LIVE",
+                }
+            ],
+            "overlays": [{"headline": "DESK ALERT", "subline": "LOCAL PIPELINE"}],
+        }
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{ota_port}/v1/core/chop-broll",
+            data=json.dumps(req_body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            assert resp.status == 200
+            out = json.loads(resp.read().decode("utf-8"))
+
+        assert out["remotion_used"] is True
+        assert out["renderer"] == "remotion-4"
+        assert out["broll_cut_count"] == 1
+        assert len(received_payloads) == 1
+        ip = received_payloads[0]["inputProps"]
+        assert ip["templateId"] == "Newsroom916"
+        assert ip["lipsyncUrl"] == f"http://127.0.0.1:{ota_port}/v1/renders/head_rem_test.mp4"
+        assert ip["voiceUrl"].startswith(f"http://127.0.0.1:{ota_port}/v1/renders/")
+        assert ip["words"] == [
+            {"word": "Breaking", "startMs": 0, "endMs": 500},
+            {"word": "news", "startMs": 500, "endMs": 1100},
+        ]
+        assert ip["beats"][0]["pipShrink"] is True
+        assert ip["beats"][0]["bRollUrl"] == f"http://127.0.0.1:{ota_port}/v1/renders/broll_globe.jpg"
+        assert ip["beats"][0]["evidenceSource"] == "LAB REPORT"
+        assert ip["beats"][0]["depthTextTag"] == "LIVE"
+        assert ip["packaging"]["chyronHeadline"] == "DESK ALERT"
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{ota_port}/health", timeout=10) as hresp:
+            health = json.loads(hresp.read().decode("utf-8"))
+        assert health["remotion_renders_completed"] == 1
+
+        # Failure path: zero silent fallback when Remotion worker fails
+        fail_worker["flag"] = True
+        fail_req = urllib.request.Request(
+            f"http://127.0.0.1:{ota_port}/v1/core/chop-broll",
+            data=json.dumps(req_body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(fail_req, timeout=30)
+        assert exc_info.value.code == 502
+    finally:
+        ota_srv.shutdown()
+        ota_srv.server_close()
+        rm.shutdown()
+        remotion_srv.shutdown()
+        remotion_srv.server_close()
+
+
+def test_calibrated_live_v002_gates_accept_broadcast_quality_and_reject_garbled(tmp_path: Path) -> None:
+    ir_path, tone_path = _make_room_ir_and_tone(tmp_path)
+    lexicon_path = tmp_path / "lexicon.json"
+    lexicon_path.write_text("{}", encoding="utf-8")
+
+    def _synth(clause: rbs.PlannedClause, n_takes: int) -> list[rbs.SynthesizedTakeData]:
+        return [
+            rbs.SynthesizedTakeData(
+                pcm44k=_make_speech_wave(3.0, f0_hz=170.0),
+                discrete_audio_tokens=[151678],
+                seed=7000 + i,
+                temperature=0.7,
+            )
+            for i in range(n_takes)
+        ]
+
+    # Real measured v002-grade metrics (cer=0.0127 compound spacing, spk=0.793, mos=3.92) pass calibrated live gates
+    def _verify_v002_realistic(pcm: np.ndarray, expected_text: str) -> dict[str, Any]:
+        tokens = [w for w in expected_text.replace(".", "").split() if w]
+        spans = [(tok, 1000 + i * 2000, 2800 + i * 2000) for i, tok in enumerate(tokens)]
+        return {
+            "recognized_text": expected_text,
+            "cer": 0.0127,
+            "max_phoneme_duration_ms": 180.0,
+            "wespeaker_cosine": 0.793,
+            "dnsmos_p808": 3.92,
+            "tail_rms_dbfs": sar.compute_tail_rms_dbfs(pcm),
+            "syllables_per_sec": 4.4,
+            "word_spans": spans,
+        }
+
+    ok = rbs.render_broadcast_studio(
+        script_text="Tonight on Aircheck Tech Desk, mobile video production crossed a major line.",
+        project_id="v002_live_cal_ok",
+        output_dir=tmp_path / "cal_ok",
+        takes_per_clause=4,
+        lexicon_path=lexicon_path,
+        room_ir_path=ir_path,
+        room_tone_path=tone_path,
+        skip_video=True,
+        require_strict_gates=True,
+        require_real_alignment=True,
+        early_exit_on_pass=True,
+        gate_max_cer=ota_server.LIVE_TTS_GATE_MAX_CER,
+        gate_min_speaker_cos=ota_server.LIVE_TTS_GATE_MIN_SPEAKER_COS,
+        gate_min_dnsmos_p808=ota_server.LIVE_TTS_GATE_MIN_DNSMOS_P808,
+        gate_max_tail_rms_dbfs=ota_server.LIVE_TTS_GATE_MAX_TAIL_RMS_DBFS,
+        gate_min_syllables_per_sec=ota_server.LIVE_TTS_GATE_MIN_SYLLABLES_PER_SEC,
+        gate_max_syllables_per_sec=ota_server.LIVE_TTS_GATE_MAX_SYLLABLES_PER_SEC,
+        gate_max_phoneme_ms=ota_server.LIVE_TTS_GATE_MAX_PHONEME_MS,
+        schema_path=SCHEMA_PATH,
+        synthesizer_fn=_synth,
+        verifier_fn=_verify_v002_realistic,
+    )
+    assert ok["metrics"]["passed_all_strict_gates"] is True
+    ota_server._validate_strict_tts_metrics(ok["metrics"], require_present=True)
+
+    # Garbled / wrong-speaker take MUST still fail loudly under calibrated live gates
+    def _verify_imposter(pcm: np.ndarray, expected_text: str) -> dict[str, Any]:
+        return {
+            "recognized_text": "totally garbled output",
+            "cer": 0.28,
+            "max_phoneme_duration_ms": 190.0,
+            "wespeaker_cosine": 0.54,
+            "dnsmos_p808": 2.95,
+            "tail_rms_dbfs": sar.compute_tail_rms_dbfs(pcm),
+            "syllables_per_sec": 4.4,
+            "word_spans": [("totally", 1000, 4000)],
+        }
+
+    with pytest.raises(RuntimeError, match="failed strict 4-gate verification"):
+        rbs.render_broadcast_studio(
+            script_text="Tonight on Aircheck Tech Desk.",
+            project_id="v002_live_cal_fail",
+            output_dir=tmp_path / "cal_fail",
+            takes_per_clause=2,
+            max_retries_per_clause=0,
+            lexicon_path=lexicon_path,
+            room_ir_path=ir_path,
+            room_tone_path=tone_path,
+            skip_video=True,
+            require_strict_gates=True,
+            require_real_alignment=True,
+            early_exit_on_pass=True,
+            gate_max_cer=ota_server.LIVE_TTS_GATE_MAX_CER,
+            gate_min_speaker_cos=ota_server.LIVE_TTS_GATE_MIN_SPEAKER_COS,
+            gate_min_dnsmos_p808=ota_server.LIVE_TTS_GATE_MIN_DNSMOS_P808,
+            gate_max_tail_rms_dbfs=ota_server.LIVE_TTS_GATE_MAX_TAIL_RMS_DBFS,
+            gate_min_syllables_per_sec=ota_server.LIVE_TTS_GATE_MIN_SYLLABLES_PER_SEC,
+            gate_max_syllables_per_sec=ota_server.LIVE_TTS_GATE_MAX_SYLLABLES_PER_SEC,
+            gate_max_phoneme_ms=ota_server.LIVE_TTS_GATE_MAX_PHONEME_MS,
+            schema_path=SCHEMA_PATH,
+            synthesizer_fn=_synth,
+            verifier_fn=_verify_imposter,
+        )
+
+
