@@ -1958,6 +1958,9 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/draft/density":
             self._handle_post_draft_pass("density", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
             return
+        if parsed.path == "/v1/draft/rewrite":
+            self._handle_post_draft_pass("rewrite", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
 
         self._send_json(
             HTTPStatus.NOT_FOUND,

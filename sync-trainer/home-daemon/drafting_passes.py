@@ -1241,6 +1241,62 @@ class DraftPassEngine:
             "lock_parity_preserved": True,
         }
 
+    # ------------------------------------------------------------------
+    # 7. POST /v1/draft/rewrite (inline ✨ AI rewrite / clean / expand)
+    # ------------------------------------------------------------------
+
+    def rewrite(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be a JSON object")
+
+        raw_text = payload.get("text")
+        if not isinstance(raw_text, str) or not strip_lock_tags(raw_text).strip():
+            raise ValueError("text must be a non-empty string")
+
+        mode = str(payload.get("mode") or "seed_clean").strip().lower()
+        if mode not in ("seed_clean", "cut_polish"):
+            raise ValueError("mode must be 'seed_clean' or 'cut_polish'")
+
+        steering = _parse_string_list(payload.get("steering_constraints"), "steering_constraints")
+        locked_spans = extract_locked_spans(raw_text)
+
+        if mode == "seed_clean":
+            task_note = (
+                "Clean up, tighten, and sharpen this raw voice/text seed into crisp, punchy, "
+                "concrete plain-spoken prose (max 240 chars) ready to develop or synthesize."
+            )
+        else:
+            task_note = (
+                "Sharpen and tighten this short-form draft (max 275 chars) into crisp plain-spoken "
+                "prose while conserving every <lock>...</lock> substring verbatim."
+            )
+
+        system_prompt = (
+            "You rewrite rough mobile notes into clean, concrete, plain-spoken prose.\n"
+            "ABSOLUTE LOCK CONSERVATION RULE: Every substring enclosed in <lock>...</lock> MUST "
+            "appear character-for-character IDENTICAL in your output text (without the <lock> and "
+            "</lock> tags). Never paraphrase, re-case, or alter any locked span.\n"
+            + STYLE_CONSTRAINTS_SYSTEM_BLOCK
+        )
+        user_prompt = (
+            f"TASK: {task_note}\n"
+            f"INPUT:\n{raw_text}\n"
+            f"{_format_steering_block(steering)}\n"
+            'Return STRICT JSON ONLY: {"text":"..."}'
+        )
+
+        rewritten = self._run_lock_conserving_text_pass(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            marked_text=raw_text,
+            locked_spans=locked_spans,
+            operation=None,
+        )
+        return {
+            "text": rewritten,
+            "lock_parity_preserved": True,
+        }
+
     def _run_lock_conserving_text_pass(
         self,
         *,
