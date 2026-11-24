@@ -95,7 +95,6 @@ fun AircheckApp(
                         uiState = studioState,
                         onSelectChannel = studioViewModel::setBrandChannel,
                         onClearCasCache = studioViewModel::clearCasCache,
-                        onPreviewAudio = studioViewModel::togglePreviewMasterWav,
                         onSaveTailscaleRigUrl = { url ->
                             studioViewModel.saveTailscaleRigUrl(url)
                             draftViewModel.probeRigHealth()
@@ -103,13 +102,6 @@ fun AircheckApp(
                         onTestRigConnection = { url ->
                             studioViewModel.testMacRigConnection(url)
                             draftViewModel.probeRigHealth()
-                        },
-                        onSyncOtaBundle = studioViewModel::syncOtaBundleFromRig,
-                        onSyncPreferences = studioViewModel::syncPreferencesNow,
-                        onRefreshVmRss = studioViewModel::refreshVmRssTelemetry,
-                        onCreateNewProject = {
-                            draftViewModel.resetNewDraft()
-                            showSettingsModal = false
                         },
                         onClose = { showSettingsModal = false }
                     )

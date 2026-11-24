@@ -17,12 +17,6 @@ enum class BrandChannel(val label: String, val accentHex: String) {
     }
 }
 
-enum class StudioTab(val label: String) {
-    SCRIPT("Story"),
-    PHOTO("Desk"),
-    CLIPS("Clips")
-}
-
 enum class VoiceSource(val label: String, val subtitle: String) {
     MIC_VOICEOVER("Mic Voiceover", "Record live 16-bit PCM take on your phone"),
     ENROLLED_VOICE_CLONE("Local Voice Clone", "Synthesize on Mac Rig with s2-pro + LoRA");
@@ -297,16 +291,4 @@ fun estimateDurationSeconds(text: String, fallback: Int = 5): Int {
     val words = text.trim().split(Regex("\\s+")).count { it.isNotBlank() }
     if (words == 0) return max(3, fallback)
     return max(3, (words / 2.6f).roundToInt())
-}
-
-fun formatDurationBadge(seconds: Int): String {
-    val clamped = max(0, seconds)
-    return if (clamped < 10) "0${clamped}s" else "${clamped}s"
-}
-
-fun formatTimecode(seconds: Float): String {
-    val total = max(0, seconds.toInt())
-    val mins = total / 60
-    val secs = total % 60
-    return "%02d:%02d".format(mins, secs)
 }

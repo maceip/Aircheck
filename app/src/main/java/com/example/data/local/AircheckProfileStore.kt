@@ -120,36 +120,8 @@ class AircheckProfileStore(
         dataStore.updateData { it.copy(brandChannel = channel.name) }
     }
 
-    suspend fun setVoiceSource(source: VoiceSource) {
-        dataStore.updateData { it.copy(voiceSource = source.name) }
-    }
-
-    suspend fun setStage4Mode(mode: Stage4Mode) {
-        dataStore.updateData { it.copy(stage4Mode = mode.name) }
-    }
-
     suspend fun setActiveScriptId(scriptId: String) {
         dataStore.updateData { it.copy(activeScriptId = scriptId) }
-    }
-
-    suspend fun updatePersona(
-        headModelId: String? = null,
-        voiceId: String? = null,
-        defaultPhotoSha: String? = null,
-        trainingJobId: String? = null,
-        trainingStatus: String? = null,
-        trainingError: String? = null
-    ) {
-        dataStore.updateData { cur ->
-            cur.copy(
-                headModelId = headModelId?.trim() ?: cur.headModelId,
-                voiceId = voiceId?.trim() ?: cur.voiceId,
-                defaultPhotoSha = defaultPhotoSha?.trim() ?: cur.defaultPhotoSha,
-                trainingJobId = trainingJobId?.trim() ?: cur.trainingJobId,
-                trainingStatus = trainingStatus?.trim() ?: cur.trainingStatus,
-                trainingError = trainingError?.trim() ?: cur.trainingError
-            )
-        }
     }
 
     suspend fun setTailscaleRigUrl(url: String) {

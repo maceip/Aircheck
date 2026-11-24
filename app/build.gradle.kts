@@ -1,8 +1,16 @@
+import org.gradle.testing.jacoco.plugins.JacocoTaskExtension
+import org.gradle.testing.jacoco.tasks.JacocoReport
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.kotlin.serialization)
   alias(libs.plugins.google.devtools.ksp)
+  id("jacoco")
+}
+
+jacoco {
+  toolVersion = "0.8.12"
 }
 
 android {
@@ -58,6 +66,8 @@ android {
       }
     }
     debug {
+      enableUnitTestCoverage = true
+      enableAndroidTestCoverage = true
       ndk {
         abiFilters += listOf("arm64-v8a", "x86_64")
       }
@@ -81,6 +91,12 @@ android {
   testOptions {
     unitTests {
       isIncludeAndroidResources = true
+      all { testTask ->
+        testTask.extensions.configure(JacocoTaskExtension::class.java) {
+          isIncludeNoLocationClasses = true
+          excludes = listOf("jdk.internal.*")
+        }
+      }
     }
   }
 
@@ -99,7 +115,6 @@ android {
   }
 }
 
-// Aircheck + VoiceStudio Local-First Modules (GGUF+LoRA, LiteRT DAC, 4-Gate ONNX, Oboe EDL, Hairline Clipper, Mac :8443 Bridge)
 dependencies {
   implementation(project(":audio-edl"))
   implementation(project(":core-engine"))
@@ -115,7 +130,6 @@ dependencies {
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
-  implementation(libs.androidx.lifecycle.viewmodel.navigation3)
 
   implementation(libs.androidx.compose.ui)
   implementation(libs.androidx.compose.ui.graphics)
@@ -124,17 +138,9 @@ dependencies {
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
 
-  // Jetpack Navigation 3 + Predictive Back NavigationEvent
-  implementation(libs.androidx.navigation3.runtime)
-  implementation(libs.androidx.navigation3.ui)
   implementation(libs.androidx.navigationevent)
   implementation(libs.androidx.navigationevent.compose)
 
-  // Android 16/17 Jetpack AppFunctions (KSP-generated service + metadata)
-  implementation(libs.androidx.appfunctions)
-  ksp(libs.androidx.appfunctions.compiler)
-
-  // Room WAL Storage + Proto DataStore (binary Protocol Buffers via kotlinx.serialization.protobuf)
   implementation(libs.androidx.room.runtime)
   implementation(libs.androidx.room.ktx)
   ksp(libs.androidx.room.compiler)
@@ -142,28 +148,28 @@ dependencies {
   implementation(libs.kotlinx.serialization.json)
   implementation(libs.kotlinx.serialization.protobuf)
 
-  // Media3 Singleton ExoPlayer + SimpleCache + OkHttp progressive streaming
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.ui)
   implementation(libs.androidx.media3.datasource.okhttp)
   implementation(libs.androidx.media3.database)
 
-  // Coil 3 Hardware Bitmaps + OkHttp networking
   implementation(libs.coil3.compose)
   implementation(libs.coil3.network.okhttp)
   implementation(libs.okhttp)
   implementation(libs.okhttp.logging)
 
-  // Startup speed multiplier
   implementation(libs.androidx.profileinstaller)
 
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.kotlinx.coroutines.android)
 
+  testImplementation(platform(libs.androidx.compose.bom))
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
   testImplementation(libs.androidx.core)
+  testImplementation(libs.androidx.junit)
+  testImplementation(libs.androidx.compose.ui.test.junit4)
 
   androidTestImplementation(platform(libs.androidx.compose.bom))
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)
@@ -173,4 +179,53 @@ dependencies {
 
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
+}
+
+val jacocoExcludes = listOf(
+  "**/R.class",
+  "**/R$*.class",
+  "**/BuildConfig.*",
+  "**/Manifest*.*",
+  "**/*Test*.*",
+  "android/**/*.*",
+  "**/*_Impl.class",
+  "**/*_Impl$*.class",
+  "**/*\$\$serializer.class",
+  "**/*\$\$serializer$*.class",
+  "**/ComposableSingletons$*.class"
+)
+
+tasks.register<JacocoReport>("jacocoFullCoverageReport") {
+  group = "verification"
+  description = "Generate merged JaCoCo XML & HTML coverage report from unit tests and connected Android tests."
+  dependsOn("testDebugUnitTest")
+
+  reports {
+    xml.required.set(true)
+    html.required.set(true)
+    csv.required.set(false)
+  }
+
+  val kotlinClasses = fileTree(layout.buildDirectory.dir("tmp/kotlin-classes/debug")) {
+    exclude(jacocoExcludes)
+  }
+  val asmClasses = fileTree(layout.buildDirectory.dir("intermediates/built_in_kotlinc/debug/compileDebugKotlin/classes")) {
+    exclude(jacocoExcludes)
+  }
+  val javaClasses = fileTree(layout.buildDirectory.dir("intermediates/javac/debug/compileDebugJavaWithJavac/classes")) {
+    exclude(jacocoExcludes)
+  }
+
+  classDirectories.setFrom(files(kotlinClasses, asmClasses, javaClasses))
+  sourceDirectories.setFrom(files("${project.projectDir}/src/main/java", "${project.projectDir}/src/main/kotlin"))
+  executionData.setFrom(
+    fileTree(layout.buildDirectory) {
+      include(
+        "outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec",
+        "jacoco/testDebugUnitTest.exec",
+        "outputs/code_coverage/debugAndroidTest/connected/**/*.ec",
+        "outputs/code_coverage/manual/*.ec"
+      )
+    }
+  )
 }

@@ -52,6 +52,7 @@ import com.example.ui.RigConnectionStatus
 import com.example.ui.StudioUiState
 import com.example.ui.components.AircheckBrandMark
 import com.example.ui.components.StudioCard
+import com.example.ui.components.studioFieldColors
 import com.example.ui.theme.AcidVoltLime
 import com.example.ui.theme.BroadcastCobalt
 import com.example.ui.theme.ConsoleElevated
@@ -73,14 +74,9 @@ fun SystemDeckSheet(
     uiState: StudioUiState,
     onSelectChannel: (BrandChannel) -> Unit,
     onClearCasCache: () -> Unit,
-    onPreviewAudio: () -> Unit,
     onClose: () -> Unit,
-    onSaveTailscaleRigUrl: (String) -> Unit = {},
-    onSyncOtaBundle: (String) -> Unit = {},
-    onSyncPreferences: (String) -> Unit = {},
-    onRefreshVmRss: () -> Unit = {},
-    onTestRigConnection: ((String) -> Unit)? = null,
-    onCreateNewProject: () -> Unit = {},
+    onSaveTailscaleRigUrl: (String) -> Unit,
+    onTestRigConnection: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
@@ -89,10 +85,6 @@ fun SystemDeckSheet(
 
     var rigUrlDraft by remember(uiState.settings.tailscaleRigUrl) {
         mutableStateOf(uiState.settings.tailscaleRigUrl)
-    }
-
-    LaunchedEffect(Unit) {
-        onRefreshVmRss()
     }
 
     val rigStatusLabel = when (rigHealth.status) {
@@ -214,7 +206,7 @@ fun SystemDeckSheet(
                         }
 
                         OutlinedButton(
-                            onClick = { onTestRigConnection?.invoke(rigUrlDraft) },
+                            onClick = { onTestRigConnection(rigUrlDraft) },
                             enabled = rigHealth.status != RigConnectionStatus.CHECKING,
                             shape = RoundedCornerShape(8.dp),
                             border = BorderStroke(1.dp, tokens.hairline),

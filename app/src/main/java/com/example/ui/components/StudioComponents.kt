@@ -16,38 +16,25 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.VideoLibrary
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -74,21 +61,18 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.R
-import com.example.data.StudioTab
 import com.example.ui.theme.ConsoleObsidian
-import com.example.ui.theme.GraphiteHairline
 import com.example.ui.theme.LocalAircheckTokens
 import com.example.ui.theme.OledVoid
 import com.example.ui.theme.OnAirCrimson
 import com.example.ui.theme.StudioCrisp
 
 /**
- * Geometric Triangle + Broadcast Mic emblem mirroring the uploaded Aircheck puck mark.
+ * Geometric Triangle + Broadcast Mic emblem for Aircheck.
  */
 @Composable
 fun AircheckBrandMark(
@@ -110,7 +94,6 @@ fun AircheckBrandMark(
             color = accentColor,
             style = Stroke(width = w * 0.11f, cap = StrokeCap.Round)
         )
-        // Minimal studio microphone silhouette centered inside triangle
         drawRoundRect(
             color = accentColor,
             topLeft = Offset(w * 0.43f, h * 0.38f),
@@ -137,78 +120,7 @@ fun AircheckBrandMark(
 }
 
 /**
- * Uniform 52.dp top bar shared across every screen: Brand mark + Title on left,
- * single System Deck trigger on right with live green dot when Mac Studio Rig is online.
- */
-@Composable
-fun StudioTopBar(
-    title: String,
-    isRigOnline: Boolean,
-    onOpenSystemDeck: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val tokens = LocalAircheckTokens.current
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(OledVoid)
-            .windowInsetsPadding(WindowInsets.statusBars)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            AircheckBrandMark(size = 24.dp)
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onBackground,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            Box(contentAlignment = Alignment.Center) {
-                IconButton(
-                    onClick = onOpenSystemDeck,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("top_bar_system_deck_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Tune,
-                        contentDescription = stringResource(R.string.cd_open_system_deck),
-                        tint = if (isRigOnline) tokens.channelAccent else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(21.dp)
-                    )
-                }
-                if (isRigOnline) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(top = 11.dp, end = 11.dp)
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(tokens.statusLive)
-                    )
-                }
-            }
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(tokens.hairline)
-        )
-    }
-}
-
-/**
- * Uniform 8.dp OLED studio card with 1.dp graphite border and optional active-channel
- * streaming shimmer across the entire card surface.
+ * Uniform 8.dp OLED studio card with 1.dp graphite border and optional shimmer.
  */
 @Composable
 fun StudioCard(
@@ -277,8 +189,7 @@ fun StudioCard(
 }
 
 /**
- * Glossy silver-white beveled hardware broadcast key matching the uploaded neumorphic icon sheet:
- * Metallic bevel frame + recessed pitch-black OLED icon screen + radial glowing LED status pip.
+ * Tactile hardware broadcast transport key with metallic bevel + recessed OLED well + LED pip.
  */
 @Composable
 fun HardwareKeyButton(
@@ -347,7 +258,6 @@ fun HardwareKeyButton(
                 .semantics { this.contentDescription = contentDescription }
                 .padding(5.dp)
         ) {
-            // Recessed pitch-black OLED icon well
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -368,7 +278,6 @@ fun HardwareKeyButton(
                 )
             }
 
-            // Radial glowing LED status pip on bottom-right corner
             if (effectiveLed != null) {
                 Canvas(
                     modifier = Modifier
@@ -403,202 +312,8 @@ fun HardwareKeyButton(
 }
 
 /**
- * Uniform 50.dp full-width primary action button pinned above the hardware dock.
- */
-@Composable
-fun StudioPrimaryCta(
-    text: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true
-) {
-    val tokens = LocalAircheckTokens.current
-    val view = LocalView.current
-    Button(
-        onClick = {
-            view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            onClick()
-        },
-        enabled = enabled,
-        shape = RoundedCornerShape(8.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = tokens.channelAccent,
-            contentColor = tokens.channelAccentInk,
-            disabledContainerColor = tokens.channelAccent.copy(alpha = 0.25f),
-            disabledContentColor = tokens.channelAccentInk.copy(alpha = 0.5f)
-        ),
-        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 0.dp),
-        modifier = modifier
-            .fillMaxWidth()
-            .height(50.dp)
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
-/**
- * Single-row glossy silver-white tactile hardware pill dock (Script · Stage · Review).
- */
-@Composable
-fun StudioDockBar(
-    selectedTab: StudioTab,
-    onSelectTab: (StudioTab) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val tokens = LocalAircheckTokens.current
-    val view = LocalView.current
-
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(OledVoid)
-            .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(60.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(tokens.hardwareTop, tokens.hardwareBase, tokens.hardwareShadow)
-                    )
-                )
-                .border(
-                    width = 1.dp,
-                    brush = Brush.verticalGradient(
-                        colors = listOf(Color.White.copy(alpha = 0.92f), Color(0xFF5D6572))
-                    ),
-                    shape = RoundedCornerShape(16.dp)
-                )
-                .padding(6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            StudioTab.entries.forEach { tab ->
-                val isSelected = tab == selectedTab
-                val icon = when (tab) {
-                    StudioTab.SCRIPT -> Icons.Filled.Edit
-                    StudioTab.PHOTO -> Icons.Filled.PhotoCamera
-                    StudioTab.CLIPS -> Icons.Filled.VideoLibrary
-                }
-                val ledColor = when {
-                    !isSelected -> Color(0xFF3A414E)
-                    tab == StudioTab.SCRIPT -> tokens.channelAccent
-                    tab == StudioTab.PHOTO -> tokens.statusStandby
-                    else -> tokens.statusLive
-                }
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(tokens.hardwareWell)
-                        .border(
-                            width = 1.dp,
-                            color = if (isSelected) tokens.channelAccent.copy(alpha = 0.72f) else Color(0xFF1F242E),
-                            shape = RoundedCornerShape(10.dp)
-                        )
-                        .clickable(role = Role.Tab) {
-                            view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                            onSelectTab(tab)
-                        }
-                        .testTag("dock_tab_${tab.name.lowercase()}"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = icon,
-                            contentDescription = tab.label,
-                            tint = if (isSelected) tokens.channelAccent else StudioCrisp.copy(alpha = 0.78f),
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = tab.label,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (isSelected) StudioCrisp else StudioCrisp.copy(alpha = 0.68f),
-                            maxLines = 1
-                        )
-                    }
-                    // LED tally dot
-                    Canvas(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(end = 6.dp, bottom = 5.dp)
-                            .size(7.dp)
-                    ) {
-                        if (isSelected) {
-                            drawCircle(
-                                brush = Brush.radialGradient(
-                                    colors = listOf(ledColor.copy(alpha = 0.55f), Color.Transparent)
-                                ),
-                                radius = size.minDimension * 0.95f
-                            )
-                        }
-                        drawCircle(color = ledColor, radius = size.minDimension * 0.36f)
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
- * Adaptive tablet/foldable left navigation rail with the same glossy hardware well aesthetic.
- */
-@Composable
-fun StudioNavigationRail(
-    selectedTab: StudioTab,
-    onSelectTab: (StudioTab) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val tokens = LocalAircheckTokens.current
-    Column(
-        modifier = modifier
-            .fillMaxHeight()
-            .width(88.dp)
-            .background(OledVoid)
-            .border(width = 1.dp, color = GraphiteHairline)
-            .padding(vertical = 16.dp, horizontal = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        StudioTab.entries.forEach { tab ->
-            val icon = when (tab) {
-                StudioTab.SCRIPT -> Icons.Filled.Edit
-                StudioTab.PHOTO -> Icons.Filled.PhotoCamera
-                StudioTab.CLIPS -> Icons.Filled.VideoLibrary
-            }
-            val selected = tab == selectedTab
-            HardwareKeyButton(
-                icon = icon,
-                contentDescription = tab.label,
-                onClick = { onSelectTab(tab) },
-                active = selected,
-                ledColor = if (selected) tokens.channelAccent else null,
-                label = tab.label,
-                width = 64.dp,
-                height = 50.dp,
-                modifier = Modifier.testTag("rail_tab_${tab.name.lowercase()}")
-            )
-        }
-    }
-}
-
-/**
  * Real decoded RIFF PCM waveform renderer. Never synthesizes fake peaks:
- * when peaks is empty, renders a clean quiet studio baseline.
+ * when peaks is empty, renders a quiet studio baseline.
  */
 @Composable
 fun TelemetryWaveform(
@@ -622,7 +337,6 @@ fun TelemetryWaveform(
             .padding(horizontal = 8.dp, vertical = 6.dp)
     ) {
         val midY = size.height * 0.5f
-        // Center zero-crossing reference line
         drawLine(
             color = dimColor.copy(alpha = 0.7f),
             start = Offset(0f, midY),
@@ -651,7 +365,6 @@ fun TelemetryWaveform(
             )
         }
 
-        // Playhead hairline
         if (progress > 0f && !isRecording) {
             drawLine(
                 color = tokens.channelAccent,
@@ -659,28 +372,6 @@ fun TelemetryWaveform(
                 end = Offset(playX, size.height),
                 strokeWidth = 2.dp.toPx()
             )
-        }
-    }
-}
-
-/**
- * 45° Hazard Signal Orange diagonal cut overlay for muted/cut script beats.
- */
-@Composable
-fun HazardCutOverlay(modifier: Modifier = Modifier) {
-    val hazard = LocalAircheckTokens.current.hazardCut
-    Canvas(modifier = modifier.fillMaxSize()) {
-        val stripeGap = 16.dp.toPx()
-        val strokeW = 2.dp.toPx()
-        var x = -size.height
-        while (x < size.width + size.height) {
-            drawLine(
-                color = hazard.copy(alpha = 0.22f),
-                start = Offset(x, size.height),
-                end = Offset(x + size.height, 0f),
-                strokeWidth = strokeW
-            )
-            x += stripeGap
         }
     }
 }
@@ -728,3 +419,14 @@ fun StudioErrorBanner(
         }
     }
 }
+
+@Composable
+fun studioFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedBorderColor = LocalAircheckTokens.current.channelAccent,
+    unfocusedBorderColor = LocalAircheckTokens.current.hairline,
+    focusedContainerColor = OledVoid,
+    unfocusedContainerColor = OledVoid,
+    focusedTextColor = StudioCrisp,
+    unfocusedTextColor = StudioCrisp,
+    cursorColor = LocalAircheckTokens.current.channelAccent
+)

@@ -18,7 +18,6 @@ import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.draft.DraftApiClient
 import com.example.draft.VadAudioCaptureEngine
 import com.example.engine.AircheckPlayerController
-import com.example.engine.AudioEngine
 import com.example.engine.ClipExporter
 import com.example.graph.GraphRadarEngine
 import com.example.graph.LocalGraphDatabase
@@ -52,7 +51,6 @@ class AircheckContainer(context: Context) {
     val localRepo: AircheckLocalRepository by lazy { AircheckLocalRepository(database) }
     val profileStore: AircheckProfileStore by lazy { AircheckProfileStore(appContext, appScope) }
     val casStore: CasMediaStore by lazy { CasMediaStore(appContext, database.casDao()) }
-    val audioEngine: AudioEngine by lazy { AudioEngine() }
     val playerController: AircheckPlayerController by lazy { AircheckPlayerController(appContext, okHttpClient) }
     val clipExporter: ClipExporter by lazy { ClipExporter(appContext, casStore, okHttpClient) }
     val macRigGateway: MacRigRenderGateway by lazy { DirectMacRigGateway(casStore, okHttpClient) }
