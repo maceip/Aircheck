@@ -164,6 +164,8 @@ class AircheckNewsroomAndVoiceCareE2ETest {
         val renderBodies = CopyOnWriteArrayList<String>()
         val chopBodies = CopyOnWriteArrayList<String>()
         val ttsPassCounter = AtomicInteger(0)
+        val rigTaskSeq = AtomicInteger(0)
+        val rigTasks = java.util.concurrent.ConcurrentHashMap<String, String>()
 
         val socket = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
         serverSocket = socket
@@ -194,6 +196,8 @@ class AircheckNewsroomAndVoiceCareE2ETest {
                     val reqBody = String(bodyChars, 0, readTotal)
                     val path = requestLine.split(" ").getOrNull(1).orEmpty()
 
+                    val isAsync = path.contains("async=1")
+                    var statusLine = "200 OK"
                     val (contentType, respBytes) = when {
                         path.startsWith("/health") || path.startsWith("/v1/health") -> {
                             "application/json" to """{"status":"ok","lora_version":4,"render_bridge_available":true}"""
@@ -210,8 +214,15 @@ class AircheckNewsroomAndVoiceCareE2ETest {
                         }
                         path.startsWith("/v1/core/tts") -> {
                             val pass = ttsPassCounter.incrementAndGet()
-                            "application/json" to """{"tts_id":"e2e_tts_$pass","audio_url":"http://127.0.0.1:$port/v1/renders/e2e_tts_$pass.wav","duration_ms":2200,"waveform_peaks":[0.4,0.8,0.6,0.9],"clauses":[{"id":"c0","index":0,"spoken_text":"Clause one.","start_ms":0,"end_ms":1100},{"id":"c1","index":1,"spoken_text":"Clause two.","start_ms":1100,"end_ms":2200}]}"""
-                                .toByteArray(Charsets.UTF_8)
+                            val payloadJson = """{"tts_id":"e2e_tts_$pass","audio_url":"http://127.0.0.1:$port/v1/renders/e2e_tts_$pass.wav","duration_ms":2200,"waveform_peaks":[0.4,0.8,0.6,0.9],"clauses":[{"id":"c0","index":0,"spoken_text":"Clause one.","start_ms":0,"end_ms":1100},{"id":"c1","index":1,"spoken_text":"Clause two.","start_ms":1100,"end_ms":2200}]}"""
+                            if (isAsync) {
+                                val taskId = "task_${rigTaskSeq.incrementAndGet()}"
+                                rigTasks[taskId] = payloadJson
+                                statusLine = "202 Accepted"
+                                "application/json" to """{"job_id":"$taskId","status":"RUNNING"}""".toByteArray(Charsets.UTF_8)
+                            } else {
+                                "application/json" to payloadJson.toByteArray(Charsets.UTF_8)
+                            }
                         }
                         path.startsWith("/v1/render-video") -> {
                             renderBodies.add(reqBody)
@@ -222,11 +233,28 @@ class AircheckNewsroomAndVoiceCareE2ETest {
                             "application/json" to """{"job_id":"e2e_head_01","status":"READY","progress_fraction":1.0,"stage_detail":"Ready","video_url":"http://127.0.0.1:$port/v1/renders/e2e_head_01.mp4","duration_ms":2200}"""
                                 .toByteArray(Charsets.UTF_8)
                         }
+                        path.startsWith("/v1/jobs/task_") -> {
+                            val tid = path.substringAfterLast('/').substringBefore('?')
+                            val resJson = rigTasks[tid]
+                            if (resJson != null) {
+                                "application/json" to """{"job_id":"$tid","status":"READY","result":$resJson}""".toByteArray(Charsets.UTF_8)
+                            } else {
+                                statusLine = "404 Not Found"
+                                "application/json" to """{"error":"not_found"}""".toByteArray(Charsets.UTF_8)
+                            }
+                        }
                         path.startsWith("/v1/core/chop-broll") -> {
                             chopBodies.add(reqBody)
                             val n = chopBodies.size
-                            "application/json" to """{"job_id":"e2e_broll_$n","status":"READY","video_url":"http://127.0.0.1:$port/v1/renders/e2e_broll_$n.mp4","duration_ms":2200,"broll_cut_count":1,"applied_overlay_count":0}"""
-                                .toByteArray(Charsets.UTF_8)
+                            val payloadJson = """{"job_id":"e2e_broll_$n","status":"READY","video_url":"http://127.0.0.1:$port/v1/renders/e2e_broll_$n.mp4","duration_ms":2200,"broll_cut_count":1,"applied_overlay_count":0}"""
+                            if (isAsync) {
+                                val taskId = "task_${rigTaskSeq.incrementAndGet()}"
+                                rigTasks[taskId] = payloadJson
+                                statusLine = "202 Accepted"
+                                "application/json" to """{"job_id":"$taskId","status":"RUNNING"}""".toByteArray(Charsets.UTF_8)
+                            } else {
+                                "application/json" to payloadJson.toByteArray(Charsets.UTF_8)
+                            }
                         }
                         path.endsWith(".wav") -> {
                             val freq = if (path.contains("_1.wav")) 350.0 else 480.0
@@ -238,7 +266,7 @@ class AircheckNewsroomAndVoiceCareE2ETest {
                     }
 
                     val httpHeader = (
-                        "HTTP/1.1 200 OK\r\n" +
+                        "HTTP/1.1 $statusLine\r\n" +
                             "Content-Type: $contentType\r\n" +
                             "Content-Length: ${respBytes.size}\r\n" +
                             "Connection: close\r\n\r\n"
