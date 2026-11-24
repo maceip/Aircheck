@@ -1563,11 +1563,18 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
     // =========================================================================
 
     fun toggleRawKeyboardMode() {
-        val entering = !_uiState.value.rawKeyboardMode
+        val current = _uiState.value
+        val entering = !current.rawKeyboardMode
         if (entering) {
             dismissBrushStrip()
         }
         _uiState.update { it.copy(rawKeyboardMode = entering) }
+        if (!entering &&
+            current.document.stage == Stage.SEED &&
+            current.document.seedTranscript.trim().length >= 8
+        ) {
+            refreshAnglesFromSeed()
+        }
     }
 
     fun dismissError() {
