@@ -15,9 +15,14 @@ import com.example.data.local.AircheckLocalRepository
 import com.example.data.local.AircheckProfileStore
 import com.example.data.local.CasMediaStore
 import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
+import com.example.draft.DraftApiClient
+import com.example.draft.VadAudioCaptureEngine
 import com.example.engine.AircheckPlayerController
 import com.example.engine.AudioEngine
 import com.example.engine.ClipExporter
+import com.example.graph.GraphRadarEngine
+import com.example.graph.LocalGraphDatabase
+import com.example.graph.XArchiveImporter
 import com.voicestudio.edl.EdlController
 import com.voicestudio.sync.OtaBundleSyncManager
 import com.voicestudio.sync.SyncConfigProvider
@@ -28,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 class AircheckContainer(context: Context) {
@@ -66,6 +72,25 @@ class AircheckContainer(context: Context) {
     val voiceStudioCoordinator: VoiceStudioSyncCoordinator by lazy {
         VoiceStudioSyncCoordinator(appContext, otaBundleSyncManager)
     }
+
+    // Tactile Mobile Plain-Text Drafting Engine & Stage 4 Local Network Graph Radar
+    val draftApiClient: DraftApiClient by lazy {
+        DraftApiClient(
+            configuredRigUrl = DEFAULT_MAC_RIG_LAN_URL,
+            usbLoopbackUrl = DraftApiClient.DEFAULT_RIG_USB_URL,
+            okHttpClient = okHttpClient
+        )
+    }
+    val vadAudioEngine: VadAudioCaptureEngine by lazy {
+        VadAudioCaptureEngine(chunkCacheDir = File(appContext.cacheDir, "aircheck_vad"))
+    }
+    val localGraphDatabase: LocalGraphDatabase by lazy {
+        LocalGraphDatabase(appContext)
+    }
+    val graphRadarEngine: GraphRadarEngine by lazy {
+        GraphRadarEngine(localGraphDatabase)
+    }
+    val xArchiveImporter: XArchiveImporter by lazy { XArchiveImporter }
 
     fun bindVoiceStudioRuntime() {
         VoiceStudioRuntimeRegistry.otaBundleSyncManager = otaBundleSyncManager
