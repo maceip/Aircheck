@@ -29,6 +29,7 @@ import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.zip.GZIPInputStream
 
 /**
  * Verified on-disk artifact paths resolved under `noBackupFilesDir/bundles/{bundle_version}/`
@@ -462,6 +463,12 @@ class OtaBundleSyncManager(
                         return direct
                     }
                     if (direct.isFile && direct.canRead() && direct.length() > 0L) {
+                        if (art.format == OtaArtifactFormat.TAR_GZ || art.filename.endsWith(".tar.gz", ignoreCase = true)) {
+                            val extracted = runCatching { extractTarGzArchive(direct, candidateDir) }.isSuccess
+                            if (extracted && File(candidateDir, "tokens.txt").isFile) {
+                                return candidateDir
+                            }
+                        }
                         // Allow flat directory layout where tokens.txt sits alongside the CTC .onnx file.
                         if (File(bundleDir, "tokens.txt").isFile) {
                             return bundleDir
@@ -549,6 +556,7 @@ class OtaBundleSyncManager(
 
         // 1. Reuse if targetFile already exists and matches exact size & SHA-256.
         if (verifyFileMatchesArtifact(targetFile, artifact)) {
+            maybeExtractSherpaArchive(artifact, targetFile, targetBundleDir)
             return@runCatching targetFile
         }
 
@@ -556,6 +564,7 @@ class OtaBundleSyncManager(
         if (artifact.updateCadence == OtaUpdateCadence.STATIC_ONCE) {
             val reused = tryReuseVerifiedStaticArtifact(artifact, targetBundleDir, previousBundleDir)
             if (reused != null) {
+                maybeExtractSherpaArchive(artifact, reused, targetBundleDir)
                 return@runCatching reused
             }
         }
@@ -614,7 +623,23 @@ class OtaBundleSyncManager(
         if (artifact.updateCadence == OtaUpdateCadence.STATIC_ONCE) {
             mirrorToStaticCache(promoted, artifact)
         }
+        maybeExtractSherpaArchive(artifact, promoted, targetBundleDir)
         promoted
+    }
+
+    private fun maybeExtractSherpaArchive(
+        artifact: OtaModelArtifact,
+        archiveFile: File,
+        bundleDir: File
+    ) {
+        if (artifact.role == OtaArtifactRole.SHERPA_CTC_ALIGNER &&
+            (artifact.format == OtaArtifactFormat.TAR_GZ || artifact.filename.endsWith(".tar.gz", ignoreCase = true))
+        ) {
+            val destDir = File(bundleDir, SHERPA_CTC_EXTRACTED_DIR)
+            if (!File(destDir, "tokens.txt").isFile) {
+                extractTarGzArchive(archiveFile, destDir)
+            }
+        }
     }
 
     private fun downloadWithRangeResume(
@@ -1002,6 +1027,92 @@ class OtaBundleSyncManager(
         fun computeSha256Hex(bytes: ByteArray): String {
             val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
             return digest.joinToString("") { "%02x".format(it) }
+        }
+
+        internal fun extractTarGzArchive(archiveFile: File, destDir: File) {
+            val tmpDir = File(destDir.parentFile ?: destDir, ".${destDir.name}.extract_tmp_${System.nanoTime()}")
+            if (tmpDir.exists()) tmpDir.deleteRecursively()
+            tmpDir.mkdirs()
+            try {
+                val canonicalRoot = tmpDir.canonicalPath + File.separator
+                GZIPInputStream(FileInputStream(archiveFile).buffered(STREAM_BUFFER_BYTES)).use { tar ->
+                    val header = ByteArray(512)
+                    val copyBuf = ByteArray(STREAM_BUFFER_BYTES)
+                    while (true) {
+                        val read = readFullyOrEof(tar, header)
+                        if (read == 0) break
+                        if (read < 512 || header.all { it == 0.toByte() }) break
+                        val rawName = decodeTarString(header, 0, 100)
+                        val prefix = decodeTarString(header, 345, 155)
+                        val fullName = if (prefix.isNotEmpty()) "$prefix/$rawName" else rawName
+                        val sizeStr = decodeTarString(header, 124, 12).trim()
+                        val entrySize = if (sizeStr.isEmpty()) 0L else sizeStr.toLong(8)
+                        val typeFlag = header[156].toInt().toChar()
+
+                        val cleanName = fullName.trimStart('/').removePrefix("./")
+                        val leafName = cleanName.substringAfterLast('/')
+                        val isRegular = typeFlag == '0' || typeFlag == '\u0000'
+                        if (isRegular && leafName.isNotEmpty() && !cleanName.contains("..")) {
+                            val outFile = File(tmpDir, leafName)
+                            if (!outFile.canonicalPath.startsWith(canonicalRoot)) {
+                                throw SecurityException("Unsafe tar entry path: $fullName")
+                            }
+                            outFile.parentFile?.mkdirs()
+                            FileOutputStream(outFile).use { out ->
+                                var remaining = entrySize
+                                while (remaining > 0L) {
+                                    val toRead = minOf(remaining, copyBuf.size.toLong()).toInt()
+                                    val n = tar.read(copyBuf, 0, toRead)
+                                    if (n <= 0) throw IOException("Truncated tar entry: $fullName")
+                                    out.write(copyBuf, 0, n)
+                                    remaining -= n
+                                }
+                            }
+                        } else {
+                            skipExact(tar, entrySize)
+                        }
+                        val pad = ((512L - (entrySize % 512L)) % 512L)
+                        if (pad > 0L) skipExact(tar, pad)
+                    }
+                }
+                if (destDir.exists()) destDir.deleteRecursively()
+                if (!tmpDir.renameTo(destDir)) {
+                    tmpDir.copyRecursively(destDir, overwrite = true)
+                    tmpDir.deleteRecursively()
+                }
+            } catch (e: Exception) {
+                tmpDir.deleteRecursively()
+                throw e
+            }
+        }
+
+        private fun readFullyOrEof(input: java.io.InputStream, buf: ByteArray): Int {
+            var offset = 0
+            while (offset < buf.size) {
+                val n = input.read(buf, offset, buf.size - offset)
+                if (n < 0) return offset
+                offset += n
+            }
+            return offset
+        }
+
+        private fun skipExact(input: java.io.InputStream, bytes: Long) {
+            var remaining = bytes
+            val discard = ByteArray(4096)
+            while (remaining > 0L) {
+                val n = input.read(discard, 0, minOf(remaining, discard.size.toLong()).toInt())
+                if (n <= 0) break
+                remaining -= n
+            }
+        }
+
+        private fun decodeTarString(header: ByteArray, offset: Int, length: Int): String {
+            var end = offset
+            val limit = offset + length
+            while (end < limit && header[end] != 0.toByte()) {
+                end++
+            }
+            return String(header, offset, end - offset, Charsets.UTF_8).trim()
         }
 
         internal fun isMatchingContentRangeStart(
