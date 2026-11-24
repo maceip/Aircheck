@@ -281,6 +281,116 @@ data class StageProviderSettings(
     val useLanPackage: Boolean = true
 )
 
+const val DEFAULT_REMOTE_LLM_PROVIDER_ID: String = "remote_bailian"
+
+val SUPPORTED_REMOTE_LLM_PROVIDERS: List<String> = listOf(
+    "remote_bailian",
+    "remote_openai",
+    "remote_gemini",
+    "remote_anthropic"
+)
+
+enum class LlmStage {
+    DRAFTING,
+    SCRIPT_EDIT,
+    NEWSROOM_OVERLAY
+}
+
+enum class LlmProviderChoice(
+    val id: String,
+    val label: String,
+    val isOnDevice: Boolean,
+    val isLocal: Boolean,
+    val defaultWireProviderId: String?
+) {
+    MAC_RIG_DEFAULT(
+        id = "mac_rig_default",
+        label = "Mac Rig Default",
+        isOnDevice = false,
+        isLocal = false,
+        defaultWireProviderId = null
+    ),
+    LOCAL_AICORE_NANO(
+        id = "local_aicore_nano",
+        label = "On-Device Gemini Nano",
+        isOnDevice = true,
+        isLocal = true,
+        defaultWireProviderId = null
+    ),
+    LOCAL_MAC_MLX(
+        id = "local_mlx",
+        label = "Mac Local MLX",
+        isOnDevice = false,
+        isLocal = true,
+        defaultWireProviderId = "local_mlx"
+    ),
+    LOCAL_MAC_OLLAMA(
+        id = "local_ollama",
+        label = "Mac Local Ollama",
+        isOnDevice = false,
+        isLocal = true,
+        defaultWireProviderId = "local_ollama"
+    ),
+    LOCAL_MAC_LLAMA_CPP(
+        id = "local_llama_cpp",
+        label = "Mac Local llama.cpp",
+        isOnDevice = false,
+        isLocal = true,
+        defaultWireProviderId = "local_llama_cpp"
+    ),
+    REMOTE_HOSTED(
+        id = "remote_hosted",
+        label = "Remote Hosted",
+        isOnDevice = false,
+        isLocal = false,
+        defaultWireProviderId = DEFAULT_REMOTE_LLM_PROVIDER_ID
+    );
+
+    companion object {
+        fun fromRaw(raw: String?): LlmProviderChoice {
+            val clean = raw?.trim().orEmpty()
+            if (clean.isEmpty()) return MAC_RIG_DEFAULT
+            if (clean.lowercase() in SUPPORTED_REMOTE_LLM_PROVIDERS) return REMOTE_HOSTED
+            return entries.firstOrNull {
+                it.id.equals(clean, ignoreCase = true) ||
+                    it.name.equals(clean, ignoreCase = true) ||
+                    it.defaultWireProviderId?.equals(clean, ignoreCase = true) == true
+            } ?: MAC_RIG_DEFAULT
+        }
+    }
+}
+
+data class LlmStageConfig(
+    val provider: LlmProviderChoice = LlmProviderChoice.MAC_RIG_DEFAULT,
+    val remoteProviderId: String = DEFAULT_REMOTE_LLM_PROVIDER_ID,
+    val modelOverride: String = ""
+) {
+    fun resolveWireProviderId(): String? = when (provider) {
+        LlmProviderChoice.MAC_RIG_DEFAULT,
+        LlmProviderChoice.LOCAL_AICORE_NANO -> null
+        LlmProviderChoice.LOCAL_MAC_MLX,
+        LlmProviderChoice.LOCAL_MAC_OLLAMA,
+        LlmProviderChoice.LOCAL_MAC_LLAMA_CPP -> provider.defaultWireProviderId
+        LlmProviderChoice.REMOTE_HOSTED -> remoteProviderId.trim()
+            .takeIf { it in SUPPORTED_REMOTE_LLM_PROVIDERS }
+            ?: DEFAULT_REMOTE_LLM_PROVIDER_ID
+    }
+
+    fun normalizedModelOverride(): String? = modelOverride.trim().ifBlank { null }
+}
+
+data class LlmRoutingSettings(
+    val drafting: LlmStageConfig = LlmStageConfig(),
+    val scriptEdit: LlmStageConfig = LlmStageConfig(),
+    val newsroomOverlay: LlmStageConfig = LlmStageConfig()
+) {
+    fun forStage(stage: LlmStage): LlmStageConfig = when (stage) {
+        LlmStage.DRAFTING -> drafting
+        LlmStage.SCRIPT_EDIT -> scriptEdit
+        LlmStage.NEWSROOM_OVERLAY -> newsroomOverlay
+    }
+}
+
 enum class ExportState {
     IDLE,
     EXPORTING,

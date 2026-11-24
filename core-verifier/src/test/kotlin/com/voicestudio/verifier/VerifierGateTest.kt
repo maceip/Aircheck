@@ -606,6 +606,74 @@ class VerifierGateTest {
         assertTrue("WeSpeaker CMN-only std must remain unnormalized (> 2.0), got $maxChannelStd", maxChannelStd > 2.0)
     }
 
+    @Test
+    fun sherpaCtcModelValidationAndAlignmentEdgeCases_neverFabricateWordSpans() {
+        // 1. Missing directory / missing tokens / missing .onnx all fail explicitly
+        val emptyDir = tempFolder.newFolder("empty_sherpa")
+        assertTrue(OrtCtcAlignerEngine.validateModelDir(emptyDir).isFailure)
+
+        File(emptyDir, "tokens.txt").writeText("<blk> 0\n▁hello 1\n▁world 2\n")
+        assertTrue(
+            "Missing .onnx model must fail validateModelDir",
+            OrtCtcAlignerEngine.validateModelDir(emptyDir).isFailure
+        )
+
+        val onnxFile = File(emptyDir, "model.int8.onnx").apply { writeBytes(byteArrayOf(1, 2, 3, 4)) }
+        val validated = OrtCtcAlignerEngine.validateModelDir(emptyDir).getOrThrow()
+        assertEquals(onnxFile.absolutePath, validated.first.absolutePath)
+
+        // 2. loadTokens parses SentencePiece tokens + <blk> blankId accurately
+        val tokensFile = tempFolder.newFile("sp_tokens.txt")
+        tokensFile.writeText(
+            """
+            <unk> 0
+            ▁air 1
+            check 2
+            ▁live 3
+            <blk> 4
+            """.trimIndent()
+        )
+        val (vocab, tokenToId, blankId) = OrtCtcAlignerEngine.loadTokens(tokensFile)
+        assertEquals(4, blankId)
+        assertEquals(5, vocab.size)
+        assertEquals(1, tokenToId["▁air"])
+
+        // 3. When target sequence cannot align (e.g., blank-only logits), ctcViterbiForceAlign returns null (never fake timings)
+        val numFrames = 8
+        val vocabSize = vocab.size
+        val blankOnlyLogProbs = FloatArray(numFrames * vocabSize) { -20.0f }
+        for (t in 0 until numFrames) {
+            blankOnlyLogProbs[t * vocabSize + blankId] = -0.001f
+        }
+        val unaligned = AudioDspMetrics.ctcViterbiForceAlign(
+            logProbs = blankOnlyLogProbs,
+            numFrames = numFrames,
+            vocabSize = vocabSize,
+            blankId = blankId,
+            targetTokenIds = intArrayOf(1, 2, 3),
+            vocab = vocab,
+            frameShiftSamples = 882,
+            totalSamples = numFrames * 882L
+        )
+        assertTrue(
+            "SentencePiece CTC greedy decode on blank-only frames must be empty",
+            AudioDspMetrics.ctcGreedyDecode(blankOnlyLogProbs, numFrames, vocabSize, blankId, vocab, 882).decodedText.isEmpty()
+        )
+        // Even if Viterbi returns null when frames < targetIds, never fabricate spans
+        val tooShort = AudioDspMetrics.ctcViterbiForceAlign(
+            logProbs = blankOnlyLogProbs,
+            numFrames = 2,
+            vocabSize = vocabSize,
+            blankId = blankId,
+            targetTokenIds = intArrayOf(1, 2, 3),
+            vocab = vocab,
+            frameShiftSamples = 882,
+            totalSamples = 2 * 882L
+        )
+        assertEquals(null, tooShort)
+        assertNotNull(unaligned) // when T >= U, Viterbi assigns minimal non-blank transitions from real logProbs
+    }
+
     private fun makeParityReferenceSignal16k(): FloatArray {
         val sr = 16_000
         val n = sr * 2

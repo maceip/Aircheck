@@ -10,8 +10,10 @@ import coil3.request.allowHardware
 import coil3.request.bitmapConfig
 import com.example.agent.AircheckAgentOrchestrator
 import com.example.agent.OnDevicePromptEngine
+import com.example.ai.LlmStageRouter
 import com.example.appfunctions.AppFunctionAvailabilitySync
 import com.example.data.gateway.DirectMacRigGateway
+import com.example.data.gateway.MacRigHealthResult
 import com.example.data.gateway.MacRigRenderGateway
 import com.example.data.local.AircheckDatabase
 import com.example.data.local.AircheckLocalRepository
@@ -41,9 +43,13 @@ import com.voicestudio.sync.VoiceStudioSyncCoordinator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class AircheckContainer(context: Context) {
@@ -90,6 +96,28 @@ class AircheckContainer(context: Context) {
             okHttpClient = okHttpClient
         )
     }
+    private val draftClientsByUrl = ConcurrentHashMap<String, DraftApiClient>()
+
+    fun draftApiClientFor(rigUrl: String): DraftApiClient {
+        val normalized = rigUrl.trim().trimEnd('/').ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+        if (normalized == DEFAULT_MAC_RIG_LAN_URL.trimEnd('/')) {
+            return draftApiClient
+        }
+        return draftClientsByUrl.computeIfAbsent(normalized) { url ->
+            DraftApiClient(
+                configuredRigUrl = url,
+                usbLoopbackUrl = DraftApiClient.DEFAULT_RIG_USB_URL,
+                okHttpClient = okHttpClient
+            )
+        }
+    }
+
+    private val _startupRigHealth = MutableStateFlow<MacRigHealthResult?>(null)
+    val startupRigHealth: StateFlow<MacRigHealthResult?> = _startupRigHealth.asStateFlow()
+
+    internal fun updateStartupRigHealth(health: MacRigHealthResult?) {
+        _startupRigHealth.value = health
+    }
     val vadAudioEngine: VadAudioCaptureEngine by lazy {
         VadAudioCaptureEngine(
             chunkCacheDir = File(appContext.cacheDir, "aircheck_vad"),
@@ -112,14 +140,46 @@ class AircheckContainer(context: Context) {
     val onDevicePromptEngine: OnDevicePromptEngine by lazy {
         OnDevicePromptEngine()
     }
+    val llmStageRouter: LlmStageRouter by lazy {
+        LlmStageRouter(
+            profileStore = profileStore,
+            draftApiClientProvider = ::draftApiClientFor,
+            onDeviceEngine = onDevicePromptEngine,
+            okHttpClient = okHttpClient
+        )
+    }
     val agentOrchestrator: AircheckAgentOrchestrator by lazy {
         AircheckAgentOrchestrator(appContext)
     }
     val voiceModelCareManager: VoiceModelCareManager by lazy {
         VoiceModelCareManager(appContext, otaBundleSyncManager)
     }
+    val coreStageRunner: com.example.engine.CoreStageRunner by lazy {
+        com.example.engine.CoreStageRunner(localRepo, profileStore, corePipelineCoordinator, macRigGateway)
+    }
+
     val corePipelineCoordinator: CoreStoryPipelineCoordinator by lazy {
-        CoreStoryPipelineCoordinator(localRepo, casStore, macRigGateway)
+        CoreStoryPipelineCoordinator(
+            localRepo = localRepo,
+            casStore = casStore,
+            macRigGateway = macRigGateway,
+            profileStore = profileStore,
+            otaBundleSyncManager = otaBundleSyncManager,
+            voiceStudioCoordinator = voiceStudioCoordinator,
+            localCtcAligner = { wavFile, expectedText ->
+                val sherpaDir = otaBundleSyncManager.resolveVerifiedBundleForSynthesis()
+                    .getOrNull()
+                    ?.sherpaCtcModelDir
+                    ?: otaBundleSyncManager.bundleState.value.installedDirPath
+                        ?.let { File(it, OtaBundleSyncManager.SHERPA_CTC_EXTRACTED_DIR) }
+                        ?.takeIf { it.isDirectory && File(it, "tokens.txt").isFile }
+                if (sherpaDir != null) {
+                    CoreStoryPipelineCoordinator.alignWavWithOrtCtc(wavFile, expectedText, sherpaDir)
+                } else {
+                    emptyList()
+                }
+            }
+        )
     }
 
     fun bindVoiceStudioRuntime() {
@@ -152,25 +212,25 @@ class AircheckApplication : Application(), SingletonImageLoader.Factory {
         container.bindVoiceStudioRuntime()
         container.appScope.launch {
             container.profilingCoordinator.registerDefaultTriggers()
-            container.profileStore.preload()
-            val settings = runCatching { container.profileStore.current() }.getOrNull()
-            val phoneOnlyVoice = settings?.phoneOnlyVoiceMode ?: true
-            // Scan local on-phone storage ONLY (zero network sync!).
-            container.otaBundleSyncManager.refreshLocalState("")
-            val rigOnline = if (phoneOnlyVoice) {
-                false
-            } else {
-                val rigUrl = settings?.tailscaleRigUrl ?: DEFAULT_MAC_RIG_LAN_URL
-                runCatching { container.macRigGateway.resolveAndCheckHealth(rigUrl) }.isSuccess
-            }
-            val bundleReady = container.otaBundleSyncManager.bundleState.value.status == OtaBundleStatus.READY
-            AppFunctionAvailabilitySync.syncDynamicFunctionStates(
+            probeStartupRigHealthAndSync(
                 context = this@AircheckApplication,
-                isMacRigOnline = rigOnline,
-                isLocalVoiceBundleReady = bundleReady
+                profileStore = container.profileStore,
+                otaBundleSyncManager = container.otaBundleSyncManager,
+                macRigGateway = container.macRigGateway,
+                onHealthResolved = container::updateStartupRigHealth
             )
         }
     }
+
+    internal suspend fun probeStartupRigHealthAndSyncForTest(
+        macRigGatewayOverride: MacRigRenderGateway? = null
+    ): MacRigHealthResult? = probeStartupRigHealthAndSync(
+        context = this,
+        profileStore = container.profileStore,
+        otaBundleSyncManager = container.otaBundleSyncManager,
+        macRigGateway = macRigGatewayOverride ?: container.macRigGateway,
+        onHealthResolved = container::updateStartupRigHealth
+    )
 
     override fun newImageLoader(context: Context): ImageLoader {
         return ImageLoader.Builder(context)
@@ -180,5 +240,32 @@ class AircheckApplication : Application(), SingletonImageLoader.Factory {
             .allowHardware(true)
             .bitmapConfig(Bitmap.Config.HARDWARE)
             .build()
+    }
+
+    companion object {
+        internal suspend fun probeStartupRigHealthAndSync(
+            context: Context,
+            profileStore: AircheckProfileStore,
+            otaBundleSyncManager: OtaBundleSyncManager,
+            macRigGateway: MacRigRenderGateway,
+            onHealthResolved: (MacRigHealthResult?) -> Unit
+        ): MacRigHealthResult? {
+            profileStore.preload()
+            val settings = runCatching { profileStore.current() }.getOrNull()
+            // Scan local on-phone storage ONLY (zero network sync!).
+            otaBundleSyncManager.refreshLocalState("")
+            // Always probe Mac rig /health on startup (even when phoneOnlyVoiceMode == true)
+            // without mutating phoneOnlyVoiceMode or any user provider setting.
+            val rigUrl = settings?.tailscaleRigUrl?.trim()?.ifBlank { null } ?: DEFAULT_MAC_RIG_LAN_URL
+            val health = runCatching { macRigGateway.resolveAndCheckHealth(rigUrl) }.getOrNull()
+            onHealthResolved(health)
+            val bundleReady = otaBundleSyncManager.bundleState.value.status == OtaBundleStatus.READY
+            AppFunctionAvailabilitySync.syncDynamicFunctionStates(
+                context = context,
+                isMacRigOnline = health != null,
+                isLocalVoiceBundleReady = bundleReady
+            )
+            return health
+        }
     }
 }

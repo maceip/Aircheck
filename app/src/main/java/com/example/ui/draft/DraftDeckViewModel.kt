@@ -8,12 +8,18 @@ import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.AircheckApplication
+import com.example.ai.LlmRoutingException
+import com.example.ai.LlmStageRouter
+import com.example.data.LlmProviderChoice
 import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
+import com.example.draft.ArcBeat
+import com.example.draft.BrushNudge
 import com.example.draft.CandidateDraft
 import com.example.draft.DraftApiClient
 import com.example.draft.DraftDocument
 import com.example.draft.DraftStateReducer
 import com.example.draft.EditSource
+import com.example.draft.LlmMetaDto
 import com.example.draft.LockedPhrase
 import com.example.draft.Stage
 import com.example.draft.VadAudioCaptureEngine
@@ -65,6 +71,7 @@ data class DraftDeckUiState(
     val activeBrushRange: IntRange? = null,
     val brushAlternatives: List<String> = emptyList(),
     val brushActiveAltIndex: Int = 0,
+    val activeBrushNudge: BrushNudge? = null,
     val flashRange: IntRange? = null,
     val densityDeltaPercent: Int = 0,
     val graphMatches: List<GraphMatch> = emptyList(),
@@ -74,7 +81,8 @@ data class DraftDeckUiState(
     val lastSeedRigOnline: Boolean = false,
     val rigBaseUrl: String = DraftApiClient.DEFAULT_RIG_LAN_URL,
     val sessions: List<DraftSessionSummary> = emptyList(),
-    val isSessionSwitcherOpen: Boolean = false
+    val isSessionSwitcherOpen: Boolean = false,
+    val lastLlmMeta: LlmMetaDto? = null
 ) {
     val isAnyRecording: Boolean
         get() = isRecordingSeed || isRecordingSteer || isRecordingSplice
@@ -100,22 +108,30 @@ data class DraftDeckUiState(
         }
 }
 
-class DraftDeckViewModel(application: Application) : AndroidViewModel(application) {
+class DraftDeckViewModel internal constructor(
+    application: Application,
+    private val llmRouterOverride: LlmStageRouter?,
+    private val draftApiClientFactory: ((String) -> DraftApiClient)? = null,
+    private val profileStoreOverride: com.example.data.local.AircheckProfileStore? = null
+) : AndroidViewModel(application) {
+
+    constructor(application: Application) : this(application, llmRouterOverride = null)
 
     private val container = (application as AircheckApplication).container
-    private val profileStore = container.profileStore
+    private val profileStore = profileStoreOverride ?: container.profileStore
     private val vadAudioEngine: VadAudioCaptureEngine = container.vadAudioEngine
     private val localGraphDatabase = container.localGraphDatabase
     private val graphRadarEngine = container.graphRadarEngine
     private val xArchiveImporter = container.xArchiveImporter
     private val graphAppSearchIndexer = container.graphAppSearchIndexer
-    private val okHttpClient = container.okHttpClient
+    private val llmStageRouter: LlmStageRouter = llmRouterOverride ?: container.llmStageRouter
 
     @Volatile
     private var configuredRigUrl: String = DEFAULT_MAC_RIG_LAN_URL
 
     @Volatile
-    private var draftApiClient: DraftApiClient = container.draftApiClient
+    private var draftApiClient: DraftApiClient =
+        draftApiClientFactory?.invoke(DEFAULT_MAC_RIG_LAN_URL) ?: container.draftApiClient
 
     private val vadCacheDir: File by lazy {
         File(application.cacheDir, "aircheck_vad").apply { mkdirs() }
@@ -139,6 +155,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
     private var seamHealJob: Job? = null
     private var flashJob: Job? = null
     private var graphRefreshJob: Job? = null
+    private var probeJob: Job? = null
 
     // Concurrent multi-draft async session store: switching or pulling down for a new subject
     // NEVER cancels in-flight LLM passes on prior cards.
@@ -157,15 +174,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 val url = settings.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
                 if (url != configuredRigUrl) {
                     configuredRigUrl = url
-                    draftApiClient = if (url == DEFAULT_MAC_RIG_LAN_URL) {
-                        container.draftApiClient
-                    } else {
-                        DraftApiClient(
-                            configuredRigUrl = url,
-                            usbLoopbackUrl = DraftApiClient.DEFAULT_RIG_USB_URL,
-                            okHttpClient = okHttpClient
-                        )
-                    }
+                    draftApiClient = draftApiClientFactory?.invoke(url) ?: container.draftApiClientFor(url)
                     _uiState.update { it.copy(rigBaseUrl = url) }
                     probeRigHealth()
                 }
@@ -210,20 +219,31 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
         seamHealJob?.cancel()
         flashJob?.cancel()
         graphRefreshJob?.cancel()
+        probeJob?.cancel()
     }
 
     fun probeRigHealth() {
-        viewModelScope.launch {
-            runCatching { draftApiClient.resolveActiveBaseUrl(forceRefresh = true) }
-                .onSuccess { resolved ->
-                    _uiState.update {
-                        it.copy(lastSeedRigOnline = true, rigBaseUrl = resolved)
-                    }
-                }
-                .onFailure {
+        probeJob?.cancel()
+        val targetClient = draftApiClient
+        var launchedJob: Job? = null
+        launchedJob = viewModelScope.launch {
+            val resolved = try {
+                targetClient.resolveActiveBaseUrl(forceRefresh = true)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                if (probeJob === launchedJob && draftApiClient === targetClient) {
                     _uiState.update { it.copy(lastSeedRigOnline = false) }
                 }
+                return@launch
+            }
+            if (probeJob === launchedJob && draftApiClient === targetClient) {
+                _uiState.update {
+                    it.copy(lastSeedRigOnline = true, rigBaseUrl = resolved)
+                }
+            }
         }
+        probeJob = launchedJob
     }
 
     fun currentDraftPlainText(): String {
@@ -350,7 +370,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
-                        lastSeedRigOnline = if (e is IOException && e !is DraftApiClient.HttpStatusException) false else it.lastSeedRigOnline,
+                        lastSeedRigOnline = if (isRigTransportFailure(e)) false else it.lastSeedRigOnline,
                         errorMessage = e.localizedMessage ?: "Live chunk transcription failed."
                     )
                 }
@@ -619,19 +639,20 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(isBusy = true, busyLabel = "Rewriting seed...", errorMessage = null)
                 }
                 try {
-                    val response = draftApiClient.rewrite(
+                    val response = llmStageRouter.rewrite(
                         text = cleanSeed,
                         mode = "seed_clean",
                         steeringConstraints = snapshot.document.steeringConstraints
                     )
                     val cleanOut = DraftStateReducer.sanitizeAscii(response.text).trim()
                     if (cleanOut.isBlank()) {
-                        throw IOException("Mac rig returned an empty rewrite.")
+                        throw IllegalStateException("LLM returned an empty rewrite.")
                     }
                     updateSession(targetSessionId) { cur ->
                         cur.copy(
                             document = cur.document.copy(seedTranscript = cleanOut),
-                            lastSeedRigOnline = true,
+                            lastSeedRigOnline = resolveRigOnlineAfterSuccess(cur.lastSeedRigOnline, response.llmMeta),
+                            lastLlmMeta = response.llmMeta ?: cur.lastLlmMeta,
                             isBusy = false,
                             busyLabel = null,
                             statusNotice = "Seed sharpened."
@@ -656,7 +677,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(isBusy = true, busyLabel = "Sharpening draft...", errorMessage = null)
                 }
                 try {
-                    val response = draftApiClient.rewrite(
+                    val response = llmStageRouter.rewrite(
                         text = marked,
                         mode = "cut_polish",
                         steeringConstraints = snapshot.document.steeringConstraints
@@ -673,7 +694,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                             source = EditSource.BRUSH_SWAP
                         )
                     } else {
-                        throw IOException("AI rewrite altered locked words; kept your draft unchanged.")
+                        throw IllegalStateException("AI rewrite altered locked words; kept your draft unchanged.")
                     }
                     updateSession(targetSessionId) { cur ->
                         val idx = cur.document.activeCandidateIndex
@@ -682,7 +703,8 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                         cur.copy(
                             document = cur.document.copy(candidates = newCandidates),
-                            lastSeedRigOnline = true,
+                            lastSeedRigOnline = resolveRigOnlineAfterSuccess(cur.lastSeedRigOnline, response.llmMeta),
+                            lastLlmMeta = response.llmMeta ?: cur.lastLlmMeta,
                             isBusy = false,
                             busyLabel = null,
                             rawKeyboardMode = false,
@@ -739,7 +761,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun handleSessionApiFailure(sessionId: String, prefix: String, error: Exception) {
-        val offline = error is IOException && error !is DraftApiClient.HttpStatusException
+        val offline = isRigTransportFailure(error)
         val detail = error.message?.trim().takeUnless { it.isNullOrBlank() } ?: "Unknown error"
         updateSession(sessionId) { state ->
             state.copy(
@@ -813,7 +835,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             try {
-                val response = draftApiClient.extractAngles(
+                val response = llmStageRouter.extractAngles(
                     seedTranscript = cleanSeed,
                     steeringConstraints = snapshotDoc.steeringConstraints
                 )
@@ -826,12 +848,14 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                             extractedAngles = extracted,
                             blindspotAngles = blindspots
                         ),
-                        lastSeedRigOnline = true,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
                         isExtractingAngles = false,
                         isBusy = if (!silentOnError) false else state.isBusy,
                         busyLabel = if (!silentOnError) null else state.busyLabel
                     )
                 }
+                generateArcInternal(targetSessionId, rerollIndex = null)
             } catch (e: CancellationException) {
                 updateSession(targetSessionId) { state ->
                     state.copy(isExtractingAngles = false)
@@ -844,7 +868,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     updateSession(targetSessionId) {
                         it.copy(
                             isExtractingAngles = false,
-                            lastSeedRigOnline = if (e is IOException && e !is DraftApiClient.HttpStatusException) false else it.lastSeedRigOnline
+                            lastSeedRigOnline = if (isRigTransportFailure(e)) false else it.lastSeedRigOnline
                         )
                     }
                 }
@@ -875,7 +899,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             try {
-                val response = draftApiClient.synthesize(
+                val response = llmStageRouter.synthesize(
                     seedTranscript = cleanSeed,
                     selectedAngles = selectedAngles,
                     steeringConstraints = doc.steeringConstraints,
@@ -890,7 +914,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                 }
                 if (candidates.isEmpty()) {
-                    throw IOException("Mac rig returned zero draft candidates.")
+                    throw IllegalStateException("LLM returned zero draft candidates.")
                 }
                 if (_uiState.value.document.id == targetSessionId) {
                     clearBrushBaseline()
@@ -910,7 +934,8 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                         brushActiveAltIndex = 0,
                         flashRange = null,
                         densityDeltaPercent = 0,
-                        lastSeedRigOnline = true,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
                         isBusy = false,
                         busyLabel = null
                     )
@@ -924,6 +949,230 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 handleSessionApiFailure(targetSessionId, "Synthesis failed", e)
             }
         }
+    }
+
+    // =========================================================================
+    // CLIP STUDIO v4: 60s ARC + VIDEO SCRIPT
+    // =========================================================================
+
+    /** Regenerates the proposed 4-beat arc from the current seed, steering, and selected angles. */
+    fun generateArc() {
+        val doc = _uiState.value.document
+        if (doc.seedTranscript.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Record or type a voice note first.") }
+            return
+        }
+        generateArcInternal(doc.id, rerollIndex = null)
+    }
+
+    /** Rewrites only beat [index] of the current arc on the rig; every other beat is kept verbatim. */
+    fun rerollArcBeat(index: Int) {
+        val doc = _uiState.value.document
+        if (index !in doc.arcBeats.indices) return
+        generateArcInternal(doc.id, rerollIndex = index)
+    }
+
+    private fun generateArcInternal(targetSessionId: String, rerollIndex: Int?) {
+        val snapshot = if (targetSessionId == _uiState.value.document.id) {
+            _uiState.value
+        } else {
+            synchronized(sessionsLock) { storedSessions[targetSessionId] } ?: return
+        }
+        val doc = snapshot.document
+        val cleanSeed = DraftStateReducer.sanitizeAscii(doc.seedTranscript).trim()
+        if (cleanSeed.isEmpty()) return
+        val existing = if (rerollIndex != null) doc.arcBeats.map { it.text } else null
+        launchSessionJob(targetSessionId, if (rerollIndex == null) "arc" else "arc_$rerollIndex") {
+            updateSession(targetSessionId) {
+                it.copy(
+                    isBusy = true,
+                    busyLabel = if (rerollIndex == null) "Proposing 60s arc..." else "Re-rolling beat...",
+                    errorMessage = null
+                )
+            }
+            try {
+                val response = llmStageRouter.arc(
+                    seedTranscript = cleanSeed,
+                    steeringConstraints = doc.steeringConstraints,
+                    selectedAngles = collectSelectedAngleSpecs(doc),
+                    targetSec = ARC_TARGET_SEC,
+                    rerollIndex = rerollIndex,
+                    existingBeats = existing
+                )
+                val beats = response.beats.map {
+                    ArcBeat(label = it.label, startSec = it.startSec, endSec = it.endSec, text = it.text)
+                }
+                if (beats.isEmpty()) throw IllegalStateException("LLM returned an empty arc.")
+                updateSession(targetSessionId) { state ->
+                    state.copy(
+                        document = state.document.copy(
+                            arcBeats = beats,
+                            arcTargetSec = response.targetSec,
+                            arcWordBudget = response.wordBudget,
+                            lastRerolledBeat = rerollIndex ?: -1
+                        ),
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
+                        isBusy = false,
+                        busyLabel = null
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleSessionApiFailure(targetSessionId, "Arc pass failed", e)
+            }
+        }
+    }
+
+    /** `write 60s script ->`: three spoken-video versions (DIRECT / PUNCHY / STORY) built on the arc. */
+    fun writeVideoScript() {
+        val snapshot = _uiState.value
+        val targetSessionId = snapshot.document.id
+        val doc = snapshot.document
+        val cleanSeed = DraftStateReducer.sanitizeAscii(doc.seedTranscript).trim()
+        if (cleanSeed.isEmpty()) {
+            updateSession(targetSessionId) {
+                it.copy(errorMessage = "Record or type a voice note before writing the script.")
+            }
+            return
+        }
+        activePassJob = launchSessionJob(targetSessionId, "pass") {
+            updateSession(targetSessionId) {
+                it.copy(isBusy = true, busyLabel = "Writing 60s script...", errorMessage = null, rawKeyboardMode = false)
+            }
+            try {
+                val response = llmStageRouter.synthesizeScript(
+                    seedTranscript = cleanSeed,
+                    selectedAngles = collectSelectedAngleSpecs(doc),
+                    steeringConstraints = doc.steeringConstraints,
+                    arcBeats = doc.arcBeats.map { it.text },
+                    targetSec = doc.arcTargetSec.takeIf { it > 0 } ?: ARC_TARGET_SEC
+                )
+                val candidates = response.candidates.take(3).map { dto ->
+                    DraftStateReducer.createCandidateDraft(
+                        postureLabel = dto.postureLabel,
+                        text = dto.text,
+                        source = EditSource.MODEL_INIT
+                    )
+                }
+                if (candidates.isEmpty()) throw IllegalStateException("LLM returned zero script versions.")
+                if (_uiState.value.document.id == targetSessionId) {
+                    clearBrushBaseline()
+                    editGeneration.incrementAndGet()
+                }
+                updateSession(targetSessionId) { state ->
+                    state.copy(
+                        document = state.document.copy(
+                            stage = Stage.CUT,
+                            candidates = candidates,
+                            activeCandidateIndex = 0,
+                            arcTargetSec = response.targetSec,
+                            arcWordBudget = response.wordBudget,
+                            isVideoScript = true
+                        ),
+                        focusedClauseId = null,
+                        focusedGapIndex = null,
+                        activeBrushRange = null,
+                        brushAlternatives = emptyList(),
+                        brushActiveAltIndex = 0,
+                        flashRange = null,
+                        densityDeltaPercent = 0,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
+                        isBusy = false,
+                        busyLabel = null
+                    )
+                }
+                if (_uiState.value.document.id == targetSessionId) refreshGraphMatches()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleSessionApiFailure(targetSessionId, "Script synthesis failed", e)
+            }
+        }
+    }
+
+    /**
+     * Re-asks the rig for replacements of the currently brushed phrase with a tone [nudge]
+     * (`simpler` / `sharper` / `less formal`) or 3 fresh options ([BrushNudge.MORE]).
+     */
+    fun performBrushNudge(nudge: BrushNudge) {
+        val state = _uiState.value
+        val baseline = brushBaselineDraft ?: return
+        val baseRange = brushBaselineRange ?: return
+        val markedText = DraftStateReducer.renderMarkedTextWithLocks(
+            clauses = baseline.clauses,
+            replaceRange = baseRange
+        )
+        if (!markedText.contains("<replace>")) return
+        val exclude = if (nudge == BrushNudge.MORE) state.brushAlternatives.filter { it.isNotBlank() } else emptyList()
+        val requestGen = editGeneration.get()
+        val targetSessionId = state.document.id
+        activePassJob = launchSessionJob(targetSessionId, "pass") {
+            updateSession(targetSessionId) {
+                it.copy(isBusy = true, busyLabel = "Nudging: ${nudge.label}...", errorMessage = null)
+            }
+            try {
+                val response = llmStageRouter.brushSwap(
+                    markedText = markedText,
+                    steeringConstraints = state.document.steeringConstraints,
+                    nudge = nudge,
+                    excludeAlternatives = exclude
+                )
+                if (response.alternatives.isEmpty()) throw IllegalStateException("LLM returned no nudged alternatives.")
+                if (_uiState.value.document.id == targetSessionId && editGeneration.get() != requestGen) {
+                    updateSession(targetSessionId) { it.copy(isBusy = false, busyLabel = null) }
+                    return@launchSessionJob
+                }
+                updateSession(targetSessionId) {
+                    it.copy(
+                        brushAlternatives = response.alternatives,
+                        activeBrushNudge = nudge,
+                        isBusy = false,
+                        busyLabel = null,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(it.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: it.lastLlmMeta
+                    )
+                }
+                selectBrushAlternative(0)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleSessionApiFailure(targetSessionId, "Nudge failed", e)
+            }
+        }
+    }
+
+    /** Verbatim-locks (or unlocks) every word inside [charRange] of the active script ("pin phrase"). */
+    fun togglePhraseLock(charRange: IntRange) {
+        val candidate = _uiState.value.document.activeCandidate ?: return
+        if (charRange.isEmpty()) return
+        val hits = DraftStateReducer.flattenClauses(candidate.clauses).second
+            .filter { it.textStart <= charRange.last && it.textEndExclusive - 1 >= charRange.first }
+        if (hits.isEmpty()) return
+        val lockAll = hits.any { !it.token.verbatimLocked }
+        var updated = candidate
+        if (lockAll) {
+            hits.filter { !it.token.verbatimLocked }.forEach { ft ->
+                updated = DraftStateReducer.toggleWordLock(updated, ft.textStart)
+            }
+        } else {
+            // Unlocking expands across the whole contiguous locked run.
+            updated = DraftStateReducer.toggleWordLock(updated, hits.first().textStart)
+        }
+        if (updated == candidate) return
+        // A pinned phrase must never be swapped by a pending brush baseline.
+        clearBrushBaseline()
+        replaceActiveCandidate(updated, dismissBrush = true)
+    }
+
+    /** True when every word overlapping [charRange] in the active script is verbatim-locked. */
+    fun isRangeLocked(charRange: IntRange): Boolean {
+        val candidate = _uiState.value.document.activeCandidate ?: return false
+        val hits = DraftStateReducer.flattenClauses(candidate.clauses).second
+            .filter { it.textStart <= charRange.last && it.textEndExclusive - 1 >= charRange.first }
+        return hits.isNotEmpty() && hits.all { it.token.verbatimLocked }
     }
 
     // =========================================================================
@@ -1010,7 +1259,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             try {
-                val response = draftApiClient.synthesize(
+                val response = llmStageRouter.synthesize(
                     seedTranscript = cleanSeed,
                     selectedAngles = selectedAngles,
                     steeringConstraints = doc.steeringConstraints,
@@ -1018,7 +1267,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     existingDrafts = existingTexts
                 )
                 val replacementDto = response.candidates.firstOrNull()
-                    ?: throw IOException("Server returned no replacement draft for slot $slotIdx.")
+                    ?: throw IllegalStateException("LLM returned no replacement draft for slot $slotIdx.")
                 val replacement = DraftStateReducer.createCandidateDraft(
                     postureLabel = replacementDto.postureLabel,
                     text = replacementDto.text,
@@ -1034,7 +1283,8 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                     state.copy(
                         document = state.document.copy(candidates = updatedList),
-                        lastSeedRigOnline = true,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
                         isBusy = false,
                         busyLabel = null,
                         statusNotice = "Regenerated v${slotIdx + 1} (${replacement.postureLabel})."
@@ -1072,7 +1322,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             try {
-                val response = draftApiClient.synthesize(
+                val response = llmStageRouter.synthesize(
                     seedTranscript = cleanSeed,
                     selectedAngles = selectedAngles,
                     steeringConstraints = doc.steeringConstraints,
@@ -1087,7 +1337,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                 }
                 if (candidates.isEmpty()) {
-                    throw IOException("Mac rig returned zero regenerated candidates.")
+                    throw IllegalStateException("LLM returned zero regenerated candidates.")
                 }
                 if (_uiState.value.document.id == targetSessionId) {
                     clearBrushBaseline()
@@ -1099,7 +1349,8 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                             candidates = candidates,
                             activeCandidateIndex = 0
                         ),
-                        lastSeedRigOnline = true,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
                         isBusy = false,
                         busyLabel = null
                     )
@@ -1195,13 +1446,13 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 it.copy(isBusy = true, busyLabel = "Swapping phrase...", errorMessage = null)
             }
             try {
-                val response = draftApiClient.brushSwap(
+                val response = llmStageRouter.brushSwap(
                     markedText = markedText,
                     steeringConstraints = state.document.steeringConstraints
                 )
                 val alternatives = response.alternatives
                 if (alternatives.isEmpty()) {
-                    throw IOException("Server returned no brush-swap alternatives.")
+                    throw IllegalStateException("LLM returned no brush-swap alternatives.")
                 }
                 if (_uiState.value.document.id == targetSessionId && editGeneration.get() != requestGen) {
                     updateSession(targetSessionId) { it.copy(isBusy = false, busyLabel = null) }
@@ -1239,7 +1490,8 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                         brushAlternatives = alternatives,
                         brushActiveAltIndex = 0,
                         flashRange = appliedRange,
-                        lastSeedRigOnline = true,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(cur.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: cur.lastLlmMeta,
                         isBusy = false,
                         busyLabel = null
                     )
@@ -1510,7 +1762,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             try {
-                val response = draftApiClient.adjustDensity(
+                val response = llmStageRouter.adjustDensity(
                     markedText = markedText,
                     deltaPercent = clamped,
                     steeringConstraints = state.document.steeringConstraints
@@ -1529,7 +1781,8 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     updateSession(targetSessionId) {
                         it.copy(
                             densityDeltaPercent = 0,
-                            lastSeedRigOnline = true,
+                            lastSeedRigOnline = resolveRigOnlineAfterSuccess(it.lastSeedRigOnline, response.llmMeta),
+                            lastLlmMeta = response.llmMeta ?: it.lastLlmMeta,
                             isBusy = false,
                             busyLabel = null,
                             errorMessage = "Density change rejected: locked words (${parity.missingPhrases.joinToString()}) were altered."
@@ -1551,7 +1804,8 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     cur.copy(
                         document = cur.document.copy(candidates = newCandidates),
                         densityDeltaPercent = 0,
-                        lastSeedRigOnline = true,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(cur.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: cur.lastLlmMeta,
                         isBusy = false,
                         busyLabel = null
                     )
@@ -1990,7 +2244,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
         seamHealJob = viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true, busyLabel = busyLabel) }
             try {
-                val response = draftApiClient.seamHeal(
+                val response = llmStageRouter.seamHeal(
                     markedText = markedText,
                     operation = operation,
                     steeringConstraints = steering
@@ -2015,7 +2269,8 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 _uiState.update {
                     it.copy(
-                        lastSeedRigOnline = true,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(it.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: it.lastLlmMeta,
                         isBusy = false,
                         busyLabel = null
                     )
@@ -2027,7 +2282,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 // Local edit already succeeded; surface honest seam-heal error without reverting local edit.
                 _uiState.update {
                     it.copy(
-                        lastSeedRigOnline = if (e is IOException && e !is DraftApiClient.HttpStatusException) false else it.lastSeedRigOnline,
+                        lastSeedRigOnline = if (isRigTransportFailure(e)) false else it.lastSeedRigOnline,
                         isBusy = false,
                         busyLabel = null,
                         errorMessage = "Seam heal unavailable (kept local edit): ${e.localizedMessage ?: "network error"}"
@@ -2127,8 +2382,18 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    private fun resolveRigOnlineAfterSuccess(currentOnline: Boolean, meta: LlmMetaDto?): Boolean =
+        if (meta?.provider == LlmProviderChoice.LOCAL_AICORE_NANO.id) currentOnline else true
+
+    private fun isRigTransportFailure(error: Throwable): Boolean = when (error) {
+        is LlmRoutingException -> error.isTransportFailure
+        is DraftApiClient.HttpStatusException -> false
+        is IOException -> true
+        else -> false
+    }
+
     private fun handleApiFailure(prefix: String, error: Throwable) {
-        val isTransportFailure = error is IOException && error !is DraftApiClient.HttpStatusException
+        val isTransportFailure = isRigTransportFailure(error)
         _uiState.update { state ->
             state.copy(
                 lastSeedRigOnline = if (isTransportFailure) false else state.lastSeedRigOnline,
@@ -2160,5 +2425,6 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
 
     companion object {
         private const val FLASH_DURATION_MS: Long = 180L
+        const val ARC_TARGET_SEC: Int = 60
     }
 }

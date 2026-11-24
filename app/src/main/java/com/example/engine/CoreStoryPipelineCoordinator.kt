@@ -4,6 +4,11 @@ import com.example.data.AlignedWord
 import com.example.data.BrollSegmentMode
 import com.example.data.ClipRecord
 import com.example.data.CorePipelineSession
+import com.example.data.NewsroomLook
+import com.example.data.RigQualityMetrics
+import com.example.data.gateway.MacRigJobSnapshot
+import com.example.data.gateway.RigJobNotFoundException
+import com.example.data.gateway.RigTaskHandle
 import com.example.data.CorePipelineStage
 import com.example.data.CoreStoryClause
 import com.example.data.NewsroomStageConfig
@@ -14,6 +19,7 @@ import com.example.data.ScriptProject
 import com.example.data.VoiceSource
 import com.example.data.gateway.MacRigRenderGateway
 import com.example.data.local.AircheckLocalRepository
+import com.example.data.local.AircheckProfileStore
 import com.example.data.local.CasMediaStore
 import com.voicestudio.edl.CandidateTake
 import com.voicestudio.edl.ClauseNode
@@ -21,18 +27,24 @@ import com.voicestudio.edl.GateMetrics
 import com.voicestudio.edl.SYNTHESIS_SAMPLE_RATE_HZ
 import com.voicestudio.edl.VoiceProjectManifest
 import com.voicestudio.edl.WordToken
+import com.voicestudio.sync.DirectSynthesisClauseInput
+import com.voicestudio.sync.OtaBundleSyncManager
+import com.voicestudio.sync.VoiceStudioSyncCoordinator
 import com.voicestudio.ui.Media3BeatExporter
 import com.voicestudio.ui.VideoAnchorBinding
+import com.voicestudio.verifier.OrtCtcAlignerEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 data class WavInspection(
     val durationMs: Long,
@@ -52,7 +64,11 @@ data class WavInspection(
 class CoreStoryPipelineCoordinator(
     private val localRepo: AircheckLocalRepository,
     private val casStore: CasMediaStore,
-    private val macRigGateway: MacRigRenderGateway
+    private val macRigGateway: MacRigRenderGateway,
+    private val profileStore: AircheckProfileStore? = null,
+    private val otaBundleSyncManager: OtaBundleSyncManager? = null,
+    private val voiceStudioCoordinator: VoiceStudioSyncCoordinator? = null,
+    private val localCtcAligner: (suspend (File, String) -> List<AlignedWord>)? = null
 ) {
 
     suspend fun seedSessionFromStory(
@@ -171,7 +187,8 @@ class CoreStoryPipelineCoordinator(
     suspend fun synthesizeStage1Tts(
         session: CorePipelineSession,
         rigBaseUrl: String,
-        localMicWavFile: File? = null
+        localMicWavFile: File? = null,
+        task: RigTaskHandle? = null
     ): Result<CorePipelineSession> = withContext(Dispatchers.IO) {
         try {
             val activeClauses = session.clauses
@@ -184,72 +201,213 @@ class CoreStoryPipelineCoordinator(
                 )
             }
 
+            val effectiveProjectId = session.scriptId.ifBlank { session.id }
             val updated = if (localMicWavFile != null && localMicWavFile.exists() && localMicWavFile.length() > 44L) {
                 val stored = casStore.putFile(localMicWavFile, "wav")
                 val wavInfo = parseWavDurationAndPeaks(stored.file)
+                val fullText = activeClauses.joinToString(" ") { it.spokenText }
+                val micAlignedWords = runLocalCtcAlignment(stored.file, fullText)
                 val timedClauses = distributeClauseTimings(activeClauses, wavInfo.durationMs)
+                clearStaleLocalPcmManifest(effectiveProjectId)
                 session.copy(
                     title = session.title.ifBlank { timedClauses.first().spokenText.take(40) },
                     stage = CorePipelineStage.ITERATE_STORY,
                     clauses = timedClauses,
+                    voicedClauseTexts = timedClauses.map { it.spokenText.trim() },
                     ttsVoiceSha = stored.sha256,
                     ttsAudioUrl = null,
                     ttsDurationMs = wavInfo.durationMs,
                     waveformPeaks = wavInfo.peaks,
                     ttsIterationCount = session.ttsIterationCount + 1,
                     talkingHeadJobId = null,
+                    pendingHeadJobId = null,
+                    pendingRigTasks = emptyMap(),
                     talkingHeadSha = null,
                     talkingHeadVideoUrl = null,
-                    alignedWords = emptyList(),
+                    alignedWords = micAlignedWords,
+                    alignUrl = null,
+                    ttsMetrics = null,
+                    headMetrics = null,
+                    ttsSource = TTS_SOURCE_MIC,
+                    silenceGaps = emptyList(),
+                    silenceGapsJobId = null,
                     finalClipId = null,
                     finalVideoSha = null,
                     finalVideoUrl = null,
+                    lastCutStats = null,
+                    lastCutSignature = null,
                     updatedAtMillis = System.currentTimeMillis()
                 )
             } else {
-                val health = macRigGateway.resolveAndCheckHealth(rigBaseUrl)
-                val ttsRes = macRigGateway.synthesizeCoreStoryTts(
-                    rigBaseUrl = health.resolvedUrl,
-                    projectId = session.scriptId.ifBlank { session.id },
-                    clauses = activeClauses
-                )
-                val storedWav = macRigGateway.downloadAudioWavToCas(ttsRes.audioUrl)
-                val mergedClauses = activeClauses.mapIndexed { idx, existing ->
-                    val timed = ttsRes.timedClauses.getOrNull(idx)
-                    if (timed != null) {
-                        existing.copy(
-                            index = idx,
-                            startMs = timed.startMs,
-                            endMs = timed.endMs
+                val settings = profileStore?.current()
+                val routeLocalV002 = settings != null &&
+                    (settings.phoneOnlyVoiceMode || !settings.providers.useLanVoice)
+
+                if (routeLocalV002) {
+                    val coordinator = voiceStudioCoordinator
+                        ?: return@withContext Result.failure(
+                            IllegalStateException(
+                                "Local v002 voice synthesis is selected, but VoiceStudioSyncCoordinator is not configured."
+                            )
                         )
-                    } else {
-                        existing.copy(index = idx)
+                    val directInputs = activeClauses.map { clause ->
+                        DirectSynthesisClauseInput(
+                            clauseId = clause.id,
+                            spokenText = clause.spokenText
+                        )
                     }
-                }.let { list ->
-                    if (list.all { it.endMs <= 0L } && ttsRes.durationMs > 0L) {
-                        distributeClauseTimings(list, ttsRes.durationMs)
-                    } else {
-                        list
+                    val directResult = coordinator.synthesizeClausesDirectly(
+                        projectId = effectiveProjectId,
+                        clauses = directInputs,
+                        onProgress = { _, msg -> task?.onProgress?.invoke(msg) }
+                    ).getOrElse { err ->
+                        return@withContext Result.failure(err)
                     }
+
+                    val tmpWav = casStore.createTempScratchFile("v002_tts_", "wav")
+                    val storedWav = try {
+                        writeFloat32PcmAs16BitMonoWav(
+                            pcm44k = directResult.stitchedPcm44k,
+                            outFile = tmpWav,
+                            sampleRateHz = SYNTHESIS_SAMPLE_RATE_HZ
+                        )
+                        casStore.putFile(tmpWav, "wav")
+                    } finally {
+                        if (tmpWav.exists()) tmpWav.delete()
+                    }
+                    val wavInfo = parseWavDurationAndPeaks(storedWav.file)
+                    val mergedClauses = activeClauses.mapIndexed { idx, existing ->
+                        val bounds = directResult.clauseTimeBoundsMs[existing.id]
+                        if (bounds != null) {
+                            existing.copy(
+                                index = idx,
+                                startMs = bounds.first,
+                                endMs = bounds.second
+                            )
+                        } else {
+                            existing.copy(index = idx)
+                        }
+                    }.let { list ->
+                        if (list.all { it.endMs <= 0L } && wavInfo.durationMs > 0L) {
+                            distributeClauseTimings(list, wavInfo.durationMs)
+                        } else {
+                            list
+                        }
+                    }
+                    val localWords = directResult.alignedWords.map { w ->
+                        AlignedWord(word = w.word, startMs = w.startMs, endMs = w.endMs)
+                    }
+                    val localMetrics = RigQualityMetrics(
+                        cer = directResult.summaryMetrics.cer.toDouble(),
+                        wespeakerCosine = directResult.summaryMetrics.speakerCosineSim.toDouble(),
+                        dnsmosP808 = directResult.summaryMetrics.dnsmosP808.toDouble(),
+                        tailRmsDbfs = directResult.summaryMetrics.tailRmsDb.toDouble(),
+                        syllablesPerSec = directResult.summaryMetrics.syllablesPerSec.toDouble(),
+                        maxPhonemeDurationMs = directResult.summaryMetrics.maxPhonemeDurationMs.toDouble(),
+                        passedAllStrictGates = directResult.summaryMetrics.passedAllGates
+                    )
+                    session.copy(
+                        title = session.title.ifBlank { mergedClauses.first().spokenText.take(40) },
+                        stage = CorePipelineStage.ITERATE_STORY,
+                        clauses = mergedClauses,
+                        voicedClauseTexts = mergedClauses.map { it.spokenText.trim() },
+                        ttsVoiceSha = storedWav.sha256,
+                        ttsAudioUrl = null,
+                        ttsDurationMs = wavInfo.durationMs,
+                        waveformPeaks = wavInfo.peaks,
+                        ttsIterationCount = session.ttsIterationCount + 1,
+                        talkingHeadJobId = null,
+                        pendingHeadJobId = null,
+                        pendingRigTasks = emptyMap(),
+                        talkingHeadSha = null,
+                        talkingHeadVideoUrl = null,
+                        alignedWords = localWords,
+                        alignUrl = null,
+                        ttsMetrics = localMetrics,
+                        headMetrics = null,
+                        ttsSource = TTS_SOURCE_LOCAL_V002,
+                        silenceGaps = emptyList(),
+                        silenceGapsJobId = null,
+                        finalClipId = null,
+                        finalVideoSha = null,
+                        finalVideoUrl = null,
+                        lastCutStats = null,
+                        lastCutSignature = null,
+                        updatedAtMillis = System.currentTimeMillis()
+                    )
+                } else {
+                    val health = macRigGateway.resolveAndCheckHealth(rigBaseUrl)
+                    val ttsRes = macRigGateway.synthesizeCoreStoryTts(
+                        rigBaseUrl = health.resolvedUrl,
+                        projectId = effectiveProjectId,
+                        clauses = activeClauses,
+                        task = task
+                    )
+                    val storedWav = macRigGateway.downloadAudioWavToCas(ttsRes.audioUrl)
+                    val mergedClauses = activeClauses.mapIndexed { idx, existing ->
+                        val timed = ttsRes.timedClauses.getOrNull(idx)
+                        if (timed != null) {
+                            existing.copy(
+                                index = idx,
+                                startMs = timed.startMs,
+                                endMs = timed.endMs
+                            )
+                        } else {
+                            existing.copy(index = idx)
+                        }
+                    }.let { list ->
+                        if (list.all { it.endMs <= 0L } && ttsRes.durationMs > 0L) {
+                            distributeClauseTimings(list, ttsRes.durationMs)
+                        } else {
+                            list
+                        }
+                    }
+                    val peaks = if (ttsRes.waveformPeaks.isNotEmpty()) {
+                        ttsRes.waveformPeaks
+                    } else {
+                        parseWavDurationAndPeaks(storedWav.file).peaks
+                    }
+                    val fullText = mergedClauses.joinToString(" ") { it.spokenText }
+                    val remoteAlignedWords = when {
+                        ttsRes.words.isNotEmpty() -> ttsRes.words
+                        !ttsRes.alignUrl.isNullOrBlank() ->
+                            runCatching { macRigGateway.fetchAlignedWords(ttsRes.alignUrl) }
+                                .getOrNull()
+                                ?.takeIf { it.isNotEmpty() }
+                                ?: runLocalCtcAlignment(storedWav.file, fullText)
+                        else -> runLocalCtcAlignment(storedWav.file, fullText)
+                    }
+                    clearStaleLocalPcmManifest(effectiveProjectId)
+                    session.copy(
+                        title = session.title.ifBlank { mergedClauses.first().spokenText.take(40) },
+                        stage = CorePipelineStage.ITERATE_STORY,
+                        clauses = mergedClauses,
+                        voicedClauseTexts = mergedClauses.map { it.spokenText.trim() },
+                        ttsVoiceSha = storedWav.sha256,
+                        ttsAudioUrl = ttsRes.audioUrl,
+                        ttsDurationMs = ttsRes.durationMs,
+                        waveformPeaks = peaks,
+                        ttsIterationCount = session.ttsIterationCount + 1,
+                        talkingHeadJobId = null,
+                        pendingHeadJobId = null,
+                        pendingRigTasks = emptyMap(),
+                        talkingHeadSha = null,
+                        talkingHeadVideoUrl = null,
+                        alignedWords = remoteAlignedWords,
+                        alignUrl = ttsRes.alignUrl,
+                        ttsMetrics = ttsRes.metrics,
+                        headMetrics = null,
+                        ttsSource = TTS_SOURCE_REMOTE_RIG,
+                        silenceGaps = emptyList(),
+                        silenceGapsJobId = null,
+                        finalClipId = null,
+                        finalVideoSha = null,
+                        finalVideoUrl = null,
+                        lastCutStats = null,
+                        lastCutSignature = null,
+                        updatedAtMillis = System.currentTimeMillis()
+                    )
                 }
-                session.copy(
-                    title = session.title.ifBlank { mergedClauses.first().spokenText.take(40) },
-                    stage = CorePipelineStage.ITERATE_STORY,
-                    clauses = mergedClauses,
-                    ttsVoiceSha = storedWav.sha256,
-                    ttsAudioUrl = ttsRes.audioUrl,
-                    ttsDurationMs = ttsRes.durationMs,
-                    waveformPeaks = ttsRes.waveformPeaks,
-                    ttsIterationCount = session.ttsIterationCount + 1,
-                    talkingHeadJobId = null,
-                    talkingHeadSha = null,
-                    talkingHeadVideoUrl = null,
-                    alignedWords = emptyList(),
-                    finalClipId = null,
-                    finalVideoSha = null,
-                    finalVideoUrl = null,
-                    updatedAtMillis = System.currentTimeMillis()
-                )
             }
 
             localRepo.saveCorePipelineSession(updated)
@@ -292,11 +450,12 @@ class CoreStoryPipelineCoordinator(
 
             onProgress(0.06f, "Connecting to studio rig…")
             val health = macRigGateway.resolveAndCheckHealth(rigBaseUrl)
+            val effectiveProjectId = session.scriptId.ifBlank { session.id }
             val effectiveTitle = session.title.ifBlank {
                 activeClauses.first().spokenText.take(40)
             }
             val cleanHeadProject = ScriptProject(
-                id = session.scriptId.ifBlank { "proj_${session.id.takeLast(10)}" },
+                id = effectiveProjectId,
                 title = effectiveTitle,
                 ideaSpark = activeClauses.joinToString(" ") { it.spokenText },
                 voiceSource = VoiceSource.MIC_VOICEOVER,
@@ -317,51 +476,95 @@ class CoreStoryPipelineCoordinator(
                 }
             )
 
-            val targetMaxSec = max(4, ((session.ttsDurationMs + 999L) / 1000L).toInt()).coerceIn(4, 30)
-            val enqueued = macRigGateway.enqueueMacRigRender(
-                rigBaseUrl = health.resolvedUrl,
-                project = cleanHeadProject,
-                photoSha = photoSha,
-                resolution = "720P",
-                ratio = "9:16",
-                maxDurationSec = targetMaxSec
-            )
-
-            onProgress(0.15f, "Matching speech to talking head…")
+            val targetMaxSec = max(4, ((session.ttsDurationMs + 999L) / 1000L).toInt()).coerceIn(4, 75)
+            // Resume a rig render that a previous (killed) process already started instead of paying twice.
+            var headJobId = session.pendingHeadJobId?.takeIf { it.isNotBlank() }
+            var resubmitted = false
             val interval = pollIntervalMs.coerceAtLeast(25L)
-            var snapshot = macRigGateway.pollMacRigJob(health.resolvedUrl, enqueued.jobId)
-            var consecutiveErrors = 0
-            while (!snapshot.status.isTerminal) {
-                onProgress(
-                    snapshot.progressFraction.coerceIn(0.15f, 0.92f),
-                    snapshot.stageDetail.ifBlank { "Matching speech to talking head…" }
-                )
-                delay(interval)
-                val nextPoll = runCatching {
-                    macRigGateway.pollMacRigJob(health.resolvedUrl, enqueued.jobId)
+            lateinit var snapshot: MacRigJobSnapshot
+
+            while (true) {
+                if (headJobId == null) {
+                    headJobId = macRigGateway.enqueueMacRigRender(
+                        rigBaseUrl = health.resolvedUrl,
+                        project = cleanHeadProject,
+                        photoSha = photoSha,
+                        resolution = "720P",
+                        ratio = "9:16",
+                        maxDurationSec = targetMaxSec,
+                        words = session.alignedWords,
+                        alignUrl = session.alignUrl
+                    ).jobId
+                    localRepo.saveCorePipelineSession(session.copy(pendingHeadJobId = headJobId))
                 }
-                if (nextPoll.isSuccess) {
-                    consecutiveErrors = 0
-                    snapshot = nextPoll.getOrThrow()
-                } else {
-                    val err = nextPoll.exceptionOrNull()
-                    if (err is CancellationException) throw err
-                    consecutiveErrors++
-                    if (consecutiveErrors >= 5) {
-                        throw IllegalStateException(
-                            err?.localizedMessage ?: "Lost connection while rendering talking head."
-                        )
+
+                onProgress(0.15f, "Matching speech to talking head…")
+                var consecutiveErrors = 0
+                var needsResubmit = false
+
+                while (true) {
+                    val poll = runCatching {
+                        macRigGateway.pollMacRigJob(health.resolvedUrl, headJobId!!)
+                    }
+                    if (poll.isSuccess) {
+                        consecutiveErrors = 0
+                        val current = poll.getOrThrow()
+                        if (!current.status.isTerminal) {
+                            onProgress(
+                                current.progressFraction.coerceIn(0.15f, 0.92f),
+                                current.stageDetail.ifBlank { "Matching speech to talking head…" }
+                            )
+                            delay(interval)
+                            continue
+                        }
+                        if (current.status == RenderJobStatus.FAILED &&
+                            current.errorKind == "rig_restarted" &&
+                            !resubmitted
+                        ) {
+                            localRepo.saveCorePipelineSession(session.copy(pendingHeadJobId = null))
+                            needsResubmit = true
+                            break
+                        }
+                        snapshot = current
+                        break
+                    } else {
+                        val err = poll.exceptionOrNull()
+                        if (err is CancellationException) throw err
+                        if (err is RigJobNotFoundException) {
+                            localRepo.saveCorePipelineSession(session.copy(pendingHeadJobId = null))
+                            if (!resubmitted) {
+                                needsResubmit = true
+                                break
+                            }
+                            return@withContext Result.failure(err)
+                        }
+                        consecutiveErrors++
+                        if (consecutiveErrors >= 5) {
+                            throw IllegalStateException(
+                                err?.localizedMessage ?: "Lost connection while rendering talking head."
+                            )
+                        }
+                        delay(interval)
                     }
                 }
+
+                if (needsResubmit) {
+                    resubmitted = true
+                    headJobId = null
+                    continue
+                }
+                break
             }
 
             if (snapshot.status == RenderJobStatus.FAILED) {
+                localRepo.saveCorePipelineSession(session.copy(pendingHeadJobId = null))
                 return@withContext Result.failure(
                     IllegalStateException(snapshot.errorMessage ?: "Talking-head synthesis failed.")
                 )
             }
             val headVideoUrl = snapshot.videoUrl
             if (headVideoUrl.isNullOrBlank()) {
+                localRepo.saveCorePipelineSession(session.copy(pendingHeadJobId = null))
                 return@withContext Result.failure(
                     IllegalStateException("Talking-head render finished without a video URL.")
                 )
@@ -382,8 +585,10 @@ class CoreStoryPipelineCoordinator(
             }
 
             val (beatLockedClauses, alignedWords) = lockClauseCutWindowsWithMedia3Exporter(
-                projectId = cleanHeadProject.id,
+                projectId = effectiveProjectId,
+                session = session,
                 clauses = timedClauses,
+                snapshot = snapshot,
                 talkingHeadFile = storedHead.file,
                 totalDurationMs = effectiveDurationMs
             )
@@ -413,10 +618,13 @@ class CoreStoryPipelineCoordinator(
                 title = effectiveTitle,
                 stage = CorePipelineStage.CHOP_INTO_BROLL,
                 clauses = brollReadyClauses,
-                talkingHeadJobId = enqueued.jobId,
+                talkingHeadJobId = headJobId,
+                pendingHeadJobId = null,
                 talkingHeadSha = storedHead.sha256,
                 talkingHeadVideoUrl = headVideoUrl,
                 alignedWords = alignedWords,
+                alignUrl = snapshot.alignUrl ?: session.alignUrl,
+                headMetrics = snapshot.metrics ?: session.headMetrics,
                 updatedAtMillis = System.currentTimeMillis()
             )
             localRepo.saveCorePipelineSession(updated)
@@ -439,7 +647,9 @@ class CoreStoryPipelineCoordinator(
         session: CorePipelineSession,
         rigBaseUrl: String,
         allSavedOverlays: List<SavedNewsroomOverlay>,
-        photoSha: String? = null
+        photoSha: String? = null,
+        look: NewsroomLook? = null,
+        task: RigTaskHandle? = null
     ): Result<Pair<CorePipelineSession, ClipRecord>> = withContext(Dispatchers.IO) {
         try {
             if (!session.hasTalkingHead) {
@@ -458,6 +668,9 @@ class CoreStoryPipelineCoordinator(
 
             val attachedOverlays = allSavedOverlays.filter { it.id in session.selectedOverlayIds }
             val health = macRigGateway.resolveAndCheckHealth(rigBaseUrl)
+            val settings = runCatching { profileStore?.current() }.getOrNull()
+            val effectiveUseRemotion = session.renderOptions.useRemotion
+                ?: (settings?.providers?.packageProviderId == "mac_rig_remotion")
             val effectiveTitle = session.title.ifBlank {
                 activeClauses.first().spokenText.take(40)
             }
@@ -469,7 +682,13 @@ class CoreStoryPipelineCoordinator(
                 sourceJobId = session.talkingHeadJobId,
                 sourceMp4Sha = session.talkingHeadSha,
                 clauses = activeClauses,
-                overlays = attachedOverlays
+                overlays = attachedOverlays,
+                renderOptions = session.renderOptions,
+                look = look,
+                task = task,
+                alignedWords = session.alignedWords,
+                alignUrl = session.alignUrl,
+                useRemotion = effectiveUseRemotion
             )
             val storedFinal = macRigGateway.downloadRenderedMp4ToCas(chopRes.videoUrl)
 
@@ -511,6 +730,7 @@ class CoreStoryPipelineCoordinator(
                 finalClipId = clip.id,
                 finalVideoSha = storedFinal.sha256,
                 finalVideoUrl = chopRes.videoUrl,
+                lastCutStats = chopRes.studioStats,
                 updatedAtMillis = now
             )
             localRepo.saveCorePipelineSession(updatedSession)
@@ -521,36 +741,202 @@ class CoreStoryPipelineCoordinator(
         }
     }
 
+    private suspend fun runLocalCtcAlignment(
+        wavFile: File,
+        expectedText: String
+    ): List<AlignedWord> {
+        if (expectedText.isBlank()) return emptyList()
+        localCtcAligner?.let { aligner ->
+            return runCatching { aligner.invoke(wavFile, expectedText) }.getOrDefault(emptyList())
+        }
+        val ota = otaBundleSyncManager ?: return emptyList()
+        val sherpaDir = ota.resolveVerifiedBundleForSynthesis().getOrNull()?.sherpaCtcModelDir
+            ?: return emptyList()
+        return alignWavWithOrtCtc(wavFile, expectedText, sherpaDir)
+    }
+
+    private suspend fun clearStaleLocalPcmManifest(projectId: String) {
+        val existing = localRepo.getProjectManifest(projectId) ?: return
+        val hasPcm = existing.clauses.any { c ->
+            c.selectedCandidate?.pcmFilePath.orEmpty().endsWith(".pcm", ignoreCase = true)
+        }
+        if (hasPcm) {
+            localRepo.saveProjectManifest(
+                VoiceProjectManifest(
+                    projectId = projectId,
+                    sampleRate = SYNTHESIS_SAMPLE_RATE_HZ,
+                    globalGapScale = 1.0f,
+                    activeLoraVersion = 0,
+                    clauses = emptyList()
+                )
+            )
+        }
+    }
+
     private suspend fun lockClauseCutWindowsWithMedia3Exporter(
         projectId: String,
+        session: CorePipelineSession,
         clauses: List<CoreStoryClause>,
+        snapshot: MacRigJobSnapshot,
         talkingHeadFile: File,
         totalDurationMs: Long
     ): Pair<List<CoreStoryClause>, List<AlignedWord>> {
         val sampleRate = SYNTHESIS_SAMPLE_RATE_HZ
-        val alignedWords = mutableListOf<AlignedWord>()
+        // Priority: (1) snapshot.words -> (2) fetch snapshot.alignUrl -> (3) session.alignedWords
+        // -> (4) localCtcAligner on ttsVoiceSha WAV -> (5) emptyList() (never uniform split).
+        val resolvedWords: List<AlignedWord> = when {
+            snapshot.words.isNotEmpty() -> snapshot.words
+            !snapshot.alignUrl.isNullOrBlank() ->
+                runCatching { macRigGateway.fetchAlignedWords(snapshot.alignUrl) }
+                    .getOrNull()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: session.alignedWords
+            session.alignedWords.isNotEmpty() -> session.alignedWords
+            else -> {
+                val wavFile = session.ttsVoiceSha?.let { sha -> casStore.fileForSha(sha, "wav") }
+                if (wavFile != null && wavFile.isFile) {
+                    runLocalCtcAlignment(wavFile, clauses.joinToString(" ") { it.spokenText })
+                } else {
+                    emptyList()
+                }
+            }
+        }
+
+        val existingManifest = localRepo.getProjectManifest(projectId)
+        val isLocalV002Session = session.ttsSource == TTS_SOURCE_LOCAL_V002 ||
+            (session.ttsSource.isBlank() && session.ttsAudioUrl == null && session.ttsMetrics != null)
+        val localPcmManifest = existingManifest?.takeIf { manifest ->
+            isLocalV002Session &&
+                manifest.clauses.isNotEmpty() &&
+                clauses.all { c ->
+                    manifest.clauses.any { node ->
+                        val baseId = node.clauseId.replace(SUB_CLAUSE_SUFFIX_REGEX, "")
+                        node.clauseId == c.id || baseId == c.id
+                    }
+                } &&
+                manifest.clauses.any { c ->
+                    c.selectedCandidate?.pcmFilePath.orEmpty().endsWith(".pcm", ignoreCase = true)
+                }
+        }
+
+        if (localPcmManifest != null) {
+            val headUri = talkingHeadFile.toURI().toString()
+            val anchoredParents = localPcmManifest.clauses.flatMap { clauseNode ->
+                val tokens = clauseNode.selectedCandidate?.tokens.orEmpty()
+                val explicitAnchors = tokens.mapNotNull { it.videoAnchorId?.takeIf(String::isNotBlank) }
+                if (explicitAnchors.isNotEmpty()) {
+                    explicitAnchors + clauseNode.clauseId.replace(SUB_CLAUSE_SUFFIX_REGEX, "")
+                } else {
+                    emptyList()
+                }
+            }.toMutableSet()
+
+            var changed = false
+            val updatedClauses = localPcmManifest.clauses.map { clauseNode ->
+                val selIdx = clauseNode.selectedTakeIndex
+                val winner = clauseNode.candidates.getOrNull(selIdx)
+                val parentId = clauseNode.clauseId.replace(SUB_CLAUSE_SUFFIX_REGEX, "")
+                val isContinuationSubClause = parentId != clauseNode.clauseId &&
+                    !clauseNode.clauseId.endsWith("_p1")
+                val hasExistingAnchor = winner?.tokens.orEmpty().any { !it.videoAnchorId.isNullOrBlank() }
+                if (winner != null &&
+                    winner.tokens.isNotEmpty() &&
+                    !hasExistingAnchor &&
+                    !isContinuationSubClause &&
+                    anchoredParents.add(parentId)
+                ) {
+                    changed = true
+                    val boundTokens = winner.tokens.mapIndexed { tIdx, tok ->
+                        if (tIdx == 0) tok.copy(videoAnchorId = parentId) else tok
+                    }
+                    val updatedWinner = winner.copy(tokens = boundTokens)
+                    clauseNode.copy(
+                        candidates = clauseNode.candidates.mapIndexed { cIdx, cand ->
+                            if (cIdx == selIdx) updatedWinner else cand
+                        }
+                    )
+                } else {
+                    clauseNode
+                }
+            }
+            val manifestForExport = if (changed) {
+                localPcmManifest.copy(clauses = updatedClauses).also { localRepo.saveProjectManifest(it) }
+            } else {
+                localPcmManifest
+            }
+            val allAnchorIds = (
+                manifestForExport.clauses.flatMap { it.selectedCandidate?.tokens.orEmpty() }
+                    .mapNotNull { it.videoAnchorId?.takeIf(String::isNotBlank) } +
+                    manifestForExport.clauses.map { it.clauseId }
+                ).distinct()
+            val bindings = allAnchorIds.associateWith {
+                VideoAnchorBinding(videoAnchorId = it, videoUri = headUri)
+            }
+            val specsByClauseId = Media3BeatExporter.buildMedia3ClippingSpecs(manifestForExport, bindings)
+                .associateBy { it.videoAnchorId }
+            val lockedClauses = clauses.mapIndexed { idx, clause ->
+                val spec = specsByClauseId[clause.id]
+                if (spec != null) {
+                    val lockedStartMs = spec.startPositionUs / 1_000L
+                    val lockedEndMs = if (idx == clauses.lastIndex) {
+                        max(totalDurationMs, spec.endPositionUs / 1_000L)
+                    } else {
+                        max(lockedStartMs + 200L, spec.endPositionUs / 1_000L)
+                    }
+                    clause.copy(startMs = lockedStartMs, endMs = lockedEndMs)
+                } else {
+                    clause
+                }
+            }
+            return lockedClauses to resolvedWords
+        }
+
+        val metricsSource = snapshot.metrics ?: session.ttsMetrics
+        val realGateMetrics = if (metricsSource != null) {
+            GateMetrics(
+                cer = (metricsSource.cer ?: 0.0).toFloat(),
+                maxPhonemeDurationMs = (metricsSource.maxPhonemeDurationMs ?: 0.0).toFloat(),
+                speakerCosineSim = (metricsSource.wespeakerCosine ?: 0.0).toFloat(),
+                dnsmosP808 = (metricsSource.dnsmosP808 ?: 0.0).toFloat(),
+                tailRmsDb = (metricsSource.tailRmsDbfs ?: 0.0).toFloat(),
+                syllablesPerSec = (metricsSource.syllablesPerSec ?: 0.0).toFloat(),
+                passedAllGates = metricsSource.passedAllStrictGates ?: false
+            )
+        } else {
+            GateMetrics(
+                cer = 0f,
+                maxPhonemeDurationMs = 0f,
+                speakerCosineSim = 0f,
+                dnsmosP808 = 0f,
+                tailRmsDb = 0f,
+                syllablesPerSec = 0f,
+                passedAllGates = false
+            )
+        }
+
         val manifestClauses = clauses.mapIndexed { idx, clause ->
             val startMs = clause.startMs.coerceAtLeast(0L)
             val endMs = clause.endMs.coerceAtLeast(startMs + 200L)
             val durMs = (endMs - startMs).coerceAtLeast(200L)
-            val words = clause.spokenText.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
-            val safeWords = if (words.isEmpty()) listOf(clause.spokenText.trim()) else words
-            var cursorMs = startMs
-            val wordTokens = safeWords.mapIndexed { wIdx, w ->
-                val sliceMs = if (wIdx == safeWords.lastIndex) {
-                    (endMs - cursorMs).coerceAtLeast(40L)
-                } else {
-                    max(40L, durMs / safeWords.size)
+            val clauseWords = if (resolvedWords.isEmpty()) {
+                emptyList()
+            } else {
+                resolvedWords.filter { w ->
+                    if (idx == clauses.lastIndex) {
+                        w.startMs >= startMs
+                    } else {
+                        w.startMs in startMs until endMs
+                    }
                 }
-                val wStartMs = cursorMs
-                val wEndMs = min(endMs, wStartMs + sliceMs)
-                cursorMs = wEndMs
-                alignedWords += AlignedWord(word = w, startMs = wStartMs, endMs = wEndMs)
-
-                val localStartSample = ((wStartMs - startMs) * sampleRate) / 1_000L
-                val localEndSample = max(localStartSample + 1L, ((wEndMs - startMs) * sampleRate) / 1_000L)
+            }
+            val wordTokens = clauseWords.mapIndexed { wIdx, w ->
+                val localStartSample = (((w.startMs - startMs).coerceAtLeast(0L)) * sampleRate) / 1_000L
+                val localEndSample = max(
+                    localStartSample + 1L,
+                    (((w.endMs - startMs).coerceAtLeast(1L)) * sampleRate) / 1_000L
+                )
                 WordToken(
-                    word = w,
+                    word = w.word,
                     startSample = localStartSample,
                     endSample = localEndSample,
                     zeroCrossIn = localStartSample,
@@ -570,20 +956,12 @@ class CoreStoryPipelineCoordinator(
                 candidates = listOf(
                     CandidateTake(
                         takeId = "take_${clause.id}",
-                        pcmFilePath = talkingHeadFile.absolutePath,
+                        pcmFilePath = "",
                         totalSamples = clauseSamples,
                         discreteAudioTokens = IntArray(0),
                         seed = idx.toLong(),
                         temperature = 0.7f,
-                        metrics = GateMetrics(
-                            cer = 0f,
-                            maxPhonemeDurationMs = 180f,
-                            speakerCosineSim = 0.92f,
-                            dnsmosP808 = 4.25f,
-                            tailRmsDb = -52f,
-                            syllablesPerSec = 4.8f,
-                            passedAllGates = true
-                        ),
+                        metrics = realGateMetrics,
                         tokens = wordTokens
                     )
                 )
@@ -599,34 +977,17 @@ class CoreStoryPipelineCoordinator(
         )
         localRepo.saveProjectManifest(manifest)
 
-        val headUri = talkingHeadFile.toURI().toString()
-        val bindings = clauses.associate { clause ->
-            clause.id to VideoAnchorBinding(
-                videoAnchorId = clause.id,
-                videoUri = headUri
-            )
-        }
-        val specsByClauseId = Media3BeatExporter.buildMedia3ClippingSpecs(manifest, bindings)
-            .associateBy { it.videoAnchorId }
-
-        val lockedClauses = clauses.mapIndexed { idx, clause ->
-            val spec = specsByClauseId[clause.id]
-            if (spec != null) {
-                val lockedStartMs = spec.startPositionUs / 1_000L
-                val lockedEndMs = if (idx == clauses.lastIndex) {
-                    max(totalDurationMs, spec.endPositionUs / 1_000L)
-                } else {
-                    max(lockedStartMs + 200L, spec.endPositionUs / 1_000L)
-                }
-                clause.copy(startMs = lockedStartMs, endMs = lockedEndMs)
-            } else {
-                clause
-            }
-        }
-        return lockedClauses to alignedWords
+        // Non-EDL (remote :8443 or mic WAV): talking-head MP4 was rendered from the continuous
+        // master WAV including pauses, so preserve exact continuous clause startMs/endMs rather
+        // than compressing leading/trailing silence via Media3BeatExporter.
+        return clauses to resolvedWords
     }
 
     companion object {
+        const val TTS_SOURCE_LOCAL_V002: String = "local_v002"
+        const val TTS_SOURCE_REMOTE_RIG: String = "remote_rig"
+        const val TTS_SOURCE_MIC: String = "mic"
+        private val SUB_CLAUSE_SUFFIX_REGEX = Regex("_p\\d+$")
         fun splitStoryIntoClauses(
             rawText: String,
             existing: List<CoreStoryClause> = emptyList()
@@ -762,6 +1123,140 @@ class CoreStoryPipelineCoordinator(
                 sampleRateHz = sampleRate,
                 peaks = normalized
             )
+        }
+
+        fun writeFloat32PcmAs16BitMonoWav(
+            pcm44k: FloatArray,
+            outFile: File,
+            sampleRateHz: Int = SYNTHESIS_SAMPLE_RATE_HZ
+        ) {
+            val numSamples = pcm44k.size
+            val dataSize = numSamples * 2
+            val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
+                put("RIFF".toByteArray(Charsets.US_ASCII))
+                putInt(36 + dataSize)
+                put("WAVE".toByteArray(Charsets.US_ASCII))
+                put("fmt ".toByteArray(Charsets.US_ASCII))
+                putInt(16)
+                putShort(1) // PCM
+                putShort(1) // Mono
+                putInt(sampleRateHz)
+                putInt(sampleRateHz * 2)
+                putShort(2) // Block align
+                putShort(16) // Bits per sample
+                put("data".toByteArray(Charsets.US_ASCII))
+                putInt(dataSize)
+            }
+            val pcmBuf = ByteBuffer.allocate(dataSize).order(ByteOrder.LITTLE_ENDIAN)
+            for (sample in pcm44k) {
+                val finite = if (sample.isFinite()) sample else 0f
+                val clamped = finite.coerceIn(-1.0f, 1.0f)
+                val s = (clamped * 32767.0f).roundToInt().coerceIn(-32768, 32767).toShort()
+                pcmBuf.putShort(s)
+            }
+            outFile.parentFile?.mkdirs()
+            FileOutputStream(outFile).use { fos ->
+                fos.write(header.array())
+                fos.write(pcmBuf.array())
+            }
+        }
+
+        fun readWavAsFloat44kMono(wavFile: File): FloatArray? {
+            if (!wavFile.isFile || wavFile.length() <= 44L) return null
+            val bytes = wavFile.readBytes()
+            val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            if (
+                bytes[0] != 'R'.code.toByte() ||
+                bytes[1] != 'I'.code.toByte() ||
+                bytes[2] != 'F'.code.toByte() ||
+                bytes[3] != 'F'.code.toByte()
+            ) {
+                return null
+            }
+            var audioFormat = 1
+            var channels = 1
+            var sampleRate = SYNTHESIS_SAMPLE_RATE_HZ
+            var bitsPerSample = 16
+            var dataOffset = -1
+            var dataSize = 0
+            var pos = 12
+            while (pos + 8 <= bytes.size) {
+                val chunkId = String(bytes, pos, 4, Charsets.US_ASCII)
+                val chunkSize = buf.getInt(pos + 4).coerceAtLeast(0)
+                val bodyStart = pos + 8
+                if (chunkId == "fmt " && bodyStart + 16 <= bytes.size) {
+                    audioFormat = buf.getShort(bodyStart).toInt() and 0xFFFF
+                    channels = buf.getShort(bodyStart + 2).toInt().coerceAtLeast(1)
+                    sampleRate = buf.getInt(bodyStart + 4).coerceAtLeast(8_000)
+                    bitsPerSample = buf.getShort(bodyStart + 14).toInt().coerceAtLeast(8)
+                } else if (chunkId == "data") {
+                    dataOffset = bodyStart
+                    dataSize = min(chunkSize, bytes.size - bodyStart).coerceAtLeast(0)
+                    break
+                }
+                val step = 8 + chunkSize + (chunkSize and 1)
+                if (step <= 0) break
+                pos += step
+            }
+            if (dataOffset < 0 || dataSize <= 0) return null
+            val bytesPerFrame = (bitsPerSample / 8) * channels
+            if (bytesPerFrame <= 0) return null
+            val frameCount = dataSize / bytesPerFrame
+            if (frameCount <= 0) return null
+
+            val mono = FloatArray(frameCount)
+            for (frame in 0 until frameCount) {
+                var sum = 0f
+                for (ch in 0 until channels) {
+                    val off = dataOffset + frame * bytesPerFrame + ch * (bitsPerSample / 8)
+                    if (off + (bitsPerSample / 8) > bytes.size) break
+                    val v = when {
+                        bitsPerSample == 16 && audioFormat == 1 -> buf.getShort(off).toFloat() / 32768f
+                        bitsPerSample == 32 && audioFormat == 3 -> {
+                            val raw = buf.getFloat(off)
+                            if (raw.isFinite()) raw.coerceIn(-1f, 1f) else 0f
+                        }
+                        bitsPerSample == 32 && audioFormat == 1 -> buf.getInt(off).toFloat() / 2147483648f
+                        else -> return null
+                    }
+                    sum += v
+                }
+                mono[frame] = sum / channels.toFloat()
+            }
+            if (sampleRate == SYNTHESIS_SAMPLE_RATE_HZ) return mono
+            val outLen = max(1, ((mono.size.toLong() * SYNTHESIS_SAMPLE_RATE_HZ) / sampleRate).toInt())
+            return FloatArray(outLen) { i ->
+                val srcPos = (i.toDouble() * sampleRate) / SYNTHESIS_SAMPLE_RATE_HZ
+                val idx0 = srcPos.toInt().coerceIn(0, mono.lastIndex)
+                val idx1 = (idx0 + 1).coerceIn(0, mono.lastIndex)
+                val frac = (srcPos - idx0).toFloat()
+                mono[idx0] * (1f - frac) + mono[idx1] * frac
+            }
+        }
+
+        fun alignWavWithOrtCtc(
+            wavFile: File,
+            expectedText: String,
+            sherpaCtcDir: File
+        ): List<AlignedWord> {
+            val pcm44k = readWavAsFloat44kMono(wavFile) ?: return emptyList()
+            if (pcm44k.isEmpty() || expectedText.isBlank()) return emptyList()
+            return runCatching {
+                val engine = OrtCtcAlignerEngine.createDefault(
+                    sherpaCtcModelDir = sherpaCtcDir
+                ).getOrNull() ?: return emptyList()
+                engine.use { aligner ->
+                    val output = aligner.align(pcm44k, expectedText).getOrNull() ?: return emptyList()
+                    output.wordSpans.map { span ->
+                        val startMs = ((span.startSample * 1_000L) / SYNTHESIS_SAMPLE_RATE_HZ).coerceAtLeast(0L)
+                        val endMs = max(
+                            startMs + 1L,
+                            (span.endSample * 1_000L) / SYNTHESIS_SAMPLE_RATE_HZ
+                        )
+                        AlignedWord(word = span.word, startMs = startMs, endMs = endMs)
+                    }
+                }
+            }.getOrDefault(emptyList())
         }
     }
 }

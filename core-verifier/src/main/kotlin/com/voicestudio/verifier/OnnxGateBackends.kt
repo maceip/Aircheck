@@ -622,6 +622,15 @@ class OrtCtcAlignerEngine private constructor(
             val session = createAcceleratedOrtSession(env, onnxFile, preferHardwareAccelerator)
             OrtCtcAlignerEngine(env, session, vocab, tokenToId, blankId)
         }
+
+        fun createDefault(
+            sherpaCtcModelDir: File,
+            preferHardwareAccelerator: Boolean = true
+        ): Result<OrtCtcAlignerEngine> = create(
+            env = OrtEnvironment.getEnvironment(),
+            sherpaCtcModelDir = sherpaCtcModelDir,
+            preferHardwareAccelerator = preferHardwareAccelerator
+        )
     }
 }
 

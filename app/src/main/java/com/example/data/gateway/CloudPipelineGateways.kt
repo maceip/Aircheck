@@ -1,6 +1,12 @@
 package com.example.data.gateway
 
+import com.example.data.AlignedWord
+import com.example.data.CoreRenderOptions
 import com.example.data.CoreStoryClause
+import com.example.data.NewsroomLook
+import com.example.data.RigQualityMetrics
+import com.example.data.SilenceGap
+import com.example.data.StudioCutStats
 import com.example.data.OverlayObjectKind
 import com.example.data.RenderJobStatus
 import com.example.data.SavedNewsroomOverlay
@@ -151,7 +157,10 @@ class DirectMacRigGateway(
         photoSha: String?,
         resolution: String,
         ratio: String,
-        maxDurationSec: Int
+        maxDurationSec: Int,
+        words: List<AlignedWord>,
+        alignUrl: String?,
+        useRemotion: Boolean?
     ): EnqueuedRenderResult = withContext(Dispatchers.IO) {
         val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
         val spokenText = project.activeBeats.joinToString(" ") { it.spokenText.trim() }.trim()
@@ -179,7 +188,7 @@ class DirectMacRigGateway(
         val subline = project.stageConfig.chyronSubline.trim()
         val showBug = project.stageConfig.showBrandBug
 
-        val clampedMaxDuration = maxDurationSec.coerceIn(2, 60)
+        val clampedMaxDuration = maxDurationSec.coerceIn(2, 75)
         val canonicalInput = buildString {
             append(baseUrl).append('|')
             append(project.id).append('|')
@@ -214,6 +223,15 @@ class DirectMacRigGateway(
         }
         if (!photoJpegBase64.isNullOrBlank()) {
             payload.put("photo_jpeg_base64", photoJpegBase64)
+        }
+        if (words.isNotEmpty()) {
+            payload.put("words", encodeAlignedWordsArray(words))
+        }
+        if (!alignUrl.isNullOrBlank()) {
+            payload.put("align_url", alignUrl.trim())
+        }
+        if (useRemotion != null) {
+            payload.put("use_remotion", useRemotion)
         }
 
         val req = Request.Builder()
@@ -254,6 +272,12 @@ class DirectMacRigGateway(
 
             val rawBody = okHttpClient.newCall(req).execute().use { resp ->
                 val bodyStr = resp.body?.string().orEmpty()
+                if (resp.code == 404) {
+                    val detail = extractErrorDetail(bodyStr)
+                    throw RigJobNotFoundException(
+                        "Rig job $cleanJobId not found (HTTP 404)${if (detail.isNotBlank()) ": $detail" else "."}"
+                    )
+                }
                 if (!resp.isSuccessful) {
                     val detail = extractErrorDetail(bodyStr)
                     throw IllegalStateException(
@@ -269,7 +293,11 @@ class DirectMacRigGateway(
             val json = JSONObject(rawBody)
             val rawVideoUrl = json.optNullableString("video_url")
             val resolvedVideoUrl = rawVideoUrl?.let { resolveAbsoluteUrl(baseUrl, it) }
+            val rawAlignUrl = json.optNullableString("align_url")
+            val resolvedAlignUrl = rawAlignUrl?.let { resolveAbsoluteUrl(baseUrl, it) }
             val metricsObj = if (!json.isNull("metrics")) json.optJSONObject("metrics") else null
+            val parsedMetrics = parseRigQualityMetrics(metricsObj)
+            val parsedWords = parseAlignedWords(json.optJSONArray("words"))
 
             MacRigJobSnapshot(
                 jobId = json.optNullableString("job_id") ?: cleanJobId,
@@ -279,9 +307,13 @@ class DirectMacRigGateway(
                 errorMessage = json.optNullableString("error_message"),
                 videoUrl = resolvedVideoUrl,
                 durationMs = json.optLong("duration_ms", 0L).coerceAtLeast(0L),
-                cer = metricsObj?.optNullableDouble("cer"),
-                wespeakerCosine = metricsObj?.optNullableDouble("wespeaker_cosine"),
-                dnsmosP808 = metricsObj?.optNullableDouble("dnsmos_p808")
+                cer = parsedMetrics?.cer,
+                wespeakerCosine = parsedMetrics?.wespeakerCosine,
+                dnsmosP808 = parsedMetrics?.dnsmosP808,
+                errorKind = json.optNullableString("error_kind"),
+                words = parsedWords,
+                alignUrl = resolvedAlignUrl,
+                metrics = parsedMetrics
             )
         }
 
@@ -290,6 +322,31 @@ class DirectMacRigGateway(
 
     override suspend fun downloadAudioWavToCas(audioUrl: String): CasStoredAsset =
         downloadRemoteAssetToCas(audioUrl, "wav")
+
+    override suspend fun fetchAlignedWords(alignUrl: String): List<AlignedWord> = withContext(Dispatchers.IO) {
+        val cleanUrl = alignUrl.trim()
+        require(cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")) {
+            "Invalid align_url: $alignUrl"
+        }
+        val req = Request.Builder().url(cleanUrl).get().build()
+        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = extractErrorDetail(bodyStr)
+                throw IllegalStateException(
+                    "Failed fetching alignment JSON (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                )
+            }
+            bodyStr.trim()
+        }
+        if (rawBody.isEmpty()) return@withContext emptyList()
+        if (rawBody.startsWith("[")) {
+            parseAlignedWords(JSONArray(rawBody))
+        } else {
+            val obj = JSONObject(rawBody)
+            parseAlignedWords(obj.optJSONArray("words"))
+        }
+    }
 
     private suspend fun downloadRemoteAssetToCas(
         assetUrl: String,
@@ -327,7 +384,8 @@ class DirectMacRigGateway(
     override suspend fun synthesizeCoreStoryTts(
         rigBaseUrl: String,
         projectId: String,
-        clauses: List<CoreStoryClause>
+        clauses: List<CoreStoryClause>,
+        task: RigTaskHandle?
     ): CoreTtsSynthesisResult = withContext(Dispatchers.IO) {
         val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
         val nonEmpty = clauses.filter { it.spokenText.isNotBlank() }
@@ -346,26 +404,7 @@ class DirectMacRigGateway(
             .put("spoken_text", nonEmpty.joinToString(" ") { it.spokenText.trim() })
             .put("clauses", clausesArr)
 
-        val req = Request.Builder()
-            .url("$baseUrl/v1/core/tts")
-            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .build()
-
-        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
-            val bodyStr = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                val detail = extractErrorDetail(bodyStr)
-                throw IllegalStateException(
-                    "TTS synthesis failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
-                )
-            }
-            if (bodyStr.isBlank()) {
-                throw IllegalStateException("Server /v1/core/tts returned an empty response.")
-            }
-            bodyStr
-        }
-
-        val json = JSONObject(rawBody)
+        val json = runRigTask(baseUrl, "/v1/core/tts", payload, "TTS synthesis", task)
         val ttsId = json.optNullableString("tts_id")
             ?: throw IllegalStateException("Server /v1/core/tts did not return tts_id.")
         val rawAudioUrl = json.optNullableString("audio_url")
@@ -399,12 +438,21 @@ class DirectMacRigGateway(
             )
         }
 
+        val rawAlignUrl = json.optNullableString("align_url")
+        val resolvedAlignUrl = rawAlignUrl?.let { resolveAbsoluteUrl(baseUrl, it) }
+        val metricsObj = if (!json.isNull("metrics")) json.optJSONObject("metrics") else null
+        val parsedMetrics = parseRigQualityMetrics(metricsObj)
+        val parsedWords = parseAlignedWords(json.optJSONArray("words"))
+
         CoreTtsSynthesisResult(
             ttsId = ttsId,
             audioUrl = resolvedAudioUrl,
             durationMs = durationMs,
             waveformPeaks = peaks,
-            timedClauses = timedClauses
+            timedClauses = timedClauses,
+            words = parsedWords,
+            alignUrl = resolvedAlignUrl,
+            metrics = parsedMetrics
         )
     }
 
@@ -415,7 +463,13 @@ class DirectMacRigGateway(
         sourceJobId: String?,
         sourceMp4Sha: String?,
         clauses: List<CoreStoryClause>,
-        overlays: List<SavedNewsroomOverlay>
+        overlays: List<SavedNewsroomOverlay>,
+        renderOptions: CoreRenderOptions?,
+        look: NewsroomLook?,
+        task: RigTaskHandle?,
+        alignedWords: List<AlignedWord>,
+        alignUrl: String?,
+        useRemotion: Boolean?
     ): ChoppedBrollResult = withContext(Dispatchers.IO) {
         val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
         val mp4Base64: String? = if (sourceJobId.isNullOrBlank() && !sourceMp4Sha.isNullOrBlank()) {
@@ -427,16 +481,23 @@ class DirectMacRigGateway(
         }
 
         val clausesArr = JSONArray()
-        clauses.forEach { c ->
-            clausesArr.put(
-                JSONObject()
-                    .put("id", c.id)
-                    .put("spoken_text", c.spokenText)
-                    .put("start_ms", c.startMs)
-                    .put("end_ms", c.endMs)
-                    .put("segment_mode", c.segmentMode.name)
-                    .put("broll_caption", c.brollCaption.ifBlank { c.spokenText })
-            )
+        clauses.forEachIndexed { idx, c ->
+            val clauseObj = JSONObject()
+                .put("id", c.id)
+                .put("index", if (c.index >= 0) c.index else idx)
+                .put("spoken_text", c.spokenText)
+                .put("start_ms", c.startMs)
+                .put("end_ms", c.endMs)
+                .put("segment_mode", c.segmentMode.name)
+                .put("broll_caption", c.brollCaption.ifBlank { c.spokenText })
+                .put("b_roll_prompt", c.bRollPrompt.ifBlank { c.brollCaption })
+            if (!c.bRollSha.isNullOrBlank()) {
+                clauseObj.put("b_roll_sha", c.bRollSha)
+            }
+            if (c.depthTextTag.isNotBlank()) {
+                clauseObj.put("depth_text_tag", c.depthTextTag)
+            }
+            clausesArr.put(clauseObj)
         }
 
         val overlaysArr = JSONArray()
@@ -463,27 +524,42 @@ class DirectMacRigGateway(
         if (!mp4Base64.isNullOrBlank()) {
             payload.put("source_mp4_base64", mp4Base64)
         }
-
-        val req = Request.Builder()
-            .url("$baseUrl/v1/core/chop-broll")
-            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .build()
-
-        val rawBody = okHttpClient.newCall(req).execute().use { resp ->
-            val bodyStr = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                val detail = extractErrorDetail(bodyStr)
-                throw IllegalStateException(
-                    "B-roll chop failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
-                )
+        if (alignedWords.isNotEmpty()) {
+            payload.put("words", encodeAlignedWordsArray(alignedWords))
+        }
+        if (!alignUrl.isNullOrBlank()) {
+            payload.put("align_url", alignUrl.trim())
+        }
+        val effectiveUseRemotion = useRemotion ?: renderOptions?.useRemotion
+        if (renderOptions != null) {
+            val opts = JSONObject()
+                .put("strip_silence", renderOptions.stripSilence)
+                .put("punch_in", renderOptions.punchIn)
+                .put("captions", renderOptions.captions)
+                .put("aspect", renderOptions.aspect)
+                .put("chyron_headline", renderOptions.chyronHeadline)
+                .put("chyron_subline", renderOptions.chyronSubline)
+                .put("show_brand_bug", renderOptions.showBrandBug)
+                .put("corner_bug_text", renderOptions.cornerBugText)
+            if (effectiveUseRemotion != null) {
+                opts.put("use_remotion", effectiveUseRemotion)
             }
-            if (bodyStr.isBlank()) {
-                throw IllegalStateException("Server /v1/core/chop-broll returned an empty response.")
+            if (look != null) {
+                val lookJson = JSONObject()
+                    .put("blur_percent", look.blurPercent)
+                    .put("brightness_ev", look.brightnessEv)
+                    .put("light", look.light)
+                    .put("grain", look.grain)
+                    .put("border", look.border)
+                if (!look.plateId.isNullOrBlank()) lookJson.put("plate_id", look.plateId)
+                opts.put("look", lookJson)
             }
-            bodyStr
+            payload.put("render_options", opts)
+        } else if (effectiveUseRemotion != null) {
+            payload.put("use_remotion", effectiveUseRemotion)
         }
 
-        val json = JSONObject(rawBody)
+        val json = runRigTask(baseUrl, "/v1/core/chop-broll", payload, "B-roll chop", task)
         val jobId = json.optNullableString("job_id")
             ?: throw IllegalStateException("Server /v1/core/chop-broll missing job_id.")
         val rawVideoUrl = json.optNullableString("video_url")
@@ -493,8 +569,158 @@ class DirectMacRigGateway(
             videoUrl = resolveAbsoluteUrl(baseUrl, rawVideoUrl),
             durationMs = json.optLong("duration_ms", 0L).coerceAtLeast(0L),
             brollCutCount = json.optInt("broll_cut_count", 0),
-            appliedOverlayCount = json.optInt("applied_overlay_count", 0)
+            appliedOverlayCount = json.optInt("applied_overlay_count", 0),
+            studioStats = if (renderOptions != null) {
+                StudioCutStats(
+                    brollCutCount = json.optInt("broll_cut_count", 0),
+                    appliedOverlayCount = json.optInt("applied_overlay_count", 0),
+                    captionCount = json.optInt("caption_count", 0),
+                    punchInCount = json.optInt("punch_in_count", 0),
+                    removedSilenceGapCount = json.optInt("removed_silence_gap_count", 0),
+                    removedSilenceMs = json.optLong("removed_silence_ms", 0L),
+                    aspect = json.optString("aspect", renderOptions.aspect),
+                    remotionUsed = json.optBoolean("remotion_used", false),
+                    renderer = json.optNullableString("renderer")
+                )
+            } else {
+                null
+            }
         )
+    }
+
+    override suspend fun detectSilenceGaps(rigBaseUrl: String, sourceJobId: String): SilenceGapsResult =
+        withContext(Dispatchers.IO) {
+            val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+            val json = postRigJson(
+                "$baseUrl/v1/core/silence-gaps",
+                JSONObject().put("source_job_id", sourceJobId),
+                label = "Silence detection"
+            )
+            val arr = json.optJSONArray("gaps") ?: JSONArray()
+            SilenceGapsResult(
+                durationMs = json.optLong("duration_ms", 0L),
+                gaps = (0 until arr.length()).map { i ->
+                    val g = arr.getJSONObject(i)
+                    SilenceGap(startMs = g.getLong("start_ms"), endMs = g.getLong("end_ms"))
+                },
+                removableMs = json.optLong("removable_ms", 0L)
+            )
+        }
+
+    override suspend fun generateBackdropPlate(
+        rigBaseUrl: String,
+        prompt: String,
+        aspect: String,
+        task: RigTaskHandle?
+    ): BackdropPlateResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val json = runRigTask(
+            baseUrl,
+            "/v1/newsroom/backdrop",
+            JSONObject().put("prompt", prompt).put("aspect", aspect),
+            "Backdrop generation",
+            task
+        )
+        val plateId = json.optNullableString("plate_id")
+            ?: throw IllegalStateException("Server /v1/newsroom/backdrop missing plate_id.")
+        val url = json.optNullableString("url")
+            ?: throw IllegalStateException("Server /v1/newsroom/backdrop missing url.")
+        BackdropPlateResult(
+            plateId = plateId,
+            url = resolveAbsoluteUrl(baseUrl, url),
+            prompt = json.optString("prompt", prompt)
+        )
+    }
+
+    /**
+     * Submits a long rig stage as a durable async task (`?async=1`) and polls `GET /v1/jobs/<id>`
+     * until it finishes. With [task] resuming an id, polling continues on the existing rig task;
+     * a task lost to a rig restart (or unknown to the rig) is resubmitted once.
+     */
+    private suspend fun runRigTask(
+        baseUrl: String,
+        path: String,
+        payload: JSONObject,
+        label: String,
+        task: RigTaskHandle?
+    ): JSONObject {
+        var taskId = task?.resumeTaskId?.takeIf { it.isNotBlank() }
+        var resubmitted = false
+        while (true) {
+            if (taskId == null) {
+                val accepted = postRigJson("$baseUrl$path?async=1", payload, label, readTimeoutSec = 60L)
+                taskId = accepted.optNullableString("job_id")
+                    ?: throw IllegalStateException("$label: rig did not return a task id.")
+                task?.onSubmitted?.invoke(taskId)
+            }
+            var errors = 0
+            while (true) {
+                val poll = runCatching { getRigJob(baseUrl, taskId!!) }
+                if (poll.isFailure) {
+                    val err = poll.exceptionOrNull()
+                    if (err is kotlinx.coroutines.CancellationException) throw err
+                    if (err is RigTaskNotFound) {
+                        if (!resubmitted) break
+                        throw err
+                    }
+                    if (++errors >= 30) throw IllegalStateException("$label: lost contact with rig (${err?.localizedMessage}).")
+                    kotlinx.coroutines.delay(RIG_TASK_POLL_MS)
+                    continue
+                }
+                errors = 0
+                val job = poll.getOrThrow()
+                when (job.optString("status")) {
+                    "READY" -> return job.optJSONObject("result")
+                        ?: throw IllegalStateException("$label: rig task finished without a result.")
+                    "FAILED" -> {
+                        if (job.optString("error_kind") == "rig_restarted" && !resubmitted) break
+                        throw IllegalStateException("$label failed: ${job.optNullableString("error_message") ?: "unknown rig error"}")
+                    }
+                }
+                task?.onProgress?.invoke(job.optNullableString("stage_detail") ?: "$label running")
+                kotlinx.coroutines.delay(RIG_TASK_POLL_MS)
+            }
+            // Lost on the rig: resubmit exactly once.
+            resubmitted = true
+            taskId = null
+        }
+    }
+
+    private class RigTaskNotFound(msg: String) : IllegalStateException(msg)
+
+    private fun getRigJob(baseUrl: String, taskId: String): JSONObject {
+        val req = Request.Builder().url("$baseUrl/v1/jobs/$taskId").get().build()
+        return okHttpClient.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (resp.code == 404) throw RigTaskNotFound("Rig task $taskId not found.")
+            if (!resp.isSuccessful) throw IllegalStateException("Task status HTTP ${resp.code}: ${extractErrorDetail(bodyStr)}")
+            JSONObject(bodyStr)
+        }
+    }
+
+    private fun postRigJson(
+        url: String,
+        body: JSONObject,
+        label: String,
+        readTimeoutSec: Long = 180L
+    ): JSONObject {
+        val client = okHttpClient.newBuilder().readTimeout(readTimeoutSec, TimeUnit.SECONDS).build()
+        val req = Request.Builder()
+            .url(url)
+            .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        val raw = client.newCall(req).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = extractErrorDetail(bodyStr)
+                throw IllegalStateException(
+                    "$label failed (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                )
+            }
+            if (bodyStr.isBlank()) throw IllegalStateException("$label returned an empty response.")
+            bodyStr
+        }
+        return JSONObject(raw)
     }
 
     override suspend fun generateAiOverlayBrief(
@@ -613,4 +839,80 @@ class DirectMacRigGateway(
 
     private fun JSONObject.optNullableDouble(key: String): Double? =
         if (!has(key) || isNull(key)) null else runCatching { getDouble(key) }.getOrNull()
+
+    private fun JSONObject.optNullableBoolean(key: String): Boolean? =
+        if (!has(key) || isNull(key)) null else runCatching { getBoolean(key) }.getOrNull()
+
+    private fun parseAlignedWords(arr: JSONArray?): List<AlignedWord> {
+        if (arr == null || arr.length() == 0) return emptyList()
+        return buildList(arr.length()) {
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val word = obj.optNullableString("word") ?: continue
+                val startMs = when {
+                    obj.has("start_ms") && !obj.isNull("start_ms") -> obj.optLong("start_ms", 0L)
+                    obj.has("startMs") && !obj.isNull("startMs") -> obj.optLong("startMs", 0L)
+                    else -> 0L
+                }.coerceAtLeast(0L)
+                val endMs = when {
+                    obj.has("end_ms") && !obj.isNull("end_ms") -> obj.optLong("end_ms", startMs)
+                    obj.has("endMs") && !obj.isNull("endMs") -> obj.optLong("endMs", startMs)
+                    else -> startMs
+                }.coerceAtLeast(startMs)
+                add(AlignedWord(word = word, startMs = startMs, endMs = endMs))
+            }
+        }
+    }
+
+    private fun encodeAlignedWordsArray(words: List<AlignedWord>): JSONArray {
+        val arr = JSONArray()
+        words.forEach { w ->
+            arr.put(
+                JSONObject()
+                    .put("word", w.word)
+                    .put("start_ms", w.startMs)
+                    .put("end_ms", w.endMs)
+            )
+        }
+        return arr
+    }
+
+    private fun parseRigQualityMetrics(metricsObj: JSONObject?): RigQualityMetrics? {
+        if (metricsObj == null) return null
+        val cer = metricsObj.optNullableDouble("cer")
+        val wespeakerCosine = metricsObj.optNullableDouble("wespeaker_cosine")
+        val dnsmosP808 = metricsObj.optNullableDouble("dnsmos_p808")
+        val tailRmsDbfs = metricsObj.optNullableDouble("tail_rms_dbfs")
+        val masteredLufs = metricsObj.optNullableDouble("mastered_lufs")
+        val syllablesPerSec = metricsObj.optNullableDouble("syllables_per_sec")
+        val maxPhonemeDurationMs = metricsObj.optNullableDouble("max_phoneme_duration_ms")
+        val avSyncDriftMs = metricsObj.optNullableDouble("av_sync_drift_ms")
+        val passedAllStrictGates = metricsObj.optNullableBoolean("passed_all_strict_gates")
+        if (
+            cer == null &&
+            wespeakerCosine == null &&
+            dnsmosP808 == null &&
+            tailRmsDbfs == null &&
+            masteredLufs == null &&
+            syllablesPerSec == null &&
+            maxPhonemeDurationMs == null &&
+            avSyncDriftMs == null &&
+            passedAllStrictGates == null
+        ) {
+            return null
+        }
+        return RigQualityMetrics(
+            cer = cer,
+            wespeakerCosine = wespeakerCosine,
+            dnsmosP808 = dnsmosP808,
+            tailRmsDbfs = tailRmsDbfs,
+            masteredLufs = masteredLufs,
+            syllablesPerSec = syllablesPerSec,
+            maxPhonemeDurationMs = maxPhonemeDurationMs,
+            avSyncDriftMs = avSyncDriftMs,
+            passedAllStrictGates = passedAllStrictGates
+        )
+    }
 }
+
+private const val RIG_TASK_POLL_MS: Long = 2_000L

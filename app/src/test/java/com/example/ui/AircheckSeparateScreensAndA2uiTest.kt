@@ -7,9 +7,11 @@ import androidx.a2ui.model.protocol.A2uiComponentPayload
 import androidx.a2ui.model.protocol.A2uiEventAction
 import androidx.a2ui.model.protocol.A2uiException
 import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
 import androidx.compose.material3.a2ui.A2uiSurface
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -20,6 +22,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToKey
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.runComposeUiTest
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
@@ -29,6 +32,7 @@ import com.example.data.CorePipelineStage
 import com.example.data.RenderJobStatus
 import com.example.ui.a2ui.createStockAircheckA2uiCatalog
 import com.example.ui.draft.DraftDeckViewModel
+import com.example.ui.screens.CorePipelineScreen
 import com.example.ui.screens.NewsroomStudioScreen
 import com.example.ui.screens.VoiceModelCareScreen
 import com.example.ui.theme.AircheckTheme
@@ -67,6 +71,14 @@ class AircheckSeparateScreensAndA2uiTest {
     @Before
     fun setUp() {
         app = ApplicationProvider.getApplicationContext<Application>() as AircheckApplication
+        // Robolectric skips androidx.startup; background pipeline stages run on a synchronous test WorkManager.
+        androidx.work.testing.WorkManagerTestInitHelper.initializeTestWorkManager(
+            app,
+            androidx.work.Configuration.Builder()
+                .setExecutor(androidx.work.testing.SynchronousExecutor())
+                .setTaskExecutor(androidx.work.testing.SynchronousExecutor())
+                .build()
+        )
         File(app.noBackupFilesDir, "voice_care").deleteRecursively()
         runBlocking {
             app.container.profileStore.setPhoneOnlyVoiceMode(true)
@@ -119,6 +131,7 @@ class AircheckSeparateScreensAndA2uiTest {
         val renderBodies = CopyOnWriteArrayList<String>()
         val chopBodies = CopyOnWriteArrayList<String>()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/v1/jobs/task_") { serveRigTask(it) }
         val portPlaceholder = AtomicInteger(0)
 
         server.createContext("/health") { exchange ->
@@ -152,9 +165,7 @@ class AircheckSeparateScreensAndA2uiTest {
                   ]
                 }
             """.trimIndent().toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, resp.size.toLong())
-            exchange.responseBody.use { it.write(resp) }
+            respondMaybeAsync(exchange, resp)
         }
 
         server.createContext("/v1/render-video") { exchange ->
@@ -198,9 +209,7 @@ class AircheckSeparateScreensAndA2uiTest {
                   "applied_overlay_count": 0
                 }
             """.trimIndent().toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, resp.size.toLong())
-            exchange.responseBody.use { it.write(resp) }
+            respondMaybeAsync(exchange, resp)
         }
 
         server.createContext("/v1/renders/") { exchange ->
@@ -225,22 +234,27 @@ class AircheckSeparateScreensAndA2uiTest {
         portPlaceholder.set(port)
 
         runBlocking {
+            app.container.profileStore.setPhoneOnlyVoiceMode(false)
             app.container.profileStore.setTailscaleRigUrl("http://127.0.0.1:$port")
         }
 
-        var draftVmRef: DraftDeckViewModel? = null
         var studioVmRef: StudioViewModel? = null
         setContent {
-            val draftVm = draftVmRef ?: DraftDeckViewModel(app).also { draftVmRef = it }
+            // Clip Studio v4 owns the default route; the legacy 5-stage screen is exercised directly.
             val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
-            AircheckApp(
-                draftViewModel = draftVm,
-                studioViewModel = studioVm
-            )
+            val st by studioVm.uiState.collectAsStateWithLifecycle()
+            AircheckTheme(channel = st.settings.brandChannel) {
+                CorePipelineScreen(
+                    uiState = st,
+                    viewModel = studioVm,
+                    onBack = {},
+                    onOpenOptionalOverlayBuilder = {}
+                )
+            }
         }
         val studioVm = checkNotNull(studioVmRef)
 
-        // Route story into the single Core Pipeline (just like Broadcast from Drafting Deck)
+        // Route story into the single Core Pipeline (just like create video from 02 SCRIPT)
         studioVm.renderDraftAsBroadcastClip(
             plainText = "Local neural codecs cut latency in half. Cloud round-trips break conversational rhythm.",
             headline = "LOCAL CODECS"
@@ -342,6 +356,7 @@ class AircheckSeparateScreensAndA2uiTest {
         val aiAssistBodies = CopyOnWriteArrayList<String>()
         val chopBodies = CopyOnWriteArrayList<String>()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/v1/jobs/task_") { serveRigTask(it) }
         val portPlaceholder = AtomicInteger(0)
 
         server.createContext("/health") { exchange ->
@@ -398,9 +413,7 @@ class AircheckSeparateScreensAndA2uiTest {
                   "applied_overlay_count": 1
                 }
             """.trimIndent().toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, resp.size.toLong())
-            exchange.responseBody.use { it.write(resp) }
+            respondMaybeAsync(exchange, resp)
         }
 
         server.createContext("/v1/renders/") { exchange ->
@@ -416,6 +429,7 @@ class AircheckSeparateScreensAndA2uiTest {
         portPlaceholder.set(port)
 
         runBlocking {
+            app.container.profileStore.setPhoneOnlyVoiceMode(false)
             app.container.profileStore.setTailscaleRigUrl("http://127.0.0.1:$port")
         }
 
@@ -765,6 +779,7 @@ class AircheckSeparateScreensAndA2uiTest {
         assertTrue(onAllNodesWithText("Voice Model Care").fetchSemanticsNodes().isEmpty())
         assertTrue(onAllNodesWithText("Create Newsroom Overlays").fetchSemanticsNodes().isEmpty())
 
+        onNodeWithTag("tactile_drafting_deck_root").assertIsDisplayed()
         onNodeWithTag("top_settings_button").performClick()
         waitForIdle()
 
@@ -775,6 +790,7 @@ class AircheckSeparateScreensAndA2uiTest {
         onNodeWithTag("core_pipeline_back_button").assertIsDisplayed()
         onNodeWithTag("core_pipeline_back_button").performClick()
         waitForIdle()
+        onNodeWithTag("tactile_drafting_deck_root").assertIsDisplayed()
 
         onNodeWithTag("top_settings_button").performClick()
         waitForIdle()
@@ -798,4 +814,86 @@ class AircheckSeparateScreensAndA2uiTest {
         onNodeWithTag("close_system_deck_button").performClick()
         waitForIdle()
     }
+
+    @Test
+    fun corePipelineScreen_preservesTrailingWhitespaceWhileTyping_andRefreshesSameSizeClauseEdit() = runComposeUiTest {
+        var studioVmRef: StudioViewModel? = null
+        setContent {
+            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
+            val st by studioVm.uiState.collectAsStateWithLifecycle()
+            AircheckTheme {
+                CorePipelineScreen(
+                    uiState = st,
+                    viewModel = studioVm,
+                    onBack = {},
+                    onOpenOptionalOverlayBuilder = {}
+                )
+            }
+        }
+        val studioVm = checkNotNull(studioVmRef)
+
+        runBlocking {
+            val base = app.container.corePipelineCoordinator.seedSessionFromStory(
+                rawStoryText = "Alpha one. Beta two.",
+                headline = "EDIT TEST"
+            )
+            val withTts = base.copy(ttsVoiceSha = "fake_wav_sha", ttsDurationMs = 2000L)
+            app.container.localRepo.saveCorePipelineSession(withTts)
+        }
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.clauses.size == 2 &&
+                onAllNodesWithTag("core_tts_story_input").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Typing with a trailing space must not eat whitespace mid-typing
+        onNodeWithTag("core_tts_story_input").performTextReplacement("Alpha one. Beta two. ")
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        onNodeWithTag("core_tts_story_input").assertTextContains("Alpha one. Beta two. ")
+
+        // Switch to Stage 2 (ITERATE_STORY), edit clause 0 keeping clauses.size == 2, then return to Stage 1
+        studioVm.selectCoreStage(CorePipelineStage.ITERATE_STORY)
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("core_clause_input_0").fetchSemanticsNodes().isNotEmpty()
+        }
+        onNodeWithTag("core_clause_input_0").performTextReplacement("Gamma updated.")
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+
+        studioVm.selectCoreStage(CorePipelineStage.TTS)
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("core_tts_story_input").fetchSemanticsNodes().isNotEmpty()
+        }
+        onNodeWithTag("core_tts_story_input").assertTextContains("Gamma updated. Beta two.")
+    }
+
+    private val rigTasks = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val rigTaskSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Speaks the rig's durable async-task protocol (`?async=1` -> 202 task id -> GET /v1/jobs/<id>). */
+    private fun respondMaybeAsync(exchange: com.sun.net.httpserver.HttpExchange, resp: ByteArray) {
+        exchange.responseHeaders.add("Content-Type", "application/json")
+        if (exchange.requestURI.query?.contains("async=1") == true) {
+            val id = "task_${rigTaskSeq.incrementAndGet()}"
+            rigTasks[id] = resp.toString(Charsets.UTF_8)
+            val accepted = """{"job_id":"$id","status":"RUNNING"}""".toByteArray(Charsets.UTF_8)
+            exchange.sendResponseHeaders(202, accepted.size.toLong())
+            exchange.responseBody.use { it.write(accepted) }
+        } else {
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+    }
+
+    private fun serveRigTask(exchange: com.sun.net.httpserver.HttpExchange) {
+        val id = exchange.requestURI.path.substringAfterLast('/')
+        val result = rigTasks[id]
+        val body = (if (result == null) """{"error":"not_found"}""" else """{"job_id":"$id","status":"READY","result":$result}""")
+            .toByteArray(Charsets.UTF_8)
+        exchange.responseHeaders.add("Content-Type", "application/json")
+        exchange.sendResponseHeaders(if (result == null) 404 else 200, body.size.toLong())
+        exchange.responseBody.use { it.write(body) }
+    }
+
 }

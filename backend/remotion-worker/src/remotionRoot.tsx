@@ -1,6 +1,9 @@
 import React from "react";
 import { Composition, registerRoot } from "remotion";
 import { AircheckBroadcastTemplate, AircheckTemplateProps } from "./compositions/BroadcastTemplate";
+import { ensureBroadcastFonts } from "./fonts";
+
+ensureBroadcastFonts();
 
 const defaultProps: AircheckTemplateProps = {
   lipsyncUrl: "",

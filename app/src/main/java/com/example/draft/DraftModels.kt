@@ -129,6 +129,15 @@ sealed interface XAttachment {
     ) : XAttachment
 }
 
+/** One beat of the proposed spoken arc returned by `POST /v1/draft/arc`. */
+@Immutable
+data class ArcBeat(
+    val label: String,
+    val startSec: Int,
+    val endSec: Int,
+    val text: String
+)
+
 @Immutable
 data class DraftDocument(
     val id: String,
@@ -140,7 +149,15 @@ data class DraftDocument(
     val candidates: List<CandidateDraft> = emptyList(),
     val activeCandidateIndex: Int = 0,
     val salvagedPhrases: List<LockedPhrase> = emptyList(),
-    val attachment: XAttachment? = null
+    val attachment: XAttachment? = null,
+    val arcBeats: List<ArcBeat> = emptyList(),
+    /** Target runtime and word budget echoed by the rig for the current arc/script (0 = none yet). */
+    val arcTargetSec: Int = 0,
+    val arcWordBudget: Int = 0,
+    /** Index of the most recently re-rolled arc beat, or -1. */
+    val lastRerolledBeat: Int = -1,
+    /** True once candidates came from `/v1/draft/synthesize-script` (video script, not a 280-char post). */
+    val isVideoScript: Boolean = false
 ) {
     val activeCandidate: CandidateDraft?
         get() = candidates.getOrNull(activeCandidateIndex)

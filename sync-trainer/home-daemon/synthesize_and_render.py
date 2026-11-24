@@ -408,6 +408,7 @@ def transcribe_pcm16k_whisper(
             ],
             capture_output=True,
             text=True,
+            timeout=120,
         )
         if proc.returncode != 0:
             raise RuntimeError(
@@ -540,7 +541,7 @@ def extract_contact_strip(video_mp4: Path, strip_jpg: Path, num_frames: int = 6)
         "2",
         str(strip_jpg),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if proc.returncode != 0 or not strip_jpg.is_file() or strip_jpg.stat().st_size == 0:
         raise RuntimeError(
             f"ffmpeg strip extraction failed (rc={proc.returncode}): {proc.stderr.strip()}"
@@ -564,7 +565,7 @@ def run_end_to_end_pipeline(
     s2_pro_dir: Path = s2_pro_infer.DEFAULT_S2_PRO_HF_DIR,
     lora_dir: Path | None = s2_pro_infer.DEFAULT_LORA_DIR,
     lora_scale: float = 1.0,
-    codec_pth: Path = s2_pro_infer.DEFAULT_CODEC_PTH,
+    codec_pth: Path | None = s2_pro_infer.DEFAULT_CODEC_PTH,
     codec_tflite: Path = s2_pro_infer.DEFAULT_CODEC_TFLITE,
     master_centroid_path: Path = DEFAULT_MASTER_CENTROID,
     room_ir_path: Path = DEFAULT_ROOM_IR,
@@ -581,6 +582,9 @@ def run_end_to_end_pipeline(
     device: str = "mps",
     skip_video: bool = False,
     candidates_dir: Path | None = None,
+    require_strict_gates: bool = True,
+    max_gate_retries: int = 1,
+    skip_parity: bool = False,
 ) -> dict[str, Any]:
     """Run complete local synthesis, LiteRT FP16 decode, 4-gate scoring, mastering, and video."""
     output_wav = Path(output_wav)
@@ -589,6 +593,9 @@ def run_end_to_end_pipeline(
     report_json.parent.mkdir(parents=True, exist_ok=True)
     cand_dir = Path(candidates_dir) if candidates_dir else (output_wav.parent / "candidates")
     cand_dir.mkdir(parents=True, exist_ok=True)
+    resolved_codec_pth = s2_pro_infer.resolve_pytorch_dac_checkpoint(
+        codec_pth, tflite_path=Path(codec_tflite)
+    )
 
     # Step 1: Encode Ryan's real reference audio(s) via ModdedDAC
     ref_specs: list[tuple[Path, str | None]] = [(Path(ref_wav), ref_text)]
@@ -603,7 +610,7 @@ def run_end_to_end_pipeline(
             flush=True,
         )
         r_codes, r_dur = s2_pro_infer.encode_reference_audio_to_codes(
-            r_wav, codec_pth=Path(codec_pth), device=device
+            r_wav, codec_pth=resolved_codec_pth, device=device
         )
         resolved_txt = (r_txt or "").strip()
         if not resolved_txt:
@@ -656,47 +663,6 @@ def run_end_to_end_pipeline(
         flush=True,
     )
 
-    # Generate N candidates
-    print(
-        f"[3/6] Synthesizing {len(seeds)} candidates "
-        f"(seeds={list(seeds)}, temp={temperature}, top_p={top_p}, top_k={top_k})...",
-        flush=True,
-    )
-    gen_results: list[s2_pro_infer.GenerationResult] = []
-    for seed in seeds:
-        res = s2_pro_infer.generate_dual_ar_codes(
-            model,
-            prompt,
-            seed=int(seed),
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-        )
-        print(
-            f"      seed={res.seed}: frames={res.generated_frames} "
-            f"({res.generated_frames * 2048 / SAMPLE_RATE_HZ:.2f}s) "
-            f"hit_eos={res.hit_eos} elapsed={res.elapsed_sec}s ({res.frames_per_sec} fps)",
-            flush=True,
-        )
-        gen_results.append(res)
-
-    # Free MPS memory from 4.5B Dual-AR before decoding & ONNX verification
-    del model
-    import torch
-
-    if device == "mps" and torch.backends.mps.is_available():
-        torch.mps.empty_cache()
-
-    # Step 3: Decode all candidates via REAL exported FP16 LiteRT codec decoder
-    print(f"[4/6] Decoding {len(gen_results)} takes via {codec_tflite}...", flush=True)
-    decoded_batch = s2_pro_infer.decode_codes_batch_tflite(
-        [g.codes for g in gen_results],
-        tflite_path=Path(codec_tflite),
-    )
-
-    # Step 4: Score all candidates through REAL 4-Gate Verifier
-    print("[5/6] Scoring all candidates with 4-Gate Verifier (whisper-cli + WeSpeaker + DNSMOS)...", flush=True)
     master_centroid = load_master_centroid_bin(Path(master_centroid_path))
     wespeaker = eva.WeSpeakerEngine(Path(wespeaker_onnx))
     dnsmos = eva.DnsmosP808Engine(Path(dnsmos_onnx))
@@ -705,91 +671,240 @@ def run_end_to_end_pipeline(
     candidate_pcms: dict[int, np.ndarray] = {}
     candidate_codes: dict[int, np.ndarray] = {}
 
-    for idx, (gen_res, (pcm_raw, dec_meta)) in enumerate(zip(gen_results, decoded_batch)):
-        take_wav = cand_dir / f"take_{idx}_seed_{gen_res.seed}.wav"
-        take_codes = cand_dir / f"take_{idx}_seed_{gen_res.seed}_codes.npy"
-        sf.write(str(take_wav), np.clip(pcm_raw, -1.0, 1.0), SAMPLE_RATE_HZ, subtype="PCM_16")
-        np.save(take_codes, gen_res.codes)
+    winner: dict[str, Any] | None = None
+    win_idx = 0
+    win_raw_pcm = np.zeros(0, dtype=np.float32)
+    win_codes = np.zeros((s2_pro_infer.NUM_CODEBOOKS, 0), dtype=np.int32)
+    mastered_pcm = np.zeros(0, dtype=np.float32)
+    mastering_meta: dict[str, Any] = {}
+    mastered_gates: dict[str, Any] = {}
+    attempts_run = 0
+    max_attempts = 1 + max(0, int(max_gate_retries))
 
-        gates = evaluate_candidate_4gates(
-            pcm_raw,
-            target_text,
-            master_centroid=master_centroid,
-            wespeaker=wespeaker,
-            dnsmos=dnsmos,
-            whisper_bin=whisper_bin,
-            whisper_model=whisper_model,
+    try:
+        for attempt in range(max_attempts):
+            attempts_run = attempt + 1
+            seed_offset = attempt * 1000
+            attempt_seeds = [int(s) + seed_offset for s in seeds]
+            attempt_temp = max(0.55, float(temperature) - 0.05 * attempt)
+
+            # Generate N candidates while model remains loaded
+            print(
+                f"[3/6] Synthesizing {len(attempt_seeds)} candidates (attempt {attempts_run}/{max_attempts}, "
+                f"seeds={attempt_seeds}, temp={attempt_temp:.2f}, top_p={top_p}, top_k={top_k})...",
+                flush=True,
+            )
+            gen_results: list[s2_pro_infer.GenerationResult] = []
+            for seed in attempt_seeds:
+                res = s2_pro_infer.generate_dual_ar_codes(
+                    model,
+                    prompt,
+                    seed=int(seed),
+                    max_new_tokens=max_new_tokens,
+                    temperature=attempt_temp,
+                    top_p=top_p,
+                    top_k=top_k,
+                )
+                print(
+                    f"      seed={res.seed}: frames={res.generated_frames} "
+                    f"({res.generated_frames * 2048 / SAMPLE_RATE_HZ:.2f}s) "
+                    f"hit_eos={res.hit_eos} elapsed={res.elapsed_sec}s ({res.frames_per_sec} fps)",
+                    flush=True,
+                )
+                gen_results.append(res)
+
+            # Step 3: Decode all candidates via REAL exported FP16 LiteRT codec decoder
+            print(f"[4/6] Decoding {len(gen_results)} takes via {codec_tflite}...", flush=True)
+            decoded_batch = s2_pro_infer.decode_codes_batch_tflite(
+                [g.codes for g in gen_results],
+                tflite_path=Path(codec_tflite),
+            )
+
+            # Step 4: Score all candidates through REAL 4-Gate Verifier
+            print("[5/6] Scoring candidates with 4-Gate Verifier (whisper-cli + WeSpeaker + DNSMOS)...", flush=True)
+            for gen_res, (pcm_raw, dec_meta) in zip(gen_results, decoded_batch):
+                idx = len(candidate_records)
+                take_wav = cand_dir / f"take_{idx}_seed_{gen_res.seed}.wav"
+                take_codes = cand_dir / f"take_{idx}_seed_{gen_res.seed}_codes.npy"
+                sf.write(str(take_wav), np.clip(pcm_raw, -1.0, 1.0), SAMPLE_RATE_HZ, subtype="PCM_16")
+                np.save(take_codes, gen_res.codes)
+
+                gates = evaluate_candidate_4gates(
+                    pcm_raw,
+                    target_text,
+                    master_centroid=master_centroid,
+                    wespeaker=wespeaker,
+                    dnsmos=dnsmos,
+                    whisper_bin=whisper_bin,
+                    whisper_model=whisper_model,
+                )
+                rec = {
+                    "take_index": idx,
+                    "attempt": attempt,
+                    "seed": gen_res.seed,
+                    "wav_path": str(take_wav),
+                    "codes_npy": str(take_codes),
+                    "generation": {
+                        "generated_frames": gen_res.generated_frames,
+                        "hit_eos": gen_res.hit_eos,
+                        "elapsed_sec": gen_res.elapsed_sec,
+                        "frames_per_sec": gen_res.frames_per_sec,
+                        "temperature": gen_res.temperature,
+                        "top_p": gen_res.top_p,
+                        "top_k": gen_res.top_k,
+                        "residual_clamped_count": gen_res.residual_clamped_count,
+                    },
+                    "decode": dec_meta,
+                    "gates": gates,
+                }
+                candidate_records.append(rec)
+                candidate_pcms[idx] = pcm_raw
+                candidate_codes[idx] = gen_res.codes
+                print(
+                    f"      take_{idx} (seed={gen_res.seed}): CER={gates['cer']:.4f} "
+                    f"WeSpeaker={gates['wespeaker_cosine']:.4f} DNSMOS={gates['dnsmos_p808']:.3f} "
+                    f"cadence={gates['syllables_per_sec']:.2f} syl/s tail={gates['tail_rms_dbfs']:.1f} dBFS "
+                    f"text={gates['recognized_text']!r}",
+                    flush=True,
+                )
+
+            winner = select_best_candidate(candidate_records)
+            win_idx = int(winner["take_index"])
+            win_raw_pcm = candidate_pcms[win_idx]
+            win_codes = candidate_codes[win_idx]
+
+            raw_ok = bool(winner["gates"]["passed_all_strict_gates"]) and float(winner["gates"]["cer"]) <= GATE_MAX_CER
+            if not raw_ok and attempt + 1 < max_attempts:
+                print(
+                    f"      Strict raw gates failed on attempt {attempts_run} "
+                    f"({winner['gates']['strict_gate_failures']}); retrying with warm model...",
+                    flush=True,
+                )
+                continue
+
+            # Apply studio mastering (12 ms room IR + -16 LUFS + -58 dBFS room tone) and verify
+            mastered_pcm, mastering_meta = master_synthesized_pcm(
+                win_raw_pcm,
+                room_ir_path=Path(room_ir_path) if room_ir_path is not None else None,
+                room_tone_path=Path(room_tone_path) if room_tone_path is not None else None,
+                target_lufs=-16.0,
+                noise_floor_dbfs=-58.0,
+            )
+            staged_output_wav = cand_dir / f".{output_wav.stem}_staged.wav"
+            sf.write(str(staged_output_wav), np.clip(mastered_pcm, -1.0, 1.0), SAMPLE_RATE_HZ, subtype="PCM_16")
+            mastered_gates = evaluate_candidate_4gates(
+                mastered_pcm,
+                target_text,
+                master_centroid=master_centroid,
+                wespeaker=wespeaker,
+                dnsmos=dnsmos,
+                whisper_bin=whisper_bin,
+                whisper_model=whisper_model,
+            )
+            mastered_ok = (
+                bool(mastered_gates["passed_all_strict_gates"])
+                and float(mastered_gates["cer"]) <= GATE_MAX_CER
+            )
+            if raw_ok and mastered_ok:
+                break
+            if attempt + 1 < max_attempts:
+                print(
+                    f"      Mastered gates failed on attempt {attempts_run} "
+                    f"({mastered_gates['strict_gate_failures']}); retrying with warm model...",
+                    flush=True,
+                )
+    finally:
+        # Free MPS memory from 4.5B Dual-AR after synthesis + gate retries complete
+        del model
+        import torch
+
+        if device == "mps" and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
+    assert winner is not None
+
+    # Measure real PyTorch ModdedDAC vs codec_decoder_fp16.tflite parity on the winning synthesized codes
+    if skip_parity:
+        tflite_vs_pytorch_parity = None
+    else:
+        pt_win_pcm = s2_pro_infer.decode_codes_pytorch_dac(
+            win_codes,
+            codec_pth=resolved_codec_pth,
+            tflite_path=Path(codec_tflite),
+            device="cpu",
         )
-        rec = {
-            "take_index": idx,
-            "seed": gen_res.seed,
-            "wav_path": str(take_wav),
-            "codes_npy": str(take_codes),
-            "generation": {
-                "generated_frames": gen_res.generated_frames,
-                "hit_eos": gen_res.hit_eos,
-                "elapsed_sec": gen_res.elapsed_sec,
-                "frames_per_sec": gen_res.frames_per_sec,
-                "temperature": gen_res.temperature,
-                "top_p": gen_res.top_p,
-                "top_k": gen_res.top_k,
-                "residual_clamped_count": gen_res.residual_clamped_count,
-            },
-            "decode": dec_meta,
-            "gates": gates,
-        }
-        candidate_records.append(rec)
-        candidate_pcms[idx] = pcm_raw
-        candidate_codes[idx] = gen_res.codes
+        tflite_vs_pytorch_parity = s2_pro_infer.compute_waveform_parity(pt_win_pcm, win_raw_pcm)
         print(
-            f"      take_{idx} (seed={gen_res.seed}): CER={gates['cer']:.4f} "
-            f"WeSpeaker={gates['wespeaker_cosine']:.4f} DNSMOS={gates['dnsmos_p808']:.3f} "
-            f"cadence={gates['syllables_per_sec']:.2f} syl/s tail={gates['tail_rms_dbfs']:.1f} dBFS "
-            f"text={gates['recognized_text']!r}",
+            f"      Winning take={win_idx} (seed={winner['seed']}) LiteRT vs PyTorch DAC parity "
+            f"(ckpt={resolved_codec_pth.name}): SNR={tflite_vs_pytorch_parity['snr_db']} dB, "
+            f"r={tflite_vs_pytorch_parity['pearson_corr']}",
             flush=True,
         )
 
-    winner = select_best_candidate(candidate_records)
-    win_idx = int(winner["take_index"])
-    win_raw_pcm = candidate_pcms[win_idx]
-    win_codes = candidate_codes[win_idx]
+    raw_passed = bool(winner["gates"]["passed_all_strict_gates"]) and float(winner["gates"]["cer"]) <= GATE_MAX_CER
+    mastered_passed = bool(mastered_gates["passed_all_strict_gates"]) and float(mastered_gates["cer"]) <= GATE_MAX_CER
+    strict_passed = raw_passed and mastered_passed
 
-    # Measure real PyTorch ModdedDAC vs codec_decoder_fp16.tflite parity on the winning synthesized codes
-    pt_win_pcm = s2_pro_infer.decode_codes_pytorch_dac(
-        win_codes, codec_pth=Path(codec_pth), device="cpu"
-    )
-    tflite_vs_pytorch_parity = s2_pro_infer.compute_waveform_parity(pt_win_pcm, win_raw_pcm)
-    print(
-        f"      Winning take={win_idx} (seed={winner['seed']}) LiteRT vs PyTorch DAC parity: "
-        f"SNR={tflite_vs_pytorch_parity['snr_db']} dB, r={tflite_vs_pytorch_parity['pearson_corr']}",
-        flush=True,
-    )
+    if strict_passed or not require_strict_gates:
+        shutil.move(str(staged_output_wav), str(output_wav))
+        final_wav_path_str = str(output_wav)
+        final_wav_sha256 = eva.sha256_file(output_wav)
+    else:
+        final_wav_path_str = str(staged_output_wav)
+        final_wav_sha256 = eva.sha256_file(staged_output_wav)
 
-    # Apply studio mastering (12 ms room IR + -16 LUFS + -58 dBFS room tone) and save final WAV
-    mastered_pcm, mastering_meta = master_synthesized_pcm(
-        win_raw_pcm,
-        room_ir_path=Path(room_ir_path),
-        room_tone_path=Path(room_tone_path),
-        target_lufs=-16.0,
-        noise_floor_dbfs=-58.0,
-    )
-    sf.write(str(output_wav), np.clip(mastered_pcm, -1.0, 1.0), SAMPLE_RATE_HZ, subtype="PCM_16")
-    mastered_gates = evaluate_candidate_4gates(
-        mastered_pcm,
-        target_text,
-        master_centroid=master_centroid,
-        wespeaker=wespeaker,
-        dnsmos=dnsmos,
-        whisper_bin=whisper_bin,
-        whisper_model=whisper_model,
-    )
     print(
-        f"      Mastered {output_wav}: LUFS={mastering_meta['mastered_lufs']} "
+        f"      Mastered {final_wav_path_str}: LUFS={mastering_meta['mastered_lufs']} "
         f"CER={mastered_gates['cer']:.4f} WeSpeaker={mastered_gates['wespeaker_cosine']:.4f} "
         f"DNSMOS={mastered_gates['dnsmos_p808']:.3f} cadence={mastered_gates['syllables_per_sec']:.2f} syl/s "
         f"tail={mastered_gates['tail_rms_dbfs']:.1f} dBFS",
         flush=True,
     )
+
+    report = {
+        "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "target_text": target_text,
+        "prompt_style": prompt_style,
+        "references": ref_metadata,
+        "model": {
+            "s2_pro_hf_dir": str(s2_pro_dir),
+            "device": device,
+            "lora": dataclasses.asdict(lora_stats) if lora_stats is not None else None,
+            "codec_tflite": str(codec_tflite),
+            "codec_tflite_sha256": eva.sha256_file(Path(codec_tflite)),
+            "codec_pth_resolved": str(resolved_codec_pth),
+        },
+        "sampling": {
+            "seeds": [int(s) for s in seeds],
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "top_k": int(top_k),
+            "max_new_tokens": int(max_new_tokens),
+            "attempts_run": attempts_run,
+        },
+        "strict_gates_passed": strict_passed,
+        "candidates": candidate_records,
+        "selected_take": {
+            "take_index": win_idx,
+            "seed": winner["seed"],
+            "raw_gates": winner["gates"],
+            "tflite_vs_pytorch_dac_parity": tflite_vs_pytorch_parity,
+            "mastering": mastering_meta,
+            "mastered_wav_path": final_wav_path_str,
+            "mastered_wav_sha256": final_wav_sha256,
+            "mastered_gates": mastered_gates,
+        },
+        "video": None,
+    }
+    report_json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(f"[done] Wrote verification report -> {report_json}", flush=True)
+
+    if require_strict_gates and not strict_passed:
+        raise RuntimeError(
+            f"Strict 4-gate verification failed after {attempts_run} attempt(s): "
+            f"raw_failures={winner['gates'].get('strict_gate_failures')} (cer={winner['gates'].get('cer')}), "
+            f"mastered_failures={mastered_gates.get('strict_gate_failures')} (cer={mastered_gates.get('cer')})"
+        )
 
     video_result: dict[str, Any] | None = None
     if not skip_video:
@@ -811,41 +926,9 @@ def run_end_to_end_pipeline(
             f"      Rendered {output_mp4} + {exact_mp4} + strip {extracted}",
             flush=True,
         )
+        report["video"] = video_result
+        report_json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
-    report = {
-        "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "target_text": target_text,
-        "prompt_style": prompt_style,
-        "references": ref_metadata,
-        "model": {
-            "s2_pro_hf_dir": str(s2_pro_dir),
-            "device": device,
-            "lora": dataclasses.asdict(lora_stats) if lora_stats is not None else None,
-            "codec_tflite": str(codec_tflite),
-            "codec_tflite_sha256": eva.sha256_file(Path(codec_tflite)),
-        },
-        "sampling": {
-            "seeds": [int(s) for s in seeds],
-            "temperature": float(temperature),
-            "top_p": float(top_p),
-            "top_k": int(top_k),
-            "max_new_tokens": int(max_new_tokens),
-        },
-        "candidates": candidate_records,
-        "selected_take": {
-            "take_index": win_idx,
-            "seed": winner["seed"],
-            "raw_gates": winner["gates"],
-            "tflite_vs_pytorch_dac_parity": tflite_vs_pytorch_parity,
-            "mastering": mastering_meta,
-            "mastered_wav_path": str(output_wav),
-            "mastered_wav_sha256": eva.sha256_file(output_wav),
-            "mastered_gates": mastered_gates,
-        },
-        "video": video_result,
-    }
-    report_json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"[done] Wrote verification report -> {report_json}", flush=True)
     return report
 
 
@@ -879,38 +962,52 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--strip-jpg", type=Path, default=DEFAULT_STRIP_JPG)
     parser.add_argument("--device", type=str, default="mps")
     parser.add_argument("--skip-video", action="store_true")
+    parser.add_argument(
+        "--allow-gate-failure",
+        action="store_true",
+        help="Allow exit 0 even when strict 4-gate verification fails (diagnostic use only)",
+    )
+    parser.add_argument("--max-gate-retries", type=int, default=1)
+    parser.add_argument("--skip-parity", action="store_true")
     args = parser.parse_args(argv)
 
     seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
     extra_wav = Path(args.extra_ref_wav) if args.extra_ref_wav.strip() else None
-    run_end_to_end_pipeline(
-        target_text=args.target_text,
-        ref_wav=args.ref_wav,
-        ref_text=args.ref_text,
-        extra_ref_wav=extra_wav,
-        extra_ref_text=args.extra_ref_text,
-        prompt_style=args.prompt_style,
-        seeds=seeds,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        max_new_tokens=args.max_new_tokens,
-        s2_pro_dir=args.s2_pro_dir,
-        lora_dir=args.lora_dir,
-        lora_scale=args.lora_scale,
-        codec_pth=args.codec_pth,
-        codec_tflite=args.codec_tflite,
-        master_centroid_path=args.master_centroid,
-        room_ir_path=args.room_ir,
-        room_tone_path=args.room_tone,
-        output_wav=args.output_wav,
-        report_json=args.report_json,
-        avatar_path=args.avatar,
-        output_mp4=args.output_mp4,
-        strip_jpg=args.strip_jpg,
-        device=args.device,
-        skip_video=args.skip_video,
-    )
+    try:
+        run_end_to_end_pipeline(
+            target_text=args.target_text,
+            ref_wav=args.ref_wav,
+            ref_text=args.ref_text,
+            extra_ref_wav=extra_wav,
+            extra_ref_text=args.extra_ref_text,
+            prompt_style=args.prompt_style,
+            seeds=seeds,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            max_new_tokens=args.max_new_tokens,
+            s2_pro_dir=args.s2_pro_dir,
+            lora_dir=args.lora_dir,
+            lora_scale=args.lora_scale,
+            codec_pth=args.codec_pth,
+            codec_tflite=args.codec_tflite,
+            master_centroid_path=args.master_centroid,
+            room_ir_path=args.room_ir,
+            room_tone_path=args.room_tone,
+            output_wav=args.output_wav,
+            report_json=args.report_json,
+            avatar_path=args.avatar,
+            output_mp4=args.output_mp4,
+            strip_jpg=args.strip_jpg,
+            device=args.device,
+            skip_video=args.skip_video,
+            require_strict_gates=not args.allow_gate_failure,
+            max_gate_retries=args.max_gate_retries,
+            skip_parity=args.skip_parity,
+        )
+    except RuntimeError as exc:
+        print(f"[error] {exc}", file=sys.stderr, flush=True)
+        return 1
     return 0
 
 

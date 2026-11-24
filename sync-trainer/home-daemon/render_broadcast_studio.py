@@ -25,6 +25,7 @@ End-to-end production pipeline converting a multi-clause broadcast script into:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import datetime
 import json
@@ -68,8 +69,55 @@ DEFAULT_TARGET_LUFS: float = -16.0
 DEFAULT_NOISE_FLOOR_DBFS: float = -58.0
 DEFAULT_MAX_PHONEME_MS: float = 380.0
 
-DEFAULT_BUNDLE_DIR = Path("/Users/mac/Downloads/voicestudio-models/bundles/v001")
+def _resolve_default_bundle_dir() -> Path:
+    models_root = Path("/Users/mac/Downloads/voicestudio-models")
+    v2 = models_root / "bundles" / "v002"
+    v1 = models_root / "bundles" / "v001"
+    if v2.is_dir() and ((v2 / "lexicon.json").is_file() or (v2 / "codec_decoder_fp16.tflite").is_file()):
+        return v2
+    return v1
+
+
+def _resolve_default_lora_dir() -> Path:
+    v2_lora = Path("/Users/mac/Downloads/voicestudio-models/lora-work-v002/peft_lora_adapter")
+    if (v2_lora / "adapter_config.json").is_file() and (v2_lora / "adapter_model.safetensors").is_file():
+        return v2_lora
+    return s2_pro_infer.DEFAULT_LORA_DIR
+
+
+DEFAULT_BUNDLE_DIR = _resolve_default_bundle_dir()
 DEFAULT_LEXICON_PATH = DEFAULT_BUNDLE_DIR / "lexicon.json"
+DEFAULT_LORA_DIR = _resolve_default_lora_dir()
+DEFAULT_DAC_TFLITE = (
+    DEFAULT_BUNDLE_DIR / "codec_decoder_fp16.tflite"
+    if (DEFAULT_BUNDLE_DIR / "codec_decoder_fp16.tflite").is_file()
+    else s2_pro_infer.DEFAULT_CODEC_TFLITE
+)
+DEFAULT_MASTER_CENTROID = (
+    DEFAULT_BUNDLE_DIR / "master_centroid.bin"
+    if (DEFAULT_BUNDLE_DIR / "master_centroid.bin").is_file()
+    else sar.DEFAULT_MASTER_CENTROID
+)
+DEFAULT_WESPEAKER_ONNX = (
+    DEFAULT_BUNDLE_DIR / "wespeaker_resnet34.onnx"
+    if (DEFAULT_BUNDLE_DIR / "wespeaker_resnet34.onnx").is_file()
+    else eva.DEFAULT_WESPEAKER_ONNX
+)
+DEFAULT_DNSMOS_ONNX = (
+    DEFAULT_BUNDLE_DIR / "dnsmos_p808.onnx"
+    if (DEFAULT_BUNDLE_DIR / "dnsmos_p808.onnx").is_file()
+    else eva.DEFAULT_DNSMOS_P808_ONNX
+)
+DEFAULT_ROOM_IR = (
+    DEFAULT_BUNDLE_DIR / "room_ir_44k.pcm"
+    if (DEFAULT_BUNDLE_DIR / "room_ir_44k.pcm").is_file()
+    else sar.DEFAULT_ROOM_IR
+)
+DEFAULT_ROOM_TONE = (
+    DEFAULT_BUNDLE_DIR / "room_tone_44k.pcm"
+    if (DEFAULT_BUNDLE_DIR / "room_tone_44k.pcm").is_file()
+    else sar.DEFAULT_ROOM_TONE
+)
 DEFAULT_SCHEMA_PATH = _THIS_DIR.parents[1] / "docs" / "swarm" / "schemas" / "clause_node.schema.json"
 
 _COMMA_PAUSE_SEC: float = 0.16
@@ -164,6 +212,8 @@ class PlannedClause:
     estimated_duration_sec: float
     acoustic_prefix_pcm_path: str | None
     base_gap_after_samples: int = DEFAULT_BASE_GAP_SAMPLES
+    parent_clause_id: str | None = None
+    parent_index: int | None = None
 
 
 @dataclasses.dataclass
@@ -455,7 +505,10 @@ def _split_into_sentences(text: str) -> list[str]:
                 while i + 1 < n and trimmed[i + 1] in ".!?…":
                     i += 1
                     cur.append(trimmed[i])
-                next_is_boundary = (i + 1 >= n) or trimmed[i + 1].isspace()
+                lookahead = i + 1
+                while lookahead < n and trimmed[lookahead] in "\"')»”’]":
+                    lookahead += 1
+                next_is_boundary = (lookahead >= n) or trimmed[lookahead].isspace()
                 is_decimal = (
                     ch == "."
                     and i > 0
@@ -567,6 +620,14 @@ def format_clause_id(one_based_index: int) -> str:
     return f"c_{one_based_index:03d}"
 
 
+_SPEAKABLE_TEXT_RE = re.compile(r"[A-Za-z0-9]")
+_OUTER_WORD_PUNCT = " \t\r\n.,!?;:\"“”()[]{}—–"
+
+
+def _has_speakable_text(text: str) -> bool:
+    return bool(_SPEAKABLE_TEXT_RE.search(text))
+
+
 def split_script_into_clauses(
     script_text: str,
     *,
@@ -593,6 +654,7 @@ def split_script_into_clauses(
             max_clause_sec=max_clause_sec,
             conservative_syl_per_sec=conservative_syl_per_sec,
         )
+    raw_clauses = [c for c in raw_clauses if _has_speakable_text(c)]
 
     prefix_dir = takes_dir_prefix.rstrip("/")
     planned: list[PlannedClause] = []
@@ -610,9 +672,75 @@ def split_script_into_clauses(
                 estimated_duration_sec=round(est_sec, 3),
                 acoustic_prefix_pcm_path=prev_prefix,
                 base_gap_after_samples=int(base_gap_after_samples),
+                parent_clause_id=cid,
+                parent_index=idx,
             )
         )
     return planned
+
+
+def plan_caller_clauses(
+    caller_clauses: Sequence[Mapping[str, Any]],
+    *,
+    lexicon: Mapping[str, str] | None = None,
+    phonetic_overrides: Mapping[str, str] | None = None,
+    max_clause_sec: float = TARGET_MAX_CLAUSE_SEC,
+    conservative_syl_per_sec: float = CONSERVATIVE_SYLLABLES_PER_SEC,
+    takes_dir_prefix: str = "takes",
+    base_gap_after_samples: int = DEFAULT_BASE_GAP_SAMPLES,
+) -> tuple[list[PlannedClause], list[dict[str, Any]]]:
+    """Split each caller clause into `< 14.0s` sub-clauses while preserving caller clause IDs."""
+    prefix_dir = takes_dir_prefix.rstrip("/")
+    planned: list[PlannedClause] = []
+    parent_groups: list[dict[str, Any]] = []
+
+    for p_idx, item in enumerate(caller_clauses):
+        parent_id = str(item.get("id") or f"clause_{p_idx}")
+        spoken = str(item.get("spoken_text") or "").strip()
+        if not spoken or not _has_speakable_text(spoken):
+            continue
+        sub_clauses = split_script_into_clauses(
+            spoken,
+            lexicon=lexicon,
+            phonetic_overrides=phonetic_overrides,
+            max_clause_sec=max_clause_sec,
+            conservative_syl_per_sec=conservative_syl_per_sec,
+            takes_dir_prefix=takes_dir_prefix,
+            base_gap_after_samples=base_gap_after_samples,
+        )
+        if not sub_clauses:
+            continue
+        parent_groups.append(
+            {
+                "id": parent_id,
+                "index": len(parent_groups),
+                "spoken_text": spoken,
+                "sub_indices": [],
+            }
+        )
+        group_entry = parent_groups[-1]
+        for sub in sub_clauses:
+            global_idx = len(planned)
+            cid = format_clause_id(global_idx + 1)
+            prev_prefix = (
+                None if global_idx == 0 else f"{prefix_dir}/{format_clause_id(global_idx)}_winner_tail_1500ms.pcm"
+            )
+            planned.append(
+                PlannedClause(
+                    clause_id=cid,
+                    index=global_idx,
+                    raw_text=sub.raw_text,
+                    normalized_phonemes=sub.normalized_phonemes,
+                    estimated_duration_sec=sub.estimated_duration_sec,
+                    acoustic_prefix_pcm_path=prev_prefix,
+                    base_gap_after_samples=sub.base_gap_after_samples,
+                    parent_clause_id=parent_id,
+                    parent_index=int(group_entry["index"]),
+                )
+            )
+            group_entry["sub_indices"].append(global_idx)
+
+    return planned, parent_groups
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +916,7 @@ def align_word_tokens(
     whisper_word_spans: Sequence[tuple[str, int, int]] | None = None,
     sample_rate_hz: int = SAMPLE_RATE_HZ,
     scan_radius: int = ZERO_CROSS_SCAN_SAMPLES,
+    require_real_alignment: bool = False,
 ) -> tuple[list[dict[str, Any]], float]:
     """Produce schema-compliant `WordToken`s with `±88` zero-crossings + `f0PeakSample` + max phoneme ms."""
     arr = np.asarray(pcm44k, dtype=np.float32).reshape(-1)
@@ -807,6 +936,10 @@ def align_word_tokens(
             raw_spans.append((w, cs0, cs1))
 
     if not raw_spans:
+        if require_real_alignment and clause_text.strip():
+            raise RuntimeError(
+                f"Real forced word alignment required but produced zero word spans for clause: {clause_text!r}"
+            )
         words = [w for w in re.findall(r"[A-Za-z0-9']+", clause_text) if w]
         if not words:
             words = [clause_text.strip() or "clause"]
@@ -1177,6 +1310,7 @@ def transcribe_pcm16k_whisper_with_words(
             ],
             capture_output=True,
             text=True,
+            timeout=120,
         )
         if proc.returncode != 0:
             raise RuntimeError(
@@ -1190,47 +1324,58 @@ def transcribe_pcm16k_whisper_with_words(
             else ""
         )
 
-        word_spans: list[tuple[str, int, int]] = []
         json_file = Path(f"{out_prefix}.json")
-        if json_file.is_file():
-            try:
-                data = json.loads(json_file.read_text(encoding="utf-8"))
-                cur_word = ""
-                cur_start_ms: int | None = None
-                cur_end_ms = 0
+        if not json_file.is_file():
+            raise RuntimeError(f"whisper-cli -ojf did not produce JSON alignment file: {json_file}")
 
-                def _flush_word() -> None:
-                    nonlocal cur_word, cur_start_ms, cur_end_ms
-                    cleaned_w = re.sub(r"[^A-Za-z0-9']", "", cur_word)
-                    if cleaned_w and cur_start_ms is not None:
-                        s0 = int(round((cur_start_ms / 1000.0) * sample_rate_hz))
-                        s1 = max(s0, int(round((cur_end_ms / 1000.0) * sample_rate_hz)))
-                        word_spans.append((cleaned_w, s0, s1))
-                    cur_word = ""
-                    cur_start_ms = None
-                    cur_end_ms = 0
+        try:
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Malformed whisper-cli -ojf JSON in {json_file}: {exc}") from exc
 
-                for seg in data.get("transcription", []):
-                    for tok in seg.get("tokens", []):
-                        piece = str(tok.get("text", ""))
-                        if not piece or (piece.startswith("[") and piece.endswith("]")):
-                            continue
-                        offsets = tok.get("offsets") or {}
-                        t_from = int(offsets.get("from", 0))
-                        t_to = int(offsets.get("to", t_from))
-                        if piece[0].isspace():
-                            _flush_word()
-                            cur_word = piece.strip()
-                            cur_start_ms = t_from
-                            cur_end_ms = t_to
-                        else:
-                            if cur_start_ms is None:
-                                cur_start_ms = t_from
-                            cur_word += piece
-                            cur_end_ms = max(cur_end_ms, t_to)
-                _flush_word()
-            except Exception:
-                word_spans = []
+        if not isinstance(data, dict) or not isinstance(data.get("transcription"), list):
+            raise RuntimeError(f"Unexpected whisper-cli -ojf JSON structure in {json_file}")
+
+        word_spans: list[tuple[str, int, int]] = []
+        cur_word = ""
+        cur_start_ms: int | None = None
+        cur_end_ms = 0
+
+        def _flush_word() -> None:
+            nonlocal cur_word, cur_start_ms, cur_end_ms
+            normalized_w = cur_word.replace("\u2019", "'").replace("\u2018", "'")
+            cleaned_w = normalized_w.strip(_OUTER_WORD_PUNCT)
+            if cleaned_w and _SPEAKABLE_TEXT_RE.search(cleaned_w) and cur_start_ms is not None:
+                s0 = int(round((cur_start_ms / 1000.0) * sample_rate_hz))
+                s1 = max(s0, int(round((cur_end_ms / 1000.0) * sample_rate_hz)))
+                word_spans.append((cleaned_w, s0, s1))
+            cur_word = ""
+            cur_start_ms = None
+            cur_end_ms = 0
+
+        for seg in data.get("transcription", []):
+            if not isinstance(seg, dict):
+                continue
+            for tok in seg.get("tokens", []):
+                if not isinstance(tok, dict):
+                    continue
+                piece = str(tok.get("text", ""))
+                if not piece or (piece.startswith("[") and piece.endswith("]")):
+                    continue
+                offsets = tok.get("offsets") or {}
+                t_from = int(offsets.get("from", 0))
+                t_to = int(offsets.get("to", t_from))
+                if piece[0].isspace():
+                    _flush_word()
+                    cur_word = piece.strip()
+                    cur_start_ms = t_from
+                    cur_end_ms = t_to
+                else:
+                    if cur_start_ms is None:
+                        cur_start_ms = t_from
+                    cur_word += piece
+                    cur_end_ms = max(cur_end_ms, t_to)
+            _flush_word()
 
         return transcript, word_spans
 
@@ -1277,6 +1422,7 @@ def concat_mp4_clips_with_master_audio(
             ],
             capture_output=True,
             text=True,
+            timeout=300,
         )
         if proc.returncode != 0 or not output_mp4.is_file() or output_mp4.stat().st_size == 0:
             raise RuntimeError(
@@ -1292,7 +1438,8 @@ def concat_mp4_clips_with_master_audio(
 
 def render_broadcast_studio(
     *,
-    script_text: str,
+    script_text: str = "",
+    caller_clauses: Sequence[Mapping[str, Any]] | None = None,
     project_id: str = "broadcast_studio",
     output_dir: Path,
     takes_per_clause: int = 4,
@@ -1306,23 +1453,23 @@ def render_broadcast_studio(
     lexicon_path: Path | None = DEFAULT_LEXICON_PATH,
     phonetic_overrides: Mapping[str, str] | None = None,
     s2_pro_dir: Path = s2_pro_infer.DEFAULT_S2_PRO_HF_DIR,
-    lora_dir: Path | None = s2_pro_infer.DEFAULT_LORA_DIR,
+    lora_dir: Path | None = DEFAULT_LORA_DIR,
     lora_scale: float = 1.0,
     lora_version: int | None = None,
-    codec_pth: Path = s2_pro_infer.DEFAULT_CODEC_PTH,
-    dac_tflite: Path = s2_pro_infer.DEFAULT_CODEC_TFLITE,
+    codec_pth: Path | None = None,
+    dac_tflite: Path = DEFAULT_DAC_TFLITE,
     ref_wav: Path = sar.DEFAULT_REF_WAV,
     ref_text: str | None = sar.DEFAULT_REF_TEXT,
     extra_ref_wav: Path | None = sar.DEFAULT_EXTRA_REF_WAV,
     extra_ref_text: str | None = sar.DEFAULT_EXTRA_REF_TEXT,
     prompt_style: str = "multiturn",
-    master_centroid_path: Path = sar.DEFAULT_MASTER_CENTROID,
-    wespeaker_onnx: Path = eva.DEFAULT_WESPEAKER_ONNX,
-    dnsmos_onnx: Path = eva.DEFAULT_DNSMOS_P808_ONNX,
+    master_centroid_path: Path = DEFAULT_MASTER_CENTROID,
+    wespeaker_onnx: Path = DEFAULT_WESPEAKER_ONNX,
+    dnsmos_onnx: Path = DEFAULT_DNSMOS_ONNX,
     whisper_bin: Path = sar.DEFAULT_WHISPER_BIN,
     whisper_model: Path = sar.DEFAULT_WHISPER_MODEL,
-    room_ir_path: Path | None = sar.DEFAULT_ROOM_IR,
-    room_tone_path: Path | None = sar.DEFAULT_ROOM_TONE,
+    room_ir_path: Path | None = DEFAULT_ROOM_IR,
+    room_tone_path: Path | None = DEFAULT_ROOM_TONE,
     target_lufs: float = DEFAULT_TARGET_LUFS,
     noise_floor_dbfs: float = DEFAULT_NOISE_FLOOR_DBFS,
     device: str = "mps",
@@ -1333,6 +1480,10 @@ def render_broadcast_studio(
     max_clip_duration: int = 10,
     skip_video: bool = False,
     schema_path: Path = DEFAULT_SCHEMA_PATH,
+    require_strict_gates: bool = True,
+    max_retries_per_clause: int = 2,
+    require_real_alignment: bool | None = None,
+    warm_engine: Any | None = None,
     # Dependency-injection hooks strictly for automated unit testing (None = real models)
     synthesizer_fn: Callable[[PlannedClause, int], Sequence[SynthesizedTakeData]] | None = None,
     verifier_fn: Callable[[np.ndarray, str], dict[str, Any]] | None = None,
@@ -1349,20 +1500,43 @@ def render_broadcast_studio(
     if video_mode not in ("stitched", "per-clause"):
         raise ValueError(f"Unsupported video_mode: {video_mode!r} (expected 'stitched' or 'per-clause')")
 
+    effective_real_align = (verifier_fn is None) if require_real_alignment is None else bool(require_real_alignment)
+    resolved_codec_pth = s2_pro_infer.resolve_pytorch_dac_checkpoint(
+        codec_pth, tflite_path=Path(dac_tflite)
+    )
+
     out_root = Path(output_dir)
     takes_dir = out_root / "takes"
     out_root.mkdir(parents=True, exist_ok=True)
     takes_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Load OTA lexicon.json and split script into < 14s clauses.
+    # 1. Load OTA lexicon.json and split script/caller_clauses into < 14s clauses.
     lexicon = load_lexicon(lexicon_path)
-    planned_clauses = split_script_into_clauses(
-        script_text,
-        lexicon=lexicon,
-        phonetic_overrides=phonetic_overrides,
-        takes_dir_prefix="takes",
-        base_gap_after_samples=base_gap_after_samples,
-    )
+    if caller_clauses is not None:
+        planned_clauses, parent_groups = plan_caller_clauses(
+            caller_clauses,
+            lexicon=lexicon,
+            phonetic_overrides=phonetic_overrides,
+            takes_dir_prefix="takes",
+            base_gap_after_samples=base_gap_after_samples,
+        )
+    else:
+        planned_clauses = split_script_into_clauses(
+            script_text,
+            lexicon=lexicon,
+            phonetic_overrides=phonetic_overrides,
+            takes_dir_prefix="takes",
+            base_gap_after_samples=base_gap_after_samples,
+        )
+        parent_groups = [
+            {
+                "id": c.clause_id,
+                "index": c.index,
+                "spoken_text": c.raw_text,
+                "sub_indices": [c.index],
+            }
+            for c in planned_clauses
+        ]
     if not planned_clauses:
         raise ValueError("Script produced zero spoken clauses.")
 
@@ -1377,79 +1551,43 @@ def render_broadcast_studio(
         else None
     )
 
-    # 2. Synthesize N takes per clause (real s2_pro_infer.py + LiteRT DAC when synthesizer_fn is None).
+    # 2. Initialize real 4-Gate Verifier backends before synthesis so model stays warm for retries.
+    master_centroid = None
+    wespeaker = None
+    dnsmos = None
+    if verifier_fn is None:
+        master_centroid = sar.load_master_centroid_bin(Path(master_centroid_path))
+        wespeaker = eva.WeSpeakerEngine(Path(wespeaker_onnx))
+        dnsmos = eva.DnsmosP808Engine(Path(dnsmos_onnx))
+
+    # 3. Synthesize N takes per clause (keeping model warm through 4-gate verification & retries).
     clause_raw_takes: dict[str, list[SynthesizedTakeData]] = {}
     lora_stats_dict: dict[str, Any] | None = None
+    model: Any = None
+    tokenizer: Any = None
+    ref_turns: list[tuple[str, np.ndarray]] = []
+    owns_model = False
 
-    if synthesizer_fn is not None:
-        for clause in planned_clauses:
-            clause_raw_takes[clause.clause_id] = list(synthesizer_fn(clause, takes_per_clause))
-    else:
-        ref_specs: list[tuple[Path, str | None]] = [(Path(ref_wav), ref_text)]
-        if extra_ref_wav is not None and str(extra_ref_wav).strip() and Path(extra_ref_wav).is_file():
-            ref_specs.append((Path(extra_ref_wav), extra_ref_text))
-
-        ref_turns: list[tuple[str, np.ndarray]] = []
-        for r_wav, r_txt in ref_specs:
-            r_codes, _ = s2_pro_infer.encode_reference_audio_to_codes(
-                r_wav, codec_pth=Path(codec_pth), device=device
-            )
-            resolved_txt = (r_txt or "").strip()
-            if not resolved_txt:
-                r_pcm16, _ = eva.load_audio_mono(r_wav, target_sr=VERIFIER_SR_HZ)
-                resolved_txt = sar.transcribe_pcm16k_whisper(
-                    r_pcm16, whisper_bin=whisper_bin, whisper_model=whisper_model
-                )
-            ref_turns.append((resolved_txt, r_codes))
-
-        effective_lora_dir = None if (lora_dir is None or lora_scale == 0.0) else Path(lora_dir)
-        model, tokenizer, lora_stats = s2_pro_infer.load_s2_pro_dual_ar(
-            Path(s2_pro_dir),
-            lora_dir=effective_lora_dir,
-            lora_scale=lora_scale,
-            device=device,
+    def _dynamic_clause_tokens(clause: PlannedClause) -> int:
+        return max(
+            int(max_new_tokens),
+            min(420, int(round(clause.estimated_duration_sec * 21.5 * 1.45))),
         )
-        if lora_stats is not None:
-            lora_stats_dict = dataclasses.asdict(lora_stats)
 
-        all_gen_items: list[tuple[str, s2_pro_infer.GenerationResult]] = []
-        for clause in planned_clauses:
-            prompt = s2_pro_infer.build_s2_pro_prompt_tensor(
-                tokenizer,
-                clause.raw_text,
-                ref_turns=ref_turns,
-                prompt_style=prompt_style,
-            )
-            for t_idx in range(takes_per_clause):
-                seed = int(base_seed) + clause.index * 100 + t_idx
-                gen_res = s2_pro_infer.generate_dual_ar_codes(
-                    model,
-                    prompt,
-                    seed=seed,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                )
-                all_gen_items.append((clause.clause_id, gen_res))
-
-        del model
-        import torch
-
-        if device == "mps" and torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-
+    def _decode_gen_items_to_takes(
+        items: Sequence[tuple[str, s2_pro_infer.GenerationResult]],
+    ) -> dict[str, list[SynthesizedTakeData]]:
         decoded_batch = s2_pro_infer.decode_codes_batch_tflite(
-            [g.codes for _, g in all_gen_items],
+            [g.codes for _, g in items],
             tflite_path=Path(dac_tflite),
         )
-        for (cid, gen_res), (pcm_raw, dec_meta) in zip(all_gen_items, decoded_batch):
-            # Log codebook-0 semantic token IDs (151678 + code0) for Tinker OPSD/GRPO parity.
+        out_map: dict[str, list[SynthesizedTakeData]] = {}
+        for (cid, gen_res), (pcm_raw, dec_meta) in zip(items, decoded_batch):
             sem_tokens = [
                 int(s2_pro_infer.SEMANTIC_START_TOKEN_ID + int(c))
                 for c in np.asarray(gen_res.codes[0], dtype=np.int64).reshape(-1).tolist()
             ]
-            clause_raw_takes.setdefault(cid, []).append(
+            out_map.setdefault(cid, []).append(
                 SynthesizedTakeData(
                     pcm44k=np.asarray(pcm_raw, dtype=np.float32),
                     discrete_audio_tokens=sem_tokens,
@@ -1464,206 +1602,332 @@ def render_broadcast_studio(
                     decode_meta=dict(dec_meta),
                 )
             )
+        return out_map
 
-    # 3. Initialize real 4-Gate Verifier backends if no test hook was injected.
-    master_centroid = None
-    wespeaker = None
-    dnsmos = None
-    if verifier_fn is None:
-        master_centroid = sar.load_master_centroid_bin(Path(master_centroid_path))
-        wespeaker = eva.WeSpeakerEngine(Path(wespeaker_onnx))
-        dnsmos = eva.DnsmosP808Engine(Path(dnsmos_onnx))
-
-    # 4. Master each take, score all takes through the 4-Gate Verifier, pick winners,
-    #    persist 64-byte-aligned .pcm takes + 1.5s acoustic prefix tails, and build ClauseNodes.
     manifest_clauses: list[dict[str, Any]] = []
     winning_slices: list[SpliceSlice] = []
     clause_reports: list[dict[str, Any]] = []
     clause_winner_wavs: list[tuple[PlannedClause, Path]] = []
+    clause_winner_tokens: list[list[dict[str, Any]]] = []
 
-    for clause in planned_clauses:
-        takes = clause_raw_takes.get(clause.clause_id, [])
-        if not takes:
-            raise RuntimeError(f"Zero synthesized takes produced for clause {clause.clause_id}")
+    warm_lock_stack = contextlib.ExitStack()
+    try:
+        if synthesizer_fn is not None:
+            for clause in planned_clauses:
+                clause_raw_takes[clause.clause_id] = list(synthesizer_fn(clause, takes_per_clause))
+        else:
+            ref_specs: list[tuple[Path, str | None]] = [(Path(ref_wav), ref_text)]
+            if extra_ref_wav is not None and str(extra_ref_wav).strip() and Path(extra_ref_wav).is_file():
+                ref_specs.append((Path(extra_ref_wav), extra_ref_text))
 
-        candidate_manifest_entries: list[dict[str, Any]] = []
-        candidate_scoring_records: list[dict[str, Any]] = []
-        mastered_take_pcms: list[np.ndarray] = []
+            for r_wav, r_txt in ref_specs:
+                r_codes, _ = s2_pro_infer.encode_reference_audio_to_codes(
+                    r_wav, codec_pth=resolved_codec_pth, device=device
+                )
+                resolved_txt = (r_txt or "").strip()
+                if not resolved_txt:
+                    r_pcm16, _ = eva.load_audio_mono(r_wav, target_sr=VERIFIER_SR_HZ)
+                    resolved_txt = sar.transcribe_pcm16k_whisper(
+                        r_pcm16, whisper_bin=whisper_bin, whisper_model=whisper_model
+                    )
+                ref_turns.append((resolved_txt, r_codes))
 
-        for t_idx, take in enumerate(takes):
-            take_id = f"{clause.clause_id}_t{t_idx}"
-            mastered_pcm, master_meta = sar.master_synthesized_pcm(
-                take.pcm44k,
-                room_ir_path=Path(room_ir_path) if (room_ir_path and Path(room_ir_path).is_file()) else None,
-                room_tone_path=Path(room_tone_path) if (room_tone_path and Path(room_tone_path).is_file()) else None,
-                target_lufs=target_lufs,
-                noise_floor_dbfs=noise_floor_dbfs,
-            )
-
-            pcm_rel_path = f"takes/{take_id}.pcm"
-            pcm_abs_path = out_root / pcm_rel_path
-            pcm_bytes = write_aligned_pcm_44k(pcm_abs_path, mastered_pcm)
-
-            whisper_word_spans: list[tuple[str, int, int]] | None = None
-            if verifier_fn is not None:
-                gate_res = dict(verifier_fn(mastered_pcm, clause.raw_text))
+            effective_lora_dir = None if (lora_dir is None or lora_scale == 0.0) else Path(lora_dir)
+            if warm_engine is not None:
+                warm_lock_stack.enter_context(warm_engine.lock)
+                model, tokenizer, lora_stats = warm_engine.get_or_load(
+                    Path(s2_pro_dir),
+                    lora_dir=effective_lora_dir,
+                    lora_scale=lora_scale,
+                    device=device,
+                )
+                owns_model = False
             else:
-                assert master_centroid is not None and wespeaker is not None and dnsmos is not None
-                pcm16k = eva.resample_44k_to_16k_android_exact(
-                    mastered_pcm, SAMPLE_RATE_HZ, VERIFIER_SR_HZ
+                model, tokenizer, lora_stats = s2_pro_infer.load_s2_pro_dual_ar(
+                    Path(s2_pro_dir),
+                    lora_dir=effective_lora_dir,
+                    lora_scale=lora_scale,
+                    device=device,
                 )
-                transcript, whisper_word_spans = transcribe_pcm16k_whisper_with_words(
-                    pcm16k, whisper_bin=whisper_bin, whisper_model=whisper_model
-                )
-                cer = float(eva.compute_cer(clause.raw_text, transcript))
-                emb = wespeaker.extract_embedding(pcm16k)
-                speaker_cos = float(eva.cosine_similarity(emb, master_centroid))
-                dnsmos_p808 = float(dnsmos.score_p808(pcm16k))
-                tail_rms_db = sar.compute_tail_rms_dbfs(mastered_pcm, tail_ms=80, sample_rate_hz=SAMPLE_RATE_HZ)
-                _, _, active_samples = sar.measure_active_speech_samples(
-                    mastered_pcm, sample_rate_hz=SAMPLE_RATE_HZ
-                )
-                total_syllables = sar.count_transcript_syllables(clause.raw_text)
-                syllables_per_sec = float(total_syllables) / max(
-                    float(active_samples) / float(SAMPLE_RATE_HZ), 1e-6
-                )
-                norm_mos = max(0.0, min(1.0, dnsmos_p808 / 5.0))
-                ranking_score = 1.5 * speaker_cos + 0.5 * norm_mos - 3.0 * cer
-                gate_res = {
-                    "recognized_text": transcript,
-                    "cer": round(cer, 5),
-                    "wespeaker_cosine": round(speaker_cos, 5),
-                    "dnsmos_p808": round(dnsmos_p808, 4),
-                    "tail_rms_dbfs": round(tail_rms_db, 2),
-                    "syllables_per_sec": round(syllables_per_sec, 3),
-                    "ranking_score": round(ranking_score, 5),
-                }
+                owns_model = True
+            if lora_stats is not None:
+                lora_stats_dict = dataclasses.asdict(lora_stats)
 
-            word_tokens, computed_max_phoneme_ms = align_word_tokens(
-                mastered_pcm,
-                clause.raw_text,
-                whisper_word_spans=whisper_word_spans,
-                sample_rate_hz=SAMPLE_RATE_HZ,
-                scan_radius=ZERO_CROSS_SCAN_SAMPLES,
+            all_gen_items: list[tuple[str, s2_pro_infer.GenerationResult]] = []
+            for clause in planned_clauses:
+                prompt = s2_pro_infer.build_s2_pro_prompt_tensor(
+                    tokenizer,
+                    clause.raw_text,
+                    ref_turns=ref_turns,
+                    prompt_style=prompt_style,
+                )
+                clause_tokens_cap = _dynamic_clause_tokens(clause)
+                for t_idx in range(takes_per_clause):
+                    seed = int(base_seed) + clause.index * 100 + t_idx
+                    gen_res = s2_pro_infer.generate_dual_ar_codes(
+                        model,
+                        prompt,
+                        seed=seed,
+                        max_new_tokens=clause_tokens_cap,
+                        temperature=temperature,
+                        top_p=top_p,
+                        top_k=top_k,
+                    )
+                    all_gen_items.append((clause.clause_id, gen_res))
+
+            clause_raw_takes.update(_decode_gen_items_to_takes(all_gen_items))
+
+        # 4. Master each take, score through 4-Gate Verifier, retry failed clauses while model is warm.
+        for clause in planned_clauses:
+            initial_takes = clause_raw_takes.get(clause.clause_id, [])
+            if not initial_takes:
+                raise RuntimeError(f"Zero synthesized takes produced for clause {clause.clause_id}")
+
+            candidate_manifest_entries: list[dict[str, Any]] = []
+            candidate_scoring_records: list[dict[str, Any]] = []
+            mastered_take_pcms: list[np.ndarray] = []
+
+            def _score_takes(takes_batch: Sequence[SynthesizedTakeData]) -> None:
+                for take in takes_batch:
+                    t_idx = len(candidate_scoring_records)
+                    take_id = f"{clause.clause_id}_t{t_idx}"
+                    mastered_pcm, master_meta = sar.master_synthesized_pcm(
+                        take.pcm44k,
+                        room_ir_path=Path(room_ir_path) if (room_ir_path and Path(room_ir_path).is_file()) else None,
+                        room_tone_path=Path(room_tone_path) if (room_tone_path and Path(room_tone_path).is_file()) else None,
+                        target_lufs=target_lufs,
+                        noise_floor_dbfs=noise_floor_dbfs,
+                    )
+
+                    pcm_rel_path = f"takes/{take_id}.pcm"
+                    pcm_abs_path = out_root / pcm_rel_path
+                    pcm_bytes = write_aligned_pcm_44k(pcm_abs_path, mastered_pcm)
+
+                    whisper_word_spans: list[tuple[str, int, int]] | None = None
+                    if verifier_fn is not None:
+                        gate_res = dict(verifier_fn(mastered_pcm, clause.raw_text))
+                        if gate_res.get("word_spans") is not None:
+                            whisper_word_spans = list(gate_res["word_spans"])
+                    else:
+                        assert master_centroid is not None and wespeaker is not None and dnsmos is not None
+                        pcm16k = eva.resample_44k_to_16k_android_exact(
+                            mastered_pcm, SAMPLE_RATE_HZ, VERIFIER_SR_HZ
+                        )
+                        transcript, whisper_word_spans = transcribe_pcm16k_whisper_with_words(
+                            pcm16k, whisper_bin=whisper_bin, whisper_model=whisper_model
+                        )
+                        cer = float(eva.compute_cer(clause.raw_text, transcript))
+                        emb = wespeaker.extract_embedding(pcm16k)
+                        speaker_cos = float(eva.cosine_similarity(emb, master_centroid))
+                        dnsmos_p808 = float(dnsmos.score_p808(pcm16k))
+                        tail_rms_db = sar.compute_tail_rms_dbfs(mastered_pcm, tail_ms=80, sample_rate_hz=SAMPLE_RATE_HZ)
+                        _, _, active_samples = sar.measure_active_speech_samples(
+                            mastered_pcm, sample_rate_hz=SAMPLE_RATE_HZ
+                        )
+                        total_syllables = sar.count_transcript_syllables(clause.raw_text)
+                        syllables_per_sec = float(total_syllables) / max(
+                            float(active_samples) / float(SAMPLE_RATE_HZ), 1e-6
+                        )
+                        norm_mos = max(0.0, min(1.0, dnsmos_p808 / 5.0))
+                        ranking_score = 1.5 * speaker_cos + 0.5 * norm_mos - 3.0 * cer
+                        gate_res = {
+                            "recognized_text": transcript,
+                            "cer": round(cer, 5),
+                            "wespeaker_cosine": round(speaker_cos, 5),
+                            "dnsmos_p808": round(dnsmos_p808, 4),
+                            "tail_rms_dbfs": round(tail_rms_db, 2),
+                            "syllables_per_sec": round(syllables_per_sec, 3),
+                            "ranking_score": round(ranking_score, 5),
+                        }
+
+                    word_tokens, computed_max_phoneme_ms = align_word_tokens(
+                        mastered_pcm,
+                        clause.raw_text,
+                        whisper_word_spans=whisper_word_spans,
+                        sample_rate_hz=SAMPLE_RATE_HZ,
+                        scan_radius=ZERO_CROSS_SCAN_SAMPLES,
+                        require_real_alignment=effective_real_align,
+                    )
+
+                    cer_val = max(0.0, float(gate_res["cer"]))
+                    max_ph_ms = max(0.0, float(gate_res.get("max_phoneme_duration_ms", computed_max_phoneme_ms)))
+                    spk_cos = max(-1.0, min(1.0, float(gate_res["wespeaker_cosine"])))
+                    mos_val = max(0.0, min(5.0, float(gate_res["dnsmos_p808"])))
+                    tail_db = float(gate_res["tail_rms_dbfs"])
+                    syl_s = max(0.0, float(gate_res["syllables_per_sec"]))
+
+                    passed_all = (
+                        cer_val <= sar.GATE_MAX_CER
+                        and max_ph_ms <= DEFAULT_MAX_PHONEME_MS
+                        and spk_cos >= sar.GATE_MIN_SPEAKER_COS
+                        and mos_val >= sar.GATE_MIN_DNSMOS_P808
+                        and tail_db <= sar.GATE_MAX_TAIL_RMS_DBFS
+                        and (sar.GATE_MIN_SYLLABLES_PER_SEC <= syl_s <= sar.GATE_MAX_SYLLABLES_PER_SEC)
+                    )
+                    ranking_score = float(
+                        gate_res.get(
+                            "ranking_score",
+                            1.5 * spk_cos + 0.5 * max(0.0, min(1.0, mos_val / 5.0)) - 3.0 * cer_val,
+                        )
+                    )
+
+                    metrics_obj = {
+                        "cer": round(cer_val, 5),
+                        "maxPhonemeDurationMs": round(max_ph_ms, 2),
+                        "speakerCosineSim": round(spk_cos, 5),
+                        "dnsmosP808": round(mos_val, 4),
+                        "tailRmsDb": round(tail_db, 2),
+                        "syllablesPerSec": round(syl_s, 3),
+                        "passedAllGates": bool(passed_all),
+                    }
+
+                    candidate_manifest_entries.append(
+                        {
+                            "takeId": take_id,
+                            "pcmFilePath": pcm_rel_path,
+                            "totalSamples": int(mastered_pcm.size),
+                            "discreteAudioTokens": [int(x) for x in take.discrete_audio_tokens],
+                            "seed": int(take.seed),
+                            "temperature": float(max(0.0, min(2.0, take.temperature))),
+                            "metrics": metrics_obj,
+                            "tokens": word_tokens,
+                        }
+                    )
+                    candidate_scoring_records.append(
+                        {
+                            "take_index": t_idx,
+                            "take_id": take_id,
+                            "pcm_bytes": pcm_bytes,
+                            "mastering": master_meta,
+                            "gates": {
+                                "passed_all_strict_gates": bool(passed_all),
+                                "ranking_score": ranking_score,
+                                "cer": cer_val,
+                                "wespeaker_cosine": spk_cos,
+                                "dnsmos_p808": mos_val,
+                                "tail_rms_dbfs": tail_db,
+                                "syllables_per_sec": syl_s,
+                                "max_phoneme_duration_ms": max_ph_ms,
+                            },
+                        }
+                    )
+                    mastered_take_pcms.append(mastered_pcm)
+
+            _score_takes(initial_takes)
+
+            # Warm retry loop if strict gates failed on all initial takes for this clause
+            def _has_strict_pass() -> bool:
+                return any(
+                    bool(r["gates"]["passed_all_strict_gates"]) and float(r["gates"]["cer"]) <= sar.GATE_MAX_CER
+                    for r in candidate_scoring_records
+                )
+
+            for retry_idx in range(1, max(0, int(max_retries_per_clause)) + 1):
+                if not require_strict_gates or _has_strict_pass():
+                    break
+                if synthesizer_fn is not None:
+                    retry_takes = list(synthesizer_fn(clause, takes_per_clause))
+                else:
+                    prompt = s2_pro_infer.build_s2_pro_prompt_tensor(
+                        tokenizer,
+                        clause.raw_text,
+                        ref_turns=ref_turns,
+                        prompt_style=prompt_style,
+                    )
+                    clause_tokens_cap = _dynamic_clause_tokens(clause)
+                    retry_temp = max(0.55, float(temperature) - 0.05 * retry_idx)
+                    retry_gen_items: list[tuple[str, s2_pro_infer.GenerationResult]] = []
+                    for t_idx in range(takes_per_clause):
+                        retry_seed = int(base_seed) + clause.index * 100 + retry_idx * 1000 + t_idx
+                        gen_res = s2_pro_infer.generate_dual_ar_codes(
+                            model,
+                            prompt,
+                            seed=retry_seed,
+                            max_new_tokens=clause_tokens_cap,
+                            temperature=retry_temp,
+                            top_p=top_p,
+                            top_k=top_k,
+                        )
+                        retry_gen_items.append((clause.clause_id, gen_res))
+                    retry_takes = _decode_gen_items_to_takes(retry_gen_items).get(clause.clause_id, [])
+                if retry_takes:
+                    _score_takes(retry_takes)
+
+            winner_rec = sar.select_best_candidate(candidate_scoring_records)
+            win_gates = winner_rec["gates"]
+            if require_strict_gates and (
+                not bool(win_gates["passed_all_strict_gates"]) or float(win_gates["cer"]) > sar.GATE_MAX_CER
+            ):
+                raise RuntimeError(
+                    f"Clause {clause.clause_id} failed strict 4-gate verification after retries: "
+                    f"cer={win_gates['cer']}, wespeaker={win_gates['wespeaker_cosine']}, "
+                    f"dnsmos={win_gates['dnsmos_p808']}, tail_rms={win_gates['tail_rms_dbfs']}, "
+                    f"syl_s={win_gates['syllables_per_sec']}, max_phoneme_ms={win_gates['max_phoneme_duration_ms']}"
+                )
+
+            win_idx = int(winner_rec["take_index"])
+            win_pcm = mastered_take_pcms[win_idx]
+            win_entry = candidate_manifest_entries[win_idx]
+            win_tokens = win_entry["tokens"]
+
+            # Persist 64-byte-aligned trailing 1.5s acoustic prefix tail for the next clause.
+            tail_pcm = extract_acoustic_prefix_tail(win_pcm, ACOUSTIC_PREFIX_TAIL_SAMPLES)
+            tail_path = takes_dir / f"{clause.clause_id}_winner_tail_1500ms.pcm"
+            write_aligned_pcm_44k(tail_path, tail_pcm)
+
+            # Save winning clause WAV (for inspection & per-clause talking-head rendering).
+            clause_wav_path = out_root / f"{clause.clause_id}_winner.wav"
+            sf.write(str(clause_wav_path), np.clip(win_pcm, -1.0, 1.0), SAMPLE_RATE_HZ, subtype="PCM_16")
+            clause_winner_wavs.append((clause, clause_wav_path))
+            clause_winner_tokens.append(list(win_tokens))
+
+            zc_in = int(win_tokens[0]["zeroCrossIn"]) if win_tokens else 0
+            zc_out = int(win_tokens[-1]["zeroCrossOut"]) if win_tokens else int(win_pcm.size - 1)
+            winning_slices.append(
+                SpliceSlice(
+                    clause_id=clause.clause_id,
+                    pcm44k=win_pcm,
+                    zero_cross_in=zc_in,
+                    zero_cross_out=zc_out,
+                    base_gap_after_samples=clause.base_gap_after_samples,
+                )
             )
 
-            cer_val = max(0.0, float(gate_res["cer"]))
-            max_ph_ms = max(0.0, float(gate_res.get("max_phoneme_duration_ms", computed_max_phoneme_ms)))
-            spk_cos = max(-1.0, min(1.0, float(gate_res["wespeaker_cosine"])))
-            mos_val = max(0.0, min(5.0, float(gate_res["dnsmos_p808"])))
-            tail_db = float(gate_res["tail_rms_dbfs"])
-            syl_s = max(0.0, float(gate_res["syllables_per_sec"]))
-
-            passed_all = (
-                cer_val <= sar.GATE_MAX_CER
-                and max_ph_ms <= DEFAULT_MAX_PHONEME_MS
-                and spk_cos >= sar.GATE_MIN_SPEAKER_COS
-                and mos_val >= sar.GATE_MIN_DNSMOS_P808
-                and tail_db <= sar.GATE_MAX_TAIL_RMS_DBFS
-                and (sar.GATE_MIN_SYLLABLES_PER_SEC <= syl_s <= sar.GATE_MAX_SYLLABLES_PER_SEC)
-            )
-            ranking_score = float(
-                gate_res.get(
-                    "ranking_score",
-                    1.5 * spk_cos + 0.5 * max(0.0, min(1.0, mos_val / 5.0)) - 3.0 * cer_val,
-                )
-            )
-
-            metrics_obj = {
-                "cer": round(cer_val, 5),
-                "maxPhonemeDurationMs": round(max_ph_ms, 2),
-                "speakerCosineSim": round(spk_cos, 5),
-                "dnsmosP808": round(mos_val, 4),
-                "tailRmsDb": round(tail_db, 2),
-                "syllablesPerSec": round(syl_s, 3),
-                "passedAllGates": bool(passed_all),
-            }
-
-            candidate_manifest_entries.append(
+            manifest_clauses.append(
                 {
-                    "takeId": take_id,
-                    "pcmFilePath": pcm_rel_path,
-                    "totalSamples": int(mastered_pcm.size),
-                    "discreteAudioTokens": [int(x) for x in take.discrete_audio_tokens],
-                    "seed": int(take.seed),
-                    "temperature": float(max(0.0, min(2.0, take.temperature))),
-                    "metrics": metrics_obj,
-                    "tokens": word_tokens,
+                    "clauseId": clause.clause_id,
+                    "index": int(clause.index),
+                    "rawText": clause.raw_text,
+                    "normalizedPhonemes": clause.normalized_phonemes,
+                    "acousticPrefixPcmPath": clause.acoustic_prefix_pcm_path,
+                    "selectedTakeIndex": win_idx,
+                    "baseGapAfterSamples": int(clause.base_gap_after_samples),
+                    "candidates": candidate_manifest_entries,
                 }
             )
-            candidate_scoring_records.append(
+            clause_reports.append(
                 {
-                    "take_index": t_idx,
-                    "take_id": take_id,
-                    "pcm_bytes": pcm_bytes,
-                    "mastering": master_meta,
-                    "gates": {
-                        "passed_all_strict_gates": bool(passed_all),
-                        "ranking_score": ranking_score,
-                        "cer": cer_val,
-                        "wespeaker_cosine": spk_cos,
-                        "dnsmos_p808": mos_val,
-                        "tail_rms_dbfs": tail_db,
-                        "syllables_per_sec": syl_s,
-                        "max_phoneme_duration_ms": max_ph_ms,
-                    },
+                    "clause_id": clause.clause_id,
+                    "parent_clause_id": clause.parent_clause_id,
+                    "parent_index": clause.parent_index,
+                    "raw_text": clause.raw_text,
+                    "normalized_phonemes": clause.normalized_phonemes,
+                    "estimated_duration_sec": clause.estimated_duration_sec,
+                    "selected_take_index": win_idx,
+                    "winner_take_id": win_entry["takeId"],
+                    "winner_wav": str(clause_wav_path),
+                    "winner_metrics": win_entry["metrics"],
+                    "candidates": candidate_scoring_records,
                 }
             )
-            mastered_take_pcms.append(mastered_pcm)
+    finally:
+        warm_lock_stack.close()
+        if owns_model and model is not None:
+            del model
+            import torch
 
-        winner_rec = sar.select_best_candidate(candidate_scoring_records)
-        win_idx = int(winner_rec["take_index"])
-        win_pcm = mastered_take_pcms[win_idx]
-        win_entry = candidate_manifest_entries[win_idx]
-        win_tokens = win_entry["tokens"]
-
-        # Persist 64-byte-aligned trailing 1.5s acoustic prefix tail for the next clause.
-        tail_pcm = extract_acoustic_prefix_tail(win_pcm, ACOUSTIC_PREFIX_TAIL_SAMPLES)
-        tail_path = takes_dir / f"{clause.clause_id}_winner_tail_1500ms.pcm"
-        write_aligned_pcm_44k(tail_path, tail_pcm)
-
-        # Save winning clause WAV (for inspection & per-clause talking-head rendering).
-        clause_wav_path = out_root / f"{clause.clause_id}_winner.wav"
-        sf.write(str(clause_wav_path), np.clip(win_pcm, -1.0, 1.0), SAMPLE_RATE_HZ, subtype="PCM_16")
-        clause_winner_wavs.append((clause, clause_wav_path))
-
-        zc_in = int(win_tokens[0]["zeroCrossIn"]) if win_tokens else 0
-        zc_out = int(win_tokens[-1]["zeroCrossOut"]) if win_tokens else int(win_pcm.size - 1)
-        winning_slices.append(
-            SpliceSlice(
-                clause_id=clause.clause_id,
-                pcm44k=win_pcm,
-                zero_cross_in=zc_in,
-                zero_cross_out=zc_out,
-                base_gap_after_samples=clause.base_gap_after_samples,
-            )
-        )
-
-        manifest_clauses.append(
-            {
-                "clauseId": clause.clause_id,
-                "index": int(clause.index),
-                "rawText": clause.raw_text,
-                "normalizedPhonemes": clause.normalized_phonemes,
-                "acousticPrefixPcmPath": clause.acoustic_prefix_pcm_path,
-                "selectedTakeIndex": win_idx,
-                "baseGapAfterSamples": int(clause.base_gap_after_samples),
-                "candidates": candidate_manifest_entries,
-            }
-        )
-        clause_reports.append(
-            {
-                "clause_id": clause.clause_id,
-                "raw_text": clause.raw_text,
-                "normalized_phonemes": clause.normalized_phonemes,
-                "estimated_duration_sec": clause.estimated_duration_sec,
-                "selected_take_index": win_idx,
-                "winner_take_id": win_entry["takeId"],
-                "winner_wav": str(clause_wav_path),
-                "winner_metrics": win_entry["metrics"],
-                "candidates": candidate_scoring_records,
-            }
-        )
+            if device == "mps" and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
 
     # 5. Splice all winning clauses with +/-88 zero-crossings & 660-sample equal-power crossfades.
     stitched_pcm, splice_meta = splice_clauses_edl(
@@ -1684,6 +1948,119 @@ def render_broadcast_studio(
     master_pcm_path = out_root / f"{project_id}_master.pcm"
     sf.write(str(master_wav_path), np.clip(stitched_pcm, -1.0, 1.0), SAMPLE_RATE_HZ, subtype="PCM_16")
     master_pcm_bytes = write_aligned_pcm_44k(master_pcm_path, stitched_pcm)
+
+    duration_ms = max(1, int(round((int(stitched_pcm.size) * 1000.0) / float(SAMPLE_RATE_HZ))))
+    clause_boundaries = splice_meta.get("clause_boundaries") or []
+
+    # Project winning clause forced word spans onto the stitched master timeline.
+    aligned_words: list[dict[str, Any]] = []
+    prev_end_ms = 0
+    for c_idx, win_tokens in enumerate(clause_winner_tokens):
+        if c_idx >= len(clause_boundaries):
+            break
+        b = clause_boundaries[c_idx]
+        b_start = int(b["startSample"])
+        b_end = int(b["activeEndSample"])
+        b_zc_in = int(b["zeroCrossIn"])
+        for tok in win_tokens:
+            word_txt = str(tok.get("word") or "").strip()
+            if not word_txt:
+                continue
+            local_s0 = int(tok["startSample"])
+            local_s1 = int(tok["endSample"])
+            global_s0 = max(b_start, min(b_end, b_start + (local_s0 - b_zc_in)))
+            global_s1 = max(global_s0, min(b_end, b_start + (local_s1 - b_zc_in)))
+            raw_start_ms = int(round((global_s0 * 1000.0) / float(SAMPLE_RATE_HZ)))
+            raw_end_ms = int(round((global_s1 * 1000.0) / float(SAMPLE_RATE_HZ)))
+            start_ms = max(prev_end_ms, min(duration_ms, raw_start_ms))
+            end_ms = max(start_ms, min(duration_ms, raw_end_ms))
+            prev_end_ms = end_ms
+            aligned_words.append(
+                {
+                    "word": word_txt,
+                    "start_ms": int(start_ms),
+                    "end_ms": int(end_ms),
+                }
+            )
+
+    if effective_real_align and not aligned_words and stitched_pcm.size > 0:
+        pcm16k_master = eva.resample_44k_to_16k_android_exact(
+            stitched_pcm, SAMPLE_RATE_HZ, VERIFIER_SR_HZ
+        )
+        _, master_spans = transcribe_pcm16k_whisper_with_words(
+            pcm16k_master,
+            whisper_bin=whisper_bin,
+            whisper_model=whisper_model,
+            sample_rate_hz=SAMPLE_RATE_HZ,
+        )
+        prev_end_ms = 0
+        for w_txt, s0, s1 in master_spans:
+            clean_w = w_txt.strip()
+            if not clean_w:
+                continue
+            raw_s = int(round((max(0, s0) * 1000.0) / float(SAMPLE_RATE_HZ)))
+            raw_e = int(round((max(s0, s1) * 1000.0) / float(SAMPLE_RATE_HZ)))
+            start_ms = max(prev_end_ms, min(duration_ms, raw_s))
+            end_ms = max(start_ms, min(duration_ms, raw_e))
+            prev_end_ms = end_ms
+            aligned_words.append(
+                {
+                    "word": clean_w,
+                    "start_ms": int(start_ms),
+                    "end_ms": int(end_ms),
+                }
+            )
+        if not aligned_words:
+            raise RuntimeError("Real forced alignment on stitched master produced zero words.")
+
+    parent_timed_clauses: list[dict[str, Any]] = []
+    prev_clause_end_ms = 0
+    for g_idx, grp in enumerate(parent_groups):
+        sub_idxs = grp["sub_indices"]
+        if not sub_idxs or sub_idxs[0] >= len(clause_boundaries):
+            continue
+        first_b = clause_boundaries[sub_idxs[0]]
+        last_b = clause_boundaries[min(sub_idxs[-1], len(clause_boundaries) - 1)]
+        s_ms = max(
+            prev_clause_end_ms,
+            min(duration_ms, int(round((int(first_b["startSample"]) * 1000.0) / float(SAMPLE_RATE_HZ)))),
+        )
+        if g_idx == len(parent_groups) - 1:
+            e_ms = max(s_ms, duration_ms)
+        else:
+            e_ms = max(
+                s_ms,
+                min(duration_ms, int(round((int(last_b["activeEndSample"]) * 1000.0) / float(SAMPLE_RATE_HZ)))),
+            )
+        prev_clause_end_ms = e_ms
+        parent_timed_clauses.append(
+            {
+                "id": str(grp["id"]),
+                "index": int(grp["index"]),
+                "spoken_text": str(grp["spoken_text"]),
+                "start_ms": int(s_ms),
+                "end_ms": int(e_ms),
+            }
+        )
+
+    agg_metrics = {
+        "cer": round(max(float(c["winner_metrics"]["cer"]) for c in clause_reports), 5),
+        "wespeaker_cosine": round(min(float(c["winner_metrics"]["speakerCosineSim"]) for c in clause_reports), 5),
+        "dnsmos_p808": round(min(float(c["winner_metrics"]["dnsmosP808"]) for c in clause_reports), 4),
+        "tail_rms_dbfs": round(sar.compute_tail_rms_dbfs(stitched_pcm, tail_ms=80, sample_rate_hz=SAMPLE_RATE_HZ), 2),
+        "mastered_lufs": splice_meta["mastered_lufs"],
+        "syllables_per_sec": round(
+            sum(float(c["winner_metrics"]["syllablesPerSec"]) for c in clause_reports) / len(clause_reports),
+            3,
+        ),
+        "max_phoneme_duration_ms": round(
+            max(float(c["winner_metrics"]["maxPhonemeDurationMs"]) for c in clause_reports), 2
+        ),
+        "passed_all_strict_gates": all(bool(c["winner_metrics"]["passedAllGates"]) for c in clause_reports),
+        "lora_dir": str(lora_dir) if lora_dir is not None else None,
+        "dac_tflite": str(dac_tflite),
+        "codec_pth": str(resolved_codec_pth),
+    }
 
     # 6. Emit strict schema-validated VoiceProjectManifest.json ready for Android Hairline Clipper.
     resolved_lora_ver = infer_lora_version(lora_dir, explicit_version=lora_version)
@@ -1748,14 +2125,20 @@ def render_broadcast_studio(
         "master_wav_path": str(master_wav_path),
         "master_pcm_path": str(master_pcm_path),
         "master_pcm_bytes": master_pcm_bytes,
+        "duration_ms": duration_ms,
         "active_lora_version": resolved_lora_ver,
         "lora_dir": str(lora_dir) if lora_dir is not None else None,
         "dac_tflite": str(dac_tflite),
+        "codec_pth": str(resolved_codec_pth),
         "lora_merge_stats": lora_stats_dict,
         "clause_count": len(planned_clauses),
         "takes_per_clause": int(takes_per_clause),
         "splice": splice_meta,
-        "clauses": clause_reports,
+        "words": aligned_words,
+        "timed_clauses": parent_timed_clauses,
+        "clauses": parent_timed_clauses,
+        "clause_reports": clause_reports,
+        "metrics": agg_metrics,
         "video": video_meta,
     }
     report_path = out_root / "studio_report.json"
@@ -1818,16 +2201,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--lora-dir",
         type=str,
-        default=str(s2_pro_infer.DEFAULT_LORA_DIR),
+        default=str(DEFAULT_LORA_DIR),
         help="PEFT LoRA adapter dir (v001 or v002), or 'none' for base s2-pro",
     )
     parser.add_argument("--lora-scale", type=float, default=1.0)
     parser.add_argument("--lora-version", type=int, default=None)
-    parser.add_argument("--codec-pth", type=Path, default=s2_pro_infer.DEFAULT_CODEC_PTH)
+    parser.add_argument("--codec-pth", type=Path, default=None)
     parser.add_argument(
         "--dac-tflite",
         type=Path,
-        default=s2_pro_infer.DEFAULT_CODEC_TFLITE,
+        default=DEFAULT_DAC_TFLITE,
         help="Exported FP16 LiteRT DAC decoder path (v001 or v002)",
     )
 
@@ -1837,13 +2220,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--extra-ref-text", type=str, default=sar.DEFAULT_EXTRA_REF_TEXT)
     parser.add_argument("--prompt-style", choices=["multiturn", "system"], default="multiturn")
 
-    parser.add_argument("--master-centroid", type=Path, default=sar.DEFAULT_MASTER_CENTROID)
-    parser.add_argument("--wespeaker-onnx", type=Path, default=eva.DEFAULT_WESPEAKER_ONNX)
-    parser.add_argument("--dnsmos-onnx", type=Path, default=eva.DEFAULT_DNSMOS_P808_ONNX)
+    parser.add_argument("--master-centroid", type=Path, default=DEFAULT_MASTER_CENTROID)
+    parser.add_argument("--wespeaker-onnx", type=Path, default=DEFAULT_WESPEAKER_ONNX)
+    parser.add_argument("--dnsmos-onnx", type=Path, default=DEFAULT_DNSMOS_ONNX)
     parser.add_argument("--whisper-bin", type=Path, default=sar.DEFAULT_WHISPER_BIN)
     parser.add_argument("--whisper-model", type=Path, default=sar.DEFAULT_WHISPER_MODEL)
-    parser.add_argument("--room-ir", type=Path, default=sar.DEFAULT_ROOM_IR)
-    parser.add_argument("--room-tone", type=Path, default=sar.DEFAULT_ROOM_TONE)
+    parser.add_argument("--room-ir", type=Path, default=DEFAULT_ROOM_IR)
+    parser.add_argument("--room-tone", type=Path, default=DEFAULT_ROOM_TONE)
     parser.add_argument("--target-lufs", type=float, default=DEFAULT_TARGET_LUFS)
     parser.add_argument("--noise-floor-dbfs", type=float, default=DEFAULT_NOISE_FLOOR_DBFS)
     parser.add_argument("--device", type=str, default="mps")
@@ -1854,6 +2237,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ratio", choices=["9:16", "16:9", "1:1"], default="9:16")
     parser.add_argument("--max-clip-duration", type=int, default=10)
     parser.add_argument("--skip-video", action="store_true", help="Skip talking-head MP4 rendering")
+    parser.add_argument("--allow-gate-failure", action="store_true")
+    parser.add_argument("--max-gate-retries", type=int, default=2)
     return parser
 
 
@@ -1870,48 +2255,54 @@ def main(argv: Sequence[str] | None = None) -> int:
     lora_dir_arg = (args.lora_dir or "").strip()
     lora_dir = None if (not lora_dir_arg or lora_dir_arg.lower() == "none") else Path(lora_dir_arg)
 
-    report = render_broadcast_studio(
-        script_text=script_text,
-        project_id=args.project_id,
-        output_dir=args.output_dir,
-        takes_per_clause=args.takes_per_clause,
-        base_seed=args.base_seed,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        max_new_tokens=args.max_new_tokens,
-        global_gap_scale=args.global_gap_scale,
-        base_gap_after_samples=args.base_gap_samples,
-        lexicon_path=args.lexicon,
-        phonetic_overrides=overrides,
-        s2_pro_dir=args.s2_pro_dir,
-        lora_dir=lora_dir,
-        lora_scale=args.lora_scale,
-        lora_version=args.lora_version,
-        codec_pth=args.codec_pth,
-        dac_tflite=args.dac_tflite,
-        ref_wav=args.ref_wav,
-        ref_text=args.ref_text,
-        extra_ref_wav=args.extra_ref_wav,
-        extra_ref_text=args.extra_ref_text,
-        prompt_style=args.prompt_style,
-        master_centroid_path=args.master_centroid,
-        wespeaker_onnx=args.wespeaker_onnx,
-        dnsmos_onnx=args.dnsmos_onnx,
-        whisper_bin=args.whisper_bin,
-        whisper_model=args.whisper_model,
-        room_ir_path=args.room_ir,
-        room_tone_path=args.room_tone,
-        target_lufs=args.target_lufs,
-        noise_floor_dbfs=args.noise_floor_dbfs,
-        device=args.device,
-        avatar_path=args.avatar,
-        video_mode=args.video_mode,
-        resolution=args.resolution,
-        ratio=args.ratio,
-        max_clip_duration=args.max_clip_duration,
-        skip_video=args.skip_video,
-    )
+    try:
+        report = render_broadcast_studio(
+            script_text=script_text,
+            project_id=args.project_id,
+            output_dir=args.output_dir,
+            takes_per_clause=args.takes_per_clause,
+            base_seed=args.base_seed,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            max_new_tokens=args.max_new_tokens,
+            global_gap_scale=args.global_gap_scale,
+            base_gap_after_samples=args.base_gap_samples,
+            lexicon_path=args.lexicon,
+            phonetic_overrides=overrides,
+            s2_pro_dir=args.s2_pro_dir,
+            lora_dir=lora_dir,
+            lora_scale=args.lora_scale,
+            lora_version=args.lora_version,
+            codec_pth=args.codec_pth,
+            dac_tflite=args.dac_tflite,
+            ref_wav=args.ref_wav,
+            ref_text=args.ref_text,
+            extra_ref_wav=args.extra_ref_wav,
+            extra_ref_text=args.extra_ref_text,
+            prompt_style=args.prompt_style,
+            master_centroid_path=args.master_centroid,
+            wespeaker_onnx=args.wespeaker_onnx,
+            dnsmos_onnx=args.dnsmos_onnx,
+            whisper_bin=args.whisper_bin,
+            whisper_model=args.whisper_model,
+            room_ir_path=args.room_ir,
+            room_tone_path=args.room_tone,
+            target_lufs=args.target_lufs,
+            noise_floor_dbfs=args.noise_floor_dbfs,
+            device=args.device,
+            avatar_path=args.avatar,
+            video_mode=args.video_mode,
+            resolution=args.resolution,
+            ratio=args.ratio,
+            max_clip_duration=args.max_clip_duration,
+            skip_video=args.skip_video,
+            require_strict_gates=not args.allow_gate_failure,
+            max_retries_per_clause=args.max_gate_retries,
+        )
+    except RuntimeError as exc:
+        print(f"[error] {exc}", file=sys.stderr, flush=True)
+        return 1
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0
 

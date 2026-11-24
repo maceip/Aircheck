@@ -16,12 +16,14 @@ import androidx.room.Relation
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
+import androidx.room.withTransaction
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.AlignedWord
 import com.example.data.ClipCardRow
 import com.example.data.ClipRecord
 import com.example.data.CorePipelineSession
+import com.example.data.NewsroomLook
 import com.example.data.NewsroomStageConfig
 import com.example.data.OverlayObjectKind
 import com.example.data.PoseGateResult
@@ -434,6 +436,38 @@ interface SavedNewsroomOverlayDao {
     suspend fun deleteById(id: String)
 }
 
+@Entity(
+    tableName = "newsroom_looks",
+    indices = [Index(value = ["updatedAtMillis"])]
+)
+data class NewsroomLookEntity(
+    @PrimaryKey val id: String,
+    val lookJson: String,
+    val isDefault: Boolean,
+    val updatedAtMillis: Long
+)
+
+@Dao
+interface NewsroomLookDao {
+    @Query("SELECT * FROM newsroom_looks ORDER BY updatedAtMillis DESC")
+    fun observeAll(): Flow<List<NewsroomLookEntity>>
+
+    @Query("SELECT * FROM newsroom_looks WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): NewsroomLookEntity?
+
+    @Query("SELECT * FROM newsroom_looks ORDER BY updatedAtMillis DESC")
+    suspend fun observeAllOnce(): List<NewsroomLookEntity>
+
+    @Query("SELECT * FROM newsroom_looks WHERE isDefault = 1 LIMIT 1")
+    suspend fun getDefault(): NewsroomLookEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: NewsroomLookEntity)
+
+    @Query("DELETE FROM newsroom_looks WHERE id = :id")
+    suspend fun deleteById(id: String)
+}
+
 @Dao
 interface CorePipelineSessionDao {
     @Query("SELECT * FROM core_pipeline_sessions ORDER BY updatedAtMillis DESC LIMIT 1")
@@ -459,9 +493,10 @@ interface CorePipelineSessionDao {
         VoiceProjectManifestEntity::class,
         VoicePreferenceEntity::class,
         SavedNewsroomOverlayEntity::class,
-        CorePipelineSessionEntity::class
+        CorePipelineSessionEntity::class,
+        NewsroomLookEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AircheckDatabase : RoomDatabase() {
@@ -473,6 +508,7 @@ abstract class AircheckDatabase : RoomDatabase() {
     abstract fun voicePreferenceDao(): VoicePreferenceDao
     abstract fun savedNewsroomOverlayDao(): SavedNewsroomOverlayDao
     abstract fun corePipelineSessionDao(): CorePipelineSessionDao
+    abstract fun newsroomLookDao(): NewsroomLookDao
 
     companion object {
         @Volatile
@@ -555,6 +591,26 @@ abstract class AircheckDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `newsroom_looks` (
+                        `id` TEXT NOT NULL,
+                        `lookJson` TEXT NOT NULL,
+                        `isDefault` INTEGER NOT NULL,
+                        `updatedAtMillis` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_newsroom_looks_updatedAtMillis` " +
+                        "ON `newsroom_looks` (`updatedAtMillis`)"
+                )
+            }
+        }
+
         fun getInstance(context: Context): AircheckDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -563,7 +619,7 @@ abstract class AircheckDatabase : RoomDatabase() {
                     "aircheck_v2.db"
                 )
                     .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }
@@ -629,6 +685,53 @@ class AircheckLocalRepository(private val db: AircheckDatabase) :
     suspend fun deleteNewsroomOverlay(id: String) {
         db.savedNewsroomOverlayDao().deleteById(id)
     }
+
+    val newsroomLooks: Flow<List<NewsroomLook>> =
+        db.newsroomLookDao().observeAll().map { rows ->
+            rows.mapNotNull { decodeLookOrNull(it) }
+        }
+
+    suspend fun newsroomLooksOnce(): List<NewsroomLook> =
+        db.newsroomLookDao().observeAllOnce().mapNotNull { decodeLookOrNull(it) }
+
+    suspend fun getNewsroomLook(id: String): NewsroomLook? =
+        db.newsroomLookDao().getById(id)?.let { decodeLookOrNull(it) }
+
+    suspend fun getDefaultNewsroomLook(): NewsroomLook? =
+        db.newsroomLookDao().getDefault()?.let { decodeLookOrNull(it) }
+
+    suspend fun saveNewsroomLook(look: NewsroomLook) {
+        val stamped = look.copy(updatedAtMillis = System.currentTimeMillis())
+        db.newsroomLookDao().upsert(
+            NewsroomLookEntity(
+                id = stamped.id,
+                lookJson = json.encodeToString(NewsroomLook.serializer(), stamped),
+                isDefault = stamped.isDefault,
+                updatedAtMillis = stamped.updatedAtMillis
+            )
+        )
+    }
+
+    /** Marks [id] as the single default look applied by the studio cut. */
+    suspend fun setDefaultNewsroomLook(id: String) {
+        db.withTransaction {
+            val all = db.newsroomLookDao().observeAllOnce()
+            all.forEach { entity ->
+                val look = decodeLookOrNull(entity) ?: return@forEach
+                val shouldBeDefault = entity.id == id
+                if (look.isDefault != shouldBeDefault) {
+                    saveNewsroomLook(look.copy(isDefault = shouldBeDefault))
+                }
+            }
+        }
+    }
+
+    suspend fun deleteNewsroomLook(id: String) {
+        db.newsroomLookDao().deleteById(id)
+    }
+
+    private fun decodeLookOrNull(entity: NewsroomLookEntity): NewsroomLook? =
+        runCatching { json.decodeFromString(NewsroomLook.serializer(), entity.lookJson) }.getOrNull()
 
     suspend fun getLatestCorePipelineSession(): CorePipelineSession? =
         db.corePipelineSessionDao().getLatest()?.let { decodeCorePipelineSessionOrNull(it.sessionJson) }

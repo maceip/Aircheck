@@ -12,16 +12,39 @@ import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.voicestudio.edl.ClauseSynthesisProgress
 import com.voicestudio.edl.DEFAULT_TAKES_PER_CLAUSE
+import com.voicestudio.edl.GateMetrics
 import com.voicestudio.edl.OtaBundleManifest
 import com.voicestudio.edl.OtaBundleState
+import com.voicestudio.edl.VoiceProjectManifest
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
+data class DirectSynthesisClauseInput(
+    val clauseId: String,
+    val spokenText: String,
+    val phoneticOverrides: Map<String, String> = emptyMap()
+)
+
+data class LocalAlignedWord(
+    val word: String,
+    val startMs: Long,
+    val endMs: Long
+)
+
+data class DirectSynthesisResult(
+    val manifest: VoiceProjectManifest,
+    val stitchedPcm44k: FloatArray,
+    val clauseTimeBoundsMs: Map<String, Pair<Long, Long>>,
+    val alignedWords: List<LocalAlignedWord>,
+    val summaryMetrics: GateMetrics
+)
+
 /**
  * Top-level Android coordinator wiring:
  * - Expedited WorkManager synthesis (`enqueueProjectSynthesis`, `enqueueSingleClauseResynthesis`)
+ * - Direct suspend synthesis (`synthesizeClausesDirectly`) for `CoreStoryPipelineCoordinator`
  * - Wi-Fi / Tailscale (`NetworkType.UNMETERED`) preference upload & nightly LoRA hot-swap check
  * - Live [OtaBundleSyncManager] state and direct manual OTA sync trigger.
  */
@@ -149,6 +172,26 @@ class VoiceStudioSyncCoordinator(
 
     suspend fun syncOtaBundleNow(tailscaleBaseUrl: String): Result<OtaBundleManifest> {
         return otaBundleSyncManager.syncFromRig(tailscaleBaseUrl)
+    }
+
+    /**
+     * Runs the local `v002` VoiceStudio synthesis + 4-gate verification pipeline directly from
+     * explicit [clauses] without nested `WorkManager` scheduling or stale `scripts` table lookups.
+     */
+    suspend fun synthesizeClausesDirectly(
+        projectId: String,
+        clauses: List<DirectSynthesisClauseInput>,
+        numCandidates: Int = DEFAULT_TAKES_PER_CLAUSE,
+        onProgress: (Float, String) -> Unit = { _, _ -> }
+    ): Result<DirectSynthesisResult> {
+        return LocalVoiceSynthesisRunner.synthesizeClausesDirectly(
+            context = context,
+            otaBundleSyncManager = otaBundleSyncManager,
+            projectId = projectId,
+            clauses = clauses,
+            numCandidates = numCandidates,
+            onProgress = onProgress
+        )
     }
 
     companion object {

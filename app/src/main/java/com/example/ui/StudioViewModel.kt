@@ -12,6 +12,11 @@ import com.example.data.BrollSegmentMode
 import com.example.data.ClipCardRow
 import com.example.data.ClipRecord
 import com.example.data.CorePipelineSession
+import com.example.data.CoreRenderOptions
+import com.example.data.NewsroomLook
+import com.example.engine.CoreStageWorker
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.example.data.CorePipelineStage
 import com.example.data.CoreStoryClause
 import com.example.data.ExportState
@@ -82,6 +87,10 @@ data class StudioUiState(
     val coreStageProgress: Float = 0f,
     val coreStageStatusLabel: String? = null,
     val isRecordingCoreVoiceover: Boolean = false,
+    val newsroomLooks: List<NewsroomLook> = emptyList(),
+    val isGeneratingBackdrop: Boolean = false,
+    val isDetectingSilence: Boolean = false,
+    val coreUndoDepth: Int = 0,
     val errorMessage: String? = null,
     val statusNotice: String? = null,
     val otaBundleState: OtaBundleState = OtaBundleState(),
@@ -98,6 +107,9 @@ data class StudioUiState(
         get() = settings.remotionUsedCount <= 0 &&
             settings.providers.packageProviderId != "mac_rig_remotion"
 }
+
+/** An X post chosen with "show post" in 02 SCRIPT, burned into the cut as a quote card. */
+data class PostCardSource(val handle: String, val tweetId: String, val snippet: String)
 
 class StudioViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -185,6 +197,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         viewModelScope.launch {
+            localRepo.newsroomLooks.collect { looks ->
+                _uiState.update { it.copy(newsroomLooks = looks) }
+            }
+        }
+
+        viewModelScope.launch {
             localRepo.latestCorePipelineSession.collect { session ->
                 if (session != null) {
                     _uiState.update { current ->
@@ -238,6 +256,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         refreshVoiceModelCare(verifyChecksums = false)
+        observeBackgroundStages()
     }
 
     private fun handleNewsroomA2uiAction(action: NewsroomA2uiAction) {
@@ -480,7 +499,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun openStoryInCorePipeline(
         plainText: String,
-        headline: String = ""
+        headline: String = "",
+        postCard: PostCardSource? = null
     ) {
         val clean = plainText.trim()
         if (clean.isBlank()) {
@@ -507,11 +527,33 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             )
         )
         viewModelScope.launch(Dispatchers.IO) {
-            val session = corePipelineCoordinator.seedSessionFromStory(
+            val seeded = corePipelineCoordinator.seedSessionFromStory(
                 rawStoryText = clean,
                 headline = effectiveHeadline,
                 scriptId = project.id
             )
+            val session = if (postCard != null) {
+                // "show post" in 02 SCRIPT: burn the quoted X post as a QUOTE_BRIEF card in the cut.
+                val overlay = SavedNewsroomOverlay(
+                    id = "ovl_x_" + postCard.tweetId.filter { it.isLetterOrDigit() }.take(24),
+                    kind = OverlayObjectKind.QUOTE_BRIEF,
+                    headline = "@${postCard.handle}",
+                    subline = postCard.snippet.take(64),
+                    calloutStat = "POST",
+                    durationSec = 5,
+                    a2uiComponentsJson = AircheckA2uiController.serializeOverlayAsA2uiComponentsJson(
+                        headline = "@${postCard.handle}",
+                        subline = postCard.snippet.take(64),
+                        calloutStat = "POST"
+                    )
+                )
+                localRepo.saveNewsroomOverlay(overlay)
+                seeded.copy(selectedOverlayIds = (seeded.selectedOverlayIds + overlay.id).distinct()).also {
+                    localRepo.saveCorePipelineSession(it)
+                }
+            } else {
+                seeded
+            }
             _uiState.update {
                 it.copy(
                     corePipelineSession = session,
@@ -629,46 +671,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /** Stage 1 TTS as a background job ([CoreStageWorker]); survives leaving the app. */
     fun runCoreStage1Tts(localMicWavFile: File? = null) {
         if (_uiState.value.isCoreStageBusy) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val currentSession = _uiState.value.corePipelineSession
-            _uiState.update {
-                it.copy(
-                    isCoreStageBusy = true,
-                    coreStageProgress = 0.25f,
-                    coreStageStatusLabel = "Synthesizing story TTS…",
-                    errorMessage = null
-                )
-            }
-            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
-            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
-            val result = corePipelineCoordinator.synthesizeStage1Tts(
-                session = currentSession,
-                rigBaseUrl = rigUrl,
-                localMicWavFile = localMicWavFile
-            )
-            result.onSuccess { updated ->
-                _uiState.update {
-                    it.copy(
-                        corePipelineSession = updated,
-                        isCoreStageBusy = false,
-                        coreStageProgress = 1f,
-                        coreStageStatusLabel = null,
-                        statusNotice = "TTS Pass #${updated.ttsIterationCount} ready (${updated.ttsDurationMs} ms)."
-                    )
-                }
-            }.onFailure { err ->
-                _uiState.update {
-                    it.copy(
-                        isCoreStageBusy = false,
-                        coreStageProgress = 0f,
-                        coreStageStatusLabel = null,
-                        errorMessage = err.localizedMessage ?: "TTS synthesis failed."
-                    )
-                }
-            }
-        }
+        startCoreStage(CoreStageWorker.OP_TTS, mapOf(CoreStageWorker.KEY_MIC_WAV to localMicWavFile?.absolutePath))
     }
 
     fun playCoreTtsPreview() {
@@ -705,59 +711,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         selectCoreStage(CorePipelineStage.SPEECH_TO_TALKING_HEAD)
     }
 
+    /** Stage 3 talking head as a background job; the rig render keeps going if the app is closed. */
+    @Suppress("UNUSED_PARAMETER")
     fun runCoreStage3SpeechToHead(pollIntervalMs: Long = 300L) {
         if (_uiState.value.isCoreStageBusy) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val currentSession = _uiState.value.corePipelineSession
-            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
-            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
-            val photoSha = _uiState.value.activeProject.stageConfig.activePhotoSha
-                ?: persisted.persona.defaultPhotoSha.ifBlank { null }
-
-            _uiState.update {
-                it.copy(
-                    isCoreStageBusy = true,
-                    coreStageProgress = 0.08f,
-                    coreStageStatusLabel = "Matching speech to talking head…",
-                    errorMessage = null
-                )
-            }
-
-            val result = corePipelineCoordinator.matchSpeechToTalkingHeadStage3(
-                session = currentSession,
-                rigBaseUrl = rigUrl,
-                photoSha = photoSha,
-                pollIntervalMs = pollIntervalMs,
-                onProgress = { progress, detail ->
-                    _uiState.update {
-                        it.copy(
-                            coreStageProgress = progress,
-                            coreStageStatusLabel = detail
-                        )
-                    }
-                }
-            )
-            result.onSuccess { updated ->
-                _uiState.update {
-                    it.copy(
-                        corePipelineSession = updated,
-                        isCoreStageBusy = false,
-                        coreStageProgress = 1f,
-                        coreStageStatusLabel = null,
-                        statusNotice = "Speech matched to talking head — choose B-roll cuts."
-                    )
-                }
-            }.onFailure { err ->
-                _uiState.update {
-                    it.copy(
-                        isCoreStageBusy = false,
-                        coreStageProgress = 0f,
-                        coreStageStatusLabel = null,
-                        errorMessage = err.localizedMessage ?: "Speech-to-talking-head render failed."
-                    )
-                }
-            }
-        }
+        startCoreStage(CoreStageWorker.OP_HEAD, mapOf(CoreStageWorker.KEY_PHOTO_SHA to activePhotoSha()))
     }
 
     fun toggleClauseBrollMode(index: Int) {
@@ -825,55 +783,243 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun runCoreStage4ChopBroll() {
+    /**
+     * Runs the Stage 4 studio cut with the session's render options and a Newsroom look:
+     * [lookIdOverride] (from "test on clip"), otherwise the saved default look, otherwise none.
+     */
+    fun runCoreStage4ChopBroll(lookIdOverride: String? = null) {
         if (_uiState.value.isCoreStageBusy) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val currentSession = _uiState.value.corePipelineSession
-            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
-            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
-            val photoSha = _uiState.value.activeProject.stageConfig.activePhotoSha
-                ?: persisted.persona.defaultPhotoSha.ifBlank { null }
-            val savedOverlays = localRepo.listSavedNewsroomOverlays()
+        startCoreStage(
+            CoreStageWorker.OP_CUT,
+            mapOf(CoreStageWorker.KEY_LOOK_ID to lookIdOverride, CoreStageWorker.KEY_PHOTO_SHA to activePhotoSha())
+        )
+    }
 
-            _uiState.update {
-                it.copy(
-                    isCoreStageBusy = true,
-                    coreStageProgress = 0.35f,
-                    coreStageStatusLabel = "Chopping talking head into B-roll…",
-                    errorMessage = null
-                )
-            }
+    private fun activePhotoSha(): String? = _uiState.value.activeProject.stageConfig.activePhotoSha
+        ?: _uiState.value.settings.persona.defaultPhotoSha.ifBlank { null }
 
-            val result = corePipelineCoordinator.chopTalkingHeadIntoBrollStage4(
-                session = currentSession,
-                rigBaseUrl = rigUrl,
-                allSavedOverlays = savedOverlays,
-                photoSha = photoSha
+    private fun startCoreStage(op: String, extras: Map<String, String?> = emptyMap()) {
+        CoreStageWorker.ensureChannel(getApplication())
+        _uiState.update {
+            it.copy(
+                isCoreStageBusy = true,
+                coreStageProgress = 0f,
+                coreStageStatusLabel = CoreStageWorker.labelFor(op) + "…",
+                errorMessage = null
             )
-            result.onSuccess { (updatedSession, _) ->
-                if (updatedSession.selectedOverlayIds.isNotEmpty()) {
-                    profileStore.incrementRemotionUsedCount()
-                }
+        }
+        CoreStageWorker.enqueue(getApplication(), op, extras)
+    }
+
+    /** Mirrors background pipeline jobs (WorkManager) into UI state; works across VM/process restarts. */
+    private fun observeBackgroundStages() {
+        val wm = WorkManager.getInstance(getApplication())
+        val handled = mutableSetOf<java.util.UUID>()
+        var primed = false
+        fun consume(infos: List<WorkInfo>, onRunning: (WorkInfo?) -> Unit) {
+            if (!primed) {
+                infos.filter { it.state.isFinished }.forEach { handled += it.id }
+                primed = true
+            }
+            onRunning(infos.firstOrNull { !it.state.isFinished })
+            infos.filter { it.state.isFinished && it.id !in handled }.forEach { info ->
+                handled += info.id
+                val err = info.outputData.getString(CoreStageWorker.KEY_ERROR)
+                val notice = info.outputData.getString(CoreStageWorker.KEY_NOTICE)
                 _uiState.update {
-                    it.copy(
-                        corePipelineSession = updatedSession,
-                        isCoreStageBusy = false,
-                        coreStageProgress = 1f,
-                        coreStageStatusLabel = null,
-                        statusNotice = "Final video ready for review."
-                    )
-                }
-            }.onFailure { err ->
-                _uiState.update {
-                    it.copy(
-                        isCoreStageBusy = false,
-                        coreStageProgress = 0f,
-                        coreStageStatusLabel = null,
-                        errorMessage = err.localizedMessage ?: "B-roll chop failed."
-                    )
+                    when {
+                        info.state == WorkInfo.State.FAILED -> it.copy(errorMessage = err ?: "Pipeline stage failed.")
+                        info.state == WorkInfo.State.SUCCEEDED && notice != null -> it.copy(statusNotice = notice)
+                        else -> it
+                    }
                 }
             }
         }
+        viewModelScope.launch {
+            wm.getWorkInfosForUniqueWorkFlow(CoreStageWorker.UNIQUE_CORE).collect { infos ->
+                consume(infos) { running ->
+                    val op = running?.progress?.getString(CoreStageWorker.KEY_OP)
+                    _uiState.update {
+                        it.copy(
+                            isCoreStageBusy = running != null,
+                            coreStageProgress = running?.progress?.getFloat(CoreStageWorker.KEY_PROGRESS, 0f) ?: 0f,
+                            coreStageStatusLabel = running?.let { r ->
+                                r.progress.getString(CoreStageWorker.KEY_LABEL) ?: "Working in background…"
+                            },
+                            isDetectingSilence = running != null && op == CoreStageWorker.OP_SILENCE
+                        )
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            wm.getWorkInfosForUniqueWorkFlow(CoreStageWorker.UNIQUE_BACKDROP).collect { infos ->
+                consume(infos) { running -> _uiState.update { it.copy(isGeneratingBackdrop = running != null) } }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Clip Studio v4: 03 CUT render options, undo, voice re-sync
+    // =========================================================================
+
+    private val coreUndoStack = ArrayDeque<CorePipelineSession>()
+
+    /** Persists [next] as the new session and remembers the previous one for [undoCoreEdit]. */
+    private fun commitCoreEdit(next: CorePipelineSession) {
+        val previous = _uiState.value.corePipelineSession
+        synchronized(coreUndoStack) {
+            coreUndoStack.addLast(previous)
+            while (coreUndoStack.size > MAX_CORE_UNDO) coreUndoStack.removeFirst()
+        }
+        val stamped = next.copy(updatedAtMillis = System.currentTimeMillis())
+        _uiState.update { it.copy(corePipelineSession = stamped, coreUndoDepth = coreUndoStack.size) }
+        viewModelScope.launch(Dispatchers.IO) { localRepo.saveCorePipelineSession(stamped) }
+    }
+
+    /** Restores and persists the session as it was before the last Cut edit. */
+    fun undoCoreEdit() {
+        val restored = synchronized(coreUndoStack) { coreUndoStack.removeLastOrNull() } ?: return
+        val stamped = restored.copy(updatedAtMillis = System.currentTimeMillis())
+        _uiState.update { it.copy(corePipelineSession = stamped, coreUndoDepth = coreUndoStack.size) }
+        viewModelScope.launch(Dispatchers.IO) { localRepo.saveCorePipelineSession(stamped) }
+    }
+
+    fun setCoreStripSilence(enabled: Boolean) = updateRenderOptions { it.copy(stripSilence = enabled) }
+
+    fun setCorePunchIn(enabled: Boolean) = updateRenderOptions { it.copy(punchIn = enabled) }
+
+    fun setCoreCaptions(enabled: Boolean) = updateRenderOptions { it.copy(captions = enabled) }
+
+    fun setCoreAspect(aspect: String) {
+        require(aspect == CoreRenderOptions.ASPECT_VERTICAL || aspect == CoreRenderOptions.ASPECT_HORIZONTAL) {
+            "Unsupported aspect $aspect"
+        }
+        updateRenderOptions { it.copy(aspect = aspect) }
+    }
+
+    private fun updateRenderOptions(transform: (CoreRenderOptions) -> CoreRenderOptions) {
+        val current = _uiState.value.corePipelineSession
+        val next = transform(current.renderOptions)
+        if (next == current.renderOptions) return
+        commitCoreEdit(current.copy(renderOptions = next))
+    }
+
+    /** Edits clause [index] in Cut; the clause becomes "unsynced" until [resyncEditedVoice] runs. */
+    fun editCutClauseText(index: Int, updatedText: String) {
+        val current = _uiState.value.corePipelineSession
+        if (index !in current.clauses.indices) return
+        val clean = updatedText.trim()
+        if (clean.isEmpty() || clean == current.clauses[index].spokenText.trim()) return
+        commitCoreEdit(
+            current.copy(
+                clauses = current.clauses.mapIndexed { i, c -> if (i == index) c.copy(spokenText = clean) else c }
+            )
+        )
+    }
+
+    /** Toggles clause [index] between talking head and B-roll cutaway, with undo. */
+    fun toggleCutClauseBroll(index: Int) {
+        val current = _uiState.value.corePipelineSession
+        if (index !in current.clauses.indices) return
+        commitCoreEdit(
+            current.copy(
+                clauses = current.clauses.mapIndexed { i, c ->
+                    if (i != index) {
+                        c
+                    } else if (c.segmentMode == BrollSegmentMode.TALKING_HEAD) {
+                        c.copy(
+                            segmentMode = BrollSegmentMode.BROLL_CUTAWAY,
+                            brollCaption = c.brollCaption.ifBlank { c.spokenText.take(48) }
+                        )
+                    } else {
+                        c.copy(segmentMode = BrollSegmentMode.TALKING_HEAD)
+                    }
+                }
+            )
+        )
+    }
+
+    /** Asks the rig which pauses `strip_silence` would remove from the current talking-head render. */
+    fun refreshSilenceGaps() {
+        val session = _uiState.value.corePipelineSession
+        if (session.talkingHeadJobId.isNullOrBlank() || _uiState.value.isCoreStageBusy) return
+        startCoreStage(CoreStageWorker.OP_SILENCE)
+    }
+
+    /**
+     * `sync voice` / `re-voice edited words`: re-runs Stage 1 TTS on the edited clauses, then
+     * Stage 3 so the talking head matches the new audio.
+     */
+    fun resyncEditedVoice() {
+        if (_uiState.value.isCoreStageBusy) return
+        if (_uiState.value.corePipelineSession.unsyncedClauseIndices.isEmpty()) return
+        startCoreStage(CoreStageWorker.OP_RESYNC, mapOf(CoreStageWorker.KEY_PHOTO_SHA to activePhotoSha()))
+    }
+
+    // =========================================================================
+    // Clip Studio v4: 04 NEWSROOM looks
+    // =========================================================================
+
+    fun createNewsroomLook(name: String): String {
+        val look = NewsroomLook(
+            name = name.trim().ifBlank { "LOOK_${_uiState.value.newsroomLooks.size + 1}" },
+            isDefault = _uiState.value.newsroomLooks.isEmpty()
+        )
+        viewModelScope.launch(Dispatchers.IO) { localRepo.saveNewsroomLook(look) }
+        _uiState.update { it.copy(newsroomLooks = listOf(look) + it.newsroomLooks) }
+        return look.id
+    }
+
+    fun updateNewsroomLook(look: NewsroomLook) {
+        val clamped = look.copy(
+            blurPercent = look.blurPercent.coerceIn(0, 100),
+            brightnessEv = (Math.round(look.brightnessEv.coerceIn(-3.0, 3.0) * 10.0) / 10.0),
+            light = look.light.takeIf {
+                it in setOf(NewsroomLook.LIGHT_WARM, NewsroomLook.LIGHT_COOL, NewsroomLook.LIGHT_NEUTRAL)
+            } ?: NewsroomLook.LIGHT_NEUTRAL
+        )
+        _uiState.update { st -> st.copy(newsroomLooks = st.newsroomLooks.map { if (it.id == clamped.id) clamped else it }) }
+        viewModelScope.launch(Dispatchers.IO) { localRepo.saveNewsroomLook(clamped) }
+    }
+
+    fun duplicateNewsroomLook(id: String): String? {
+        val source = _uiState.value.newsroomLooks.firstOrNull { it.id == id } ?: return null
+        val copy = source.copy(
+            id = NewsroomLook(name = "x").id,
+            name = source.name.take(40) + "_COPY",
+            isDefault = false,
+            createdAtMillis = System.currentTimeMillis()
+        )
+        _uiState.update { it.copy(newsroomLooks = listOf(copy) + it.newsroomLooks) }
+        viewModelScope.launch(Dispatchers.IO) { localRepo.saveNewsroomLook(copy) }
+        return copy.id
+    }
+
+    fun setDefaultNewsroomLook(id: String) {
+        _uiState.update { st -> st.copy(newsroomLooks = st.newsroomLooks.map { it.copy(isDefault = it.id == id) }) }
+        viewModelScope.launch(Dispatchers.IO) {
+            localRepo.setDefaultNewsroomLook(id)
+            _uiState.update { it.copy(statusNotice = "Default look set — applied to the next cut.") }
+        }
+    }
+
+    /** Generates a backdrop plate for look [lookId] from [prompt] on the rig and attaches it. */
+    fun generateBackdropForLook(lookId: String, prompt: String) {
+        val clean = prompt.trim()
+        if (clean.isEmpty()) {
+            _uiState.update { it.copy(errorMessage = "Describe the backdrop before generating.") }
+            return
+        }
+        if (_uiState.value.isGeneratingBackdrop) return
+        CoreStageWorker.ensureChannel(getApplication())
+        _uiState.update { it.copy(isGeneratingBackdrop = true, errorMessage = null) }
+        CoreStageWorker.enqueue(
+            getApplication(),
+            CoreStageWorker.OP_BACKDROP,
+            mapOf(CoreStageWorker.KEY_LOOK_ID to lookId, CoreStageWorker.KEY_PROMPT to clean),
+            unique = CoreStageWorker.UNIQUE_BACKDROP
+        )
     }
 
     // =========================================================================
@@ -1095,6 +1241,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(errorMessage = null) }
     }
 
+    fun dismissNotice() {
+        _uiState.update { it.copy(statusNotice = null) }
+    }
+
     fun clearPendingShareIntent() {
         _uiState.update { it.copy(pendingShareIntent = null) }
     }
@@ -1268,5 +1418,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         const val MAC_RIG_POLL_INTERVAL_MS: Long = 2_500L
+        private const val MAX_CORE_UNDO: Int = 40
     }
 }

@@ -286,6 +286,8 @@ class AircheckNewsroomAndVoiceCareE2ETest {
         captureScreenshot(screenshotDir, "e2e_voice_model_care.png")
         composeRule.onNodeWithTag("voice_care_back_button").performClick()
         composeRule.waitForIdle()
+        // Allow Step 5 Core Pipeline E2E to exercise the embedded loopback rig TTS endpoint
+        runBlocking { app.container.profileStore.setPhoneOnlyVoiceMode(false) }
 
         // 5. Run the FULL 5-stage Core Story Pipeline WITHOUT visiting Newsroom Overlays!
         composeRule.onNodeWithTag("open_core_pipeline_button")

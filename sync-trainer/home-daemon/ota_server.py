@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import ipaddress
 import json
@@ -44,12 +45,29 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
+from generate_talking_head import (
+    MAX_AV_SYNC_DRIFT_MS,
+    MAX_TOTAL_DURATION_SEC as MAX_RENDER_DURATION_SEC,
+    normalize_talking_head_resolution,
+)
+from studio_cut import (
+    StudioRenderOptions,
+    compose_studio_cut,
+    detect_silence_gaps,
+    generate_backdrop_plate,
+    plate_path as studio_plate_path,
+)
 from drafting_passes import (
     MAX_DRAFT_AUDIO_BODY_BYTES,
     MAX_DRAFT_TEXT_BODY_BYTES,
     DraftPassEngine,
+)
+from llm_router import (
+    LlmProviderError,
+    LlmRouter,
+    LlmUnavailableError,
 )
 from tinker_voice_daemon import (
     SchemaValidationError,
@@ -68,9 +86,16 @@ MAX_RENDER_BODY_BYTES = 64 * 1024 * 1024  # 64 MiB (WAV + JPEG base64 uploads)
 DEFAULT_AVATAR_PATH = Path("/Users/mac/Downloads/clone/images/avatar_ref.jpg")
 DEFAULT_VENV_PYTHON = Path("/Users/mac/.venv/bin/python")
 DEFAULT_BL_BIN = Path("/Users/mac/.local/bin/bl")
+ASYNC_TASK_ROUTES = frozenset({"/v1/core/tts", "/v1/core/chop-broll", "/v1/newsroom/backdrop"})
 VALID_VOICE_SOURCES = frozenset({"ENROLLED_VOICE_CLONE", "MIC_VOICEOVER"})
 VALID_RESOLUTIONS = frozenset({"480P", "720P", "1080P"})
 VALID_RATIOS = frozenset({"9:16", "16:9", "1:1"})
+TALKING_HEAD_TIMEOUT_BASE_SEC = 600
+MAX_PENDING_ASYNC_TASKS = 16
+
+
+class AsyncQueueFullError(RuntimeError):
+    """Raised when the bounded async task queue is saturated."""
 VALID_AI_ASSIST_MODES = frozenset({
     "flesh_out_story",
     "polish_headline",
@@ -455,27 +480,32 @@ def _atomic_publish_mp4(source_mp4: Path, target_mp4: Path) -> Path:
         ffmpeg_bin = shutil.which("ffmpeg")
         remuxed = False
         if ffmpeg_bin:
-            proc = subprocess.run(
-                [
-                    ffmpeg_bin,
-                    "-y",
-                    "-i",
-                    str(source_mp4),
-                    "-c",
-                    "copy",
-                    "-movflags",
-                    "+faststart",
-                    str(tmp_path),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-            if proc.returncode == 0 and tmp_path.is_file() and tmp_path.stat().st_size > 0:
-                remuxed = True
-            elif tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
+            try:
+                proc = subprocess.run(
+                    [
+                        ffmpeg_bin,
+                        "-y",
+                        "-i",
+                        str(source_mp4),
+                        "-c",
+                        "copy",
+                        "-movflags",
+                        "+faststart",
+                        str(tmp_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                if proc.returncode == 0 and tmp_path.is_file() and tmp_path.stat().st_size > 0:
+                    remuxed = True
+                elif tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
+            except subprocess.TimeoutExpired as exc:
+                if tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
+                raise RuntimeError("ffmpeg faststart publish timed out after 60s") from exc
 
         if not remuxed:
             shutil.copy2(source_mp4, tmp_path)
@@ -485,6 +515,199 @@ def _atomic_publish_mp4(source_mp4: Path, target_mp4: Path) -> Path:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
     return target_mp4
+
+
+def _probe_av_sync_metrics(
+    mp4_path: Path,
+    *,
+    expected_duration_ms: int | None = None,
+    max_drift_ms: float = MAX_AV_SYNC_DRIFT_MS,
+) -> dict[str, Any]:
+    """Run ffprobe A/V stream + duration parity QA on a rendered MP4."""
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        raise RuntimeError("ffprobe not found on PATH for A/V sync QA")
+    if not mp4_path.is_file() or mp4_path.stat().st_size == 0:
+        raise RuntimeError(f"Rendered MP4 missing or empty: {mp4_path}")
+
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe_bin,
+                "-v",
+                "error",
+                "-show_format",
+                "-show_streams",
+                "-of",
+                "json",
+                str(mp4_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ffprobe A/V sync check timed out after 30s") from exc
+
+    if proc.returncode != 0:
+        raise RuntimeError(_summarize_subprocess_error("ffprobe A/V sync check", proc))
+
+    try:
+        meta = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ffprobe returned invalid JSON for {mp4_path}: {exc}") from exc
+
+    streams = meta.get("streams") or []
+    fmt = meta.get("format") or {}
+    v_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+    a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+
+    if v_stream is None:
+        raise RuntimeError(f"Rendered MP4 missing video stream: {mp4_path}")
+    if a_stream is None:
+        raise RuntimeError(f"Rendered MP4 missing audio stream: {mp4_path}")
+
+    width = int(v_stream.get("width") or 0)
+    height = int(v_stream.get("height") or 0)
+    sample_rate = int(a_stream.get("sample_rate") or 0)
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Rendered MP4 has invalid video dimensions {width}x{height}: {mp4_path}")
+    if sample_rate <= 0:
+        raise RuntimeError(f"Rendered MP4 has invalid audio sample_rate={sample_rate}: {mp4_path}")
+
+    fmt_dur_s = float(fmt.get("duration") or 0.0)
+    v_dur_s = float(v_stream.get("duration") or fmt_dur_s or 0.0)
+    a_dur_s = float(a_stream.get("duration") or fmt_dur_s or 0.0)
+    if v_dur_s <= 0.0 or a_dur_s <= 0.0:
+        raise RuntimeError(
+            f"Rendered MP4 has non-positive A/V stream durations (video={v_dur_s}s, audio={a_dur_s}s)"
+        )
+
+    v_dur_ms = v_dur_s * 1000.0
+    a_dur_ms = a_dur_s * 1000.0
+    v_start_ms = float(v_stream.get("start_time") or 0.0) * 1000.0
+    a_start_ms = float(a_stream.get("start_time") or 0.0) * 1000.0
+
+    drift_terms = [
+        abs(v_dur_ms - a_dur_ms),
+        abs(v_start_ms - a_start_ms),
+    ]
+    if expected_duration_ms is not None and expected_duration_ms > 0:
+        drift_terms.append(abs(a_dur_ms - float(expected_duration_ms)))
+    av_sync_drift_ms = round(max(drift_terms), 2)
+
+    if av_sync_drift_ms > max_drift_ms:
+        raise RuntimeError(
+            f"A/V sync drift {av_sync_drift_ms:.2f}ms exceeds {max_drift_ms:.1f}ms limit "
+            f"(video={v_dur_ms:.1f}ms, audio={a_dur_ms:.1f}ms, expected={expected_duration_ms}ms)"
+        )
+
+    return {
+        "av_sync_drift_ms": av_sync_drift_ms,
+        "video_duration_ms": int(round(v_dur_ms)),
+        "audio_duration_ms": int(round(a_dur_ms)),
+        "width": width,
+        "height": height,
+        "sample_rate": sample_rate,
+    }
+
+
+def _atomic_publish_file(source_path: Path, target_path: Path) -> Path:
+    """Atomically publishes a file into `target_path` via hidden temp file + fsync + os.replace."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target_path.with_name(
+        f".{target_path.name}.tmp.{os.getpid()}.{threading.get_ident()}"
+    )
+    try:
+        with source_path.open("rb") as src_fh, tmp_path.open("wb") as dst_fh:
+            shutil.copyfileobj(src_fh, dst_fh, length=256 * 1024)
+            dst_fh.flush()
+            os.fsync(dst_fh.fileno())
+        os.replace(tmp_path, target_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    return target_path
+
+
+def _atomic_write_json(payload: Any, target_path: Path) -> Path:
+    """Atomically writes JSON to `target_path` via hidden temp file + fsync + os.replace."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target_path.with_name(
+        f".{target_path.name}.tmp.{os.getpid()}.{threading.get_ident()}"
+    )
+    encoded = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    try:
+        with tmp_path.open("wb") as fh:
+            fh.write(encoded)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, target_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    return target_path
+
+
+def _build_alignment_payload(
+    tts_id: str,
+    duration_ms: int,
+    words: Sequence[Mapping[str, Any]],
+    clauses: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build Remotion + Android compatible alignment JSON (`startMs`/`endMs` camelCase)."""
+    norm_words: list[dict[str, Any]] = []
+    for w in words:
+        w_txt = str(w.get("word") or "").strip()
+        if not w_txt:
+            continue
+        s_ms = max(0, int(w.get("start_ms") if w.get("start_ms") is not None else (w.get("startMs") or 0)))
+        e_ms = max(s_ms, int(w.get("end_ms") if w.get("end_ms") is not None else (w.get("endMs") or s_ms)))
+        norm_words.append({"word": w_txt, "startMs": s_ms, "endMs": e_ms})
+
+    norm_clauses: list[dict[str, Any]] = []
+    for idx, c in enumerate(clauses):
+        s_ms = max(0, int(c.get("start_ms") if c.get("start_ms") is not None else (c.get("startMs") or 0)))
+        e_ms = max(s_ms, int(c.get("end_ms") if c.get("end_ms") is not None else (c.get("endMs") or s_ms)))
+        norm_clauses.append(
+            {
+                "id": str(c.get("id") or f"clause_{idx}"),
+                "index": int(c.get("index") if c.get("index") is not None else idx),
+                "spokenText": str(c.get("spoken_text") or c.get("spokenText") or ""),
+                "startMs": s_ms,
+                "endMs": e_ms,
+            }
+        )
+
+    return {
+        "ttsId": str(tts_id),
+        "durationMs": max(1, int(duration_ms)),
+        "words": norm_words,
+        "clauses": norm_clauses,
+    }
+
+
+def _validate_strict_tts_metrics(
+    metrics: Mapping[str, Any] | None,
+    *,
+    require_present: bool,
+) -> None:
+    """Enforce strict 4-gate pass (`passed_all_strict_gates is True` and `cer <= 0`)."""
+    if metrics is None:
+        if require_present:
+            raise RuntimeError("TTS synthesis did not produce 4-gate verification metrics.")
+        return
+    if not isinstance(metrics, Mapping):
+        raise RuntimeError("TTS synthesis returned malformed verification metrics.")
+    passed = metrics.get("passed_all_strict_gates")
+    cer_raw = metrics.get("cer")
+    if passed is False or (require_present and passed is not True):
+        raise RuntimeError(
+            f"TTS synthesis failed strict 4-gate verification (passed_all_strict_gates={passed}, cer={cer_raw})"
+        )
+    if cer_raw is not None and float(cer_raw) > 0.0:
+        raise RuntimeError(f"TTS synthesis failed strict CER gate: cer={cer_raw} > 0.0")
 
 
 def resolve_latest_synthesis_assets(
@@ -516,10 +739,13 @@ def resolve_latest_synthesis_assets(
     gguf_candidates: list[tuple[int, str, Path]] = []
     # 3. Latest LiteRT codec (`bundles/v002/codec_decoder_fp16.tflite` > `bundles/v001/codec_decoder_fp16.tflite`)
     codec_candidates: list[tuple[int, str, Path]] = []
-    # 4. Bundle helper assets (master_centroid.bin, room_ir_44k.pcm, room_tone_44k.pcm)
+    # 4. Bundle helper assets (master_centroid.bin, room_ir_44k.pcm, room_tone_44k.pcm, lexicon.json, ONNX verifiers)
     centroid_candidates: list[tuple[int, str, Path]] = []
     room_ir_candidates: list[tuple[int, str, Path]] = []
     room_tone_candidates: list[tuple[int, str, Path]] = []
+    lexicon_candidates: list[tuple[int, str, Path]] = []
+    wespeaker_candidates: list[tuple[int, str, Path]] = []
+    dnsmos_candidates: list[tuple[int, str, Path]] = []
 
     def _scan_bundle_dir(bdir: Path, ver_hint: int, label: str) -> None:
         codec = bdir / "codec_decoder_fp16.tflite"
@@ -539,6 +765,15 @@ def resolve_latest_synthesis_assets(
         room_tone = bdir / "room_tone_44k.pcm"
         if room_tone.is_file() and room_tone.stat().st_size > 0:
             room_tone_candidates.append((ver_hint, label, room_tone.resolve()))
+        lex = bdir / "lexicon.json"
+        if lex.is_file() and lex.stat().st_size > 0:
+            lexicon_candidates.append((ver_hint, label, lex.resolve()))
+        wesp = bdir / "wespeaker_resnet34.onnx"
+        if wesp.is_file() and wesp.stat().st_size > 0:
+            wespeaker_candidates.append((ver_hint, label, wesp.resolve()))
+        dnsm = bdir / "dnsmos_p808.onnx"
+        if dnsm.is_file() and dnsm.stat().st_size > 0:
+            dnsmos_candidates.append((ver_hint, label, dnsm.resolve()))
 
     if bundles_root.is_dir():
         _scan_bundle_dir(bundles_root, 0, "")
@@ -552,14 +787,59 @@ def resolve_latest_synthesis_assets(
     centroid_candidates.sort(key=lambda item: (item[0], item[1]))
     room_ir_candidates.sort(key=lambda item: (item[0], item[1]))
     room_tone_candidates.sort(key=lambda item: (item[0], item[1]))
+    lexicon_candidates.sort(key=lambda item: (item[0], item[1]))
+    wespeaker_candidates.sort(key=lambda item: (item[0], item[1]))
+    dnsmos_candidates.sort(key=lambda item: (item[0], item[1]))
+
+    latest_codec_tflite = codec_candidates[-1][2] if codec_candidates else None
+    latest_codec_ver = codec_candidates[-1][0] if codec_candidates else -1
+
+    # 5. PyTorch DAC checkpoint (`dac-finetune-v002/codec_finetuned_v002.pth` when v002+ active, else `s2-pro/codec.pth`)
+    finetuned_pth_candidates: list[tuple[int, str, Path]] = []
+    if models_root.is_dir():
+        for child in models_root.iterdir():
+            if not child.is_dir() or not child.name.startswith("dac-finetune-"):
+                continue
+            ver = _extract_version_num(child.name)
+            for pth in child.glob("codec_finetuned_v*.pth"):
+                if pth.is_file() and pth.stat().st_size > 0:
+                    finetuned_pth_candidates.append((max(ver, _extract_version_num(pth.name)), pth.name, pth.resolve()))
+    finetuned_pth_candidates.sort(key=lambda item: (item[0], item[1]))
+
+    base_codec_pth = (models_root / "s2-pro" / "codec.pth").resolve()
+    resolved_codec_pth: Path | None = None
+    if latest_codec_ver >= 2 and finetuned_pth_candidates:
+        resolved_codec_pth = finetuned_pth_candidates[-1][2]
+    elif base_codec_pth.is_file() and base_codec_pth.stat().st_size > 0:
+        resolved_codec_pth = base_codec_pth
+    elif finetuned_pth_candidates:
+        resolved_codec_pth = finetuned_pth_candidates[-1][2]
+
+    wespeaker_path = wespeaker_candidates[-1][2] if wespeaker_candidates else None
+    if wespeaker_path is None:
+        fallback_wesp = models_root / "wespeaker" / "wespeaker_resnet34.onnx"
+        if fallback_wesp.is_file() and fallback_wesp.stat().st_size > 0:
+            wespeaker_path = fallback_wesp.resolve()
+
+    dnsmos_path = dnsmos_candidates[-1][2] if dnsmos_candidates else None
+    if dnsmos_path is None:
+        for cand_name in ("model_v8.onnx", "dnsmos_p808.onnx"):
+            fallback_dns = models_root / "dnsmos" / cand_name
+            if fallback_dns.is_file() and fallback_dns.stat().st_size > 0:
+                dnsmos_path = fallback_dns.resolve()
+                break
 
     return {
         "lora_dir": latest_lora_dir,
         "lora_gguf": gguf_candidates[-1][2] if gguf_candidates else None,
-        "codec_tflite": codec_candidates[-1][2] if codec_candidates else None,
+        "codec_tflite": latest_codec_tflite,
+        "codec_pth": resolved_codec_pth,
+        "lexicon": lexicon_candidates[-1][2] if lexicon_candidates else None,
         "master_centroid": centroid_candidates[-1][2] if centroid_candidates else None,
         "room_ir": room_ir_candidates[-1][2] if room_ir_candidates else None,
         "room_tone": room_tone_candidates[-1][2] if room_tone_candidates else None,
+        "wespeaker_onnx": wespeaker_path,
+        "dnsmos_onnx": dnsmos_path,
     }
 
 
@@ -593,7 +873,11 @@ class RenderJobManager:
         max_render_body_bytes: int = MAX_RENDER_BODY_BYTES,
         render_runner: RenderRunnerFn | None = None,
         tts_runner: Callable[[str, Path], dict[str, Any] | None] | None = None,
+        tts_studio_runner: Callable[..., dict[str, Any]] | None = None,
+        aligner_fn: Callable[[Path, str], list[dict[str, Any]]] | None = None,
+        plate_runner: Callable[[str, str, Path], None] | None = None,
     ) -> None:
+        self._plate_runner = plate_runner
         self.renders_dir = Path(renders_dir).resolve()
         self.bundles_root = Path(bundles_root).resolve()
         self.models_root = (
@@ -610,6 +894,8 @@ class RenderJobManager:
         self.max_render_body_bytes = max_render_body_bytes
         self._render_runner = render_runner
         self._tts_runner = tts_runner
+        self._tts_studio_runner = tts_studio_runner
+        self._aligner_fn = aligner_fn
 
         if python_bin is not None:
             self.python_bin = Path(python_bin)
@@ -619,9 +905,15 @@ class RenderJobManager:
             self.python_bin = Path(sys.executable)
 
         self._lock = threading.Lock()
+        self._tts_lock = threading.Lock()
+        self._warm_tts_engine: Any = None
         self._jobs: dict[str, dict[str, Any]] = {}
         self._queue: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue()
         self._worker_thread: threading.Thread | None = None
+        self._tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aircheck-tts")
+        self._async_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="aircheck-async")
+        self._pending_async_lock = threading.Lock()
+        self._pending_async_counts: dict[str, int] = {"tts": 0, "async": 0}
         self._shutdown = False
 
         self._load_existing_jobs()
@@ -629,14 +921,108 @@ class RenderJobManager:
     def _load_existing_jobs(self) -> None:
         if not self.jobs_dir.is_dir():
             return
-        for path in self.jobs_dir.glob("*.json"):
+        for path in sorted(self.jobs_dir.glob("*.json")):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 job_id = str(raw.get("job_id") or "").strip()
                 if job_id and _SAFE_SEGMENT_RE.match(job_id):
+                    if raw.get("status") not in ("READY", "FAILED"):
+                        is_async = raw.get("kind") == "async_task"
+                        raw["status"] = "FAILED"
+                        raw["stage_detail"] = "Failed"
+                        raw["error_message"] = (
+                            "Rig restarted while this task was running; resubmit."
+                            if is_async
+                            else "Rig restarted while this job was running; resubmit."
+                        )
+                        raw["error_kind"] = "rig_restarted"
+                        raw["updated_at_utc"] = _utc_now_iso()
+                        self._persist_job_locked(raw)
                     self._jobs[job_id] = raw
             except Exception:
                 continue
+
+    def submit_async_task(
+        self, task_kind: str, fn: Callable[[dict[str, Any]], dict[str, Any]], payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Runs a long rig stage in the background; clients poll ``GET /v1/jobs/<task id>``.
+
+        The task record is persisted, so a phone that lost its process can resume polling the
+        same task instead of re-submitting (and re-paying for) the work.
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be a JSON object")
+        if self._shutdown:
+            raise AsyncQueueFullError("Server is shutting down")
+
+        pool_key = "tts" if task_kind == "tts" else "async"
+        executor = self._tts_executor if pool_key == "tts" else self._async_executor
+        with self._pending_async_lock:
+            if self._pending_async_counts[pool_key] >= MAX_PENDING_ASYNC_TASKS:
+                raise AsyncQueueFullError(
+                    f"Bounded {pool_key} async queue full ({MAX_PENDING_ASYNC_TASKS} pending); retry shortly."
+                )
+            self._pending_async_counts[pool_key] += 1
+
+        task_id = f"task_{uuid.uuid4().hex[:16]}"
+        now_iso = _utc_now_iso()
+        record = {
+            "job_id": task_id,
+            "kind": "async_task",
+            "task_kind": task_kind,
+            "status": "RUNNING",
+            "progress_fraction": 0.0,
+            "stage_detail": f"{task_kind} running",
+            "error_message": None,
+            "result": None,
+            "created_at_utc": now_iso,
+            "updated_at_utc": now_iso,
+        }
+        with self._lock:
+            self._jobs[task_id] = record
+            self._persist_job_locked(record)
+
+        def _run() -> None:
+            try:
+                result = fn(payload)
+                patch = {"status": "READY", "progress_fraction": 1.0, "stage_detail": "Ready", "result": result}
+            except Exception as exc:  # noqa: BLE001 - reported to the client verbatim
+                patch = {
+                    "status": "FAILED",
+                    "stage_detail": "Failed",
+                    "error_message": str(exc) or exc.__class__.__name__,
+                    "error_kind": "invalid_request" if isinstance(exc, ValueError) else "task_failed",
+                }
+            finally:
+                with self._pending_async_lock:
+                    self._pending_async_counts[pool_key] = max(0, self._pending_async_counts[pool_key] - 1)
+            with self._lock:
+                current = dict(self._jobs.get(task_id) or record)
+                current.update(patch)
+                current["updated_at_utc"] = _utc_now_iso()
+                self._jobs[task_id] = current
+                self._persist_job_locked(current)
+
+        try:
+            executor.submit(_run)
+        except Exception as exc:
+            with self._pending_async_lock:
+                self._pending_async_counts[pool_key] = max(0, self._pending_async_counts[pool_key] - 1)
+            with self._lock:
+                current = dict(self._jobs.get(task_id) or record)
+                current.update(
+                    {
+                        "status": "FAILED",
+                        "stage_detail": "Failed",
+                        "error_message": str(exc) or exc.__class__.__name__,
+                        "error_kind": "queue_unavailable",
+                        "updated_at_utc": _utc_now_iso(),
+                    }
+                )
+                self._jobs[task_id] = current
+                self._persist_job_locked(current)
+            raise AsyncQueueFullError(str(exc) or "Async executor unavailable") from exc
+        return {"job_id": task_id, "status": "RUNNING", "task_kind": task_kind}
 
     def _ensure_worker_started_locked(self) -> None:
         if self._shutdown:
@@ -656,6 +1042,8 @@ class RenderJobManager:
         if worker is not None and worker.is_alive():
             self._queue.put(None)
             worker.join(timeout=3.0)
+        self._tts_executor.shutdown(wait=False, cancel_futures=True)
+        self._async_executor.shutdown(wait=False, cancel_futures=True)
 
     def _persist_job_locked(self, job: dict[str, Any]) -> None:
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -682,7 +1070,10 @@ class RenderJobManager:
         progress_fraction: float | None = None,
         stage_detail: str | None = None,
         error_message: str | None = ...,  # type: ignore[assignment]
+        error_kind: str | None = ...,  # type: ignore[assignment]
         video_url: str | None = ...,  # type: ignore[assignment]
+        align_url: str | None = ...,  # type: ignore[assignment]
+        words: list[dict[str, Any]] | None = ...,  # type: ignore[assignment]
         duration_ms: int | None = None,
         metrics: dict[str, Any] | None = ...,  # type: ignore[assignment]
     ) -> dict[str, Any]:
@@ -696,8 +1087,14 @@ class RenderJobManager:
                 job["stage_detail"] = stage_detail
             if error_message is not ...:
                 job["error_message"] = error_message
+            if error_kind is not ...:
+                job["error_kind"] = error_kind
             if video_url is not ...:
                 job["video_url"] = video_url
+            if align_url is not ...:
+                job["align_url"] = align_url
+            if words is not ...:
+                job["words"] = words
             if duration_ms is not None:
                 job["duration_ms"] = max(0, int(duration_ms))
             if metrics is not ...:
@@ -762,6 +1159,8 @@ class RenderJobManager:
                 continue
             stem = path.stem
             job_rec = jobs_by_id.get(stem)
+            if job_rec is not None and job_rec.get("status") != "READY":
+                continue
             if job_rec and job_rec.get("title"):
                 title = str(job_rec["title"])
             else:
@@ -824,11 +1223,15 @@ class RenderJobManager:
                 ],
                 capture_output=True,
                 text=True,
+                timeout=30,
                 check=False,
             )
             if proc.returncode == 0 and tmp_jpg.is_file() and tmp_jpg.stat().st_size > 0:
                 os.replace(tmp_jpg, thumb_path)
                 return thumb_path
+        except (subprocess.TimeoutExpired, OSError):
+            LOGGER.warning("Thumbnail generation failed or timed out for %s", mp4_path)
+            return None
         finally:
             if tmp_jpg.exists():
                 tmp_jpg.unlink(missing_ok=True)
@@ -861,11 +1264,12 @@ class RenderJobManager:
                 f"voice_source must be one of {sorted(VALID_VOICE_SOURCES)}, got {voice_source!r}"
             )
 
-        resolution = str(payload.get("resolution") or "720P").strip().upper()
-        if resolution not in VALID_RESOLUTIONS:
+        raw_resolution = str(payload.get("resolution") or "720P").strip().upper()
+        if raw_resolution not in VALID_RESOLUTIONS:
             raise ValueError(
-                f"resolution must be one of {sorted(VALID_RESOLUTIONS)}, got {resolution!r}"
+                f"resolution must be one of {sorted(VALID_RESOLUTIONS)}, got {raw_resolution!r}"
             )
+        resolution = normalize_talking_head_resolution(raw_resolution)
 
         ratio = str(payload.get("ratio") or "9:16").strip()
         if ratio not in VALID_RATIOS:
@@ -875,9 +1279,9 @@ class RenderJobManager:
 
         max_duration_raw = payload.get("max_duration", 10)
         if isinstance(max_duration_raw, bool) or not isinstance(max_duration_raw, int):
-            raise ValueError("max_duration must be an integer between 2 and 60")
-        if not (2 <= max_duration_raw <= 60):
-            raise ValueError("max_duration must be between 2 and 60 seconds")
+            raise ValueError(f"max_duration must be an integer between 2 and {MAX_RENDER_DURATION_SEC}")
+        if not (2 <= max_duration_raw <= MAX_RENDER_DURATION_SEC):
+            raise ValueError(f"max_duration must be between 2 and {MAX_RENDER_DURATION_SEC} seconds")
 
         raw_audio_b64 = payload.get("audio_wav_base64")
         raw_photo_b64 = payload.get("photo_jpeg_base64")
@@ -888,8 +1292,29 @@ class RenderJobManager:
 
         if voice_source == "MIC_VOICEOVER" and audio_bytes is None:
             raise ValueError("audio_wav_base64 is required when voice_source is MIC_VOICEOVER")
-        if voice_source == "ENROLLED_VOICE_CLONE" and not spoken_text:
+        if voice_source == "ENROLLED_VOICE_CLONE" and not spoken_text and audio_bytes is None:
             raise ValueError("spoken_text is required when voice_source is ENROLLED_VOICE_CLONE")
+
+        raw_clauses = payload.get("clauses")
+        caller_clauses: list[dict[str, Any]] | None = None
+        if raw_clauses is not None:
+            if not isinstance(raw_clauses, list) or any(not isinstance(c, dict) for c in raw_clauses):
+                raise ValueError("clauses must be a list of JSON objects")
+            caller_clauses = [dict(c) for c in raw_clauses]
+
+        raw_words = payload.get("words")
+        caller_words: list[dict[str, Any]] | None = None
+        if raw_words is not None:
+            if not isinstance(raw_words, list) or any(not isinstance(w, dict) for w in raw_words):
+                raise ValueError("words must be a list of JSON objects")
+            caller_words = [dict(w) for w in raw_words]
+
+        raw_align_url = payload.get("align_url")
+        caller_align_url: str | None = None
+        if raw_align_url is not None:
+            if not isinstance(raw_align_url, str):
+                raise ValueError("align_url must be a string")
+            caller_align_url = raw_align_url.strip() or None
 
         photo_bytes: bytes | None = None
         if raw_photo_b64 is not None and str(raw_photo_b64).strip() != "":
@@ -948,6 +1373,9 @@ class RenderJobManager:
             "chyron_headline": chyron_headline,
             "chyron_subline": chyron_subline,
             "show_brand_bug": show_brand_bug,
+            "clauses": caller_clauses,
+            "words": caller_words,
+            "align_url": caller_align_url,
             "work_dir": work_dir,
         }
 
@@ -1025,6 +1453,8 @@ class RenderJobManager:
             duration_ms = _probe_media_duration_ms(final_mp4)
 
         metrics = result.get("metrics")
+        align_url = result.get("align_url")
+        words = result.get("words")
         self._update_job(
             job_id,
             status="READY",
@@ -1032,9 +1462,80 @@ class RenderJobManager:
             stage_detail="Ready",
             error_message=None,
             video_url=f"/v1/renders/{job_id}.mp4",
+            align_url=align_url,
+            words=words,
             duration_ms=duration_ms,
             metrics=metrics,
         )
+
+    def _get_warm_tts_engine(self) -> Any:
+        if self._warm_tts_engine is None:
+            daemon_dir = str(Path(__file__).resolve().parent)
+            if daemon_dir not in sys.path:
+                sys.path.insert(0, daemon_dir)
+            import s2_pro_infer
+
+            self._warm_tts_engine = s2_pro_infer.get_shared_warm_engine()
+        return self._warm_tts_engine
+
+    def _run_broadcast_tts_stage(
+        self,
+        *,
+        project_id: str,
+        spoken_text: str,
+        caller_clauses: list[dict[str, str]] | None,
+        studio_dir: Path,
+        assets: dict[str, Path | None],
+        takes_per_clause: int = 4,
+    ) -> dict[str, Any]:
+        with self._tts_lock:
+            if self._tts_studio_runner is not None:
+                return dict(
+                    self._tts_studio_runner(
+                        project_id=project_id,
+                        spoken_text=spoken_text,
+                        caller_clauses=caller_clauses,
+                        output_dir=studio_dir,
+                        assets=assets,
+                    )
+                )
+
+            daemon_dir = str(Path(__file__).resolve().parent)
+            if daemon_dir not in sys.path:
+                sys.path.insert(0, daemon_dir)
+            import render_broadcast_studio as rbs
+
+            kwargs: dict[str, Any] = {
+                "script_text": spoken_text,
+                "caller_clauses": caller_clauses,
+                "project_id": project_id,
+                "output_dir": studio_dir,
+                "takes_per_clause": takes_per_clause,
+                "skip_video": True,
+                "require_strict_gates": True,
+                "require_real_alignment": True,
+                "warm_engine": self._get_warm_tts_engine(),
+            }
+            if assets.get("lexicon") is not None:
+                kwargs["lexicon_path"] = assets["lexicon"]
+            if assets.get("lora_dir") is not None:
+                kwargs["lora_dir"] = assets["lora_dir"]
+            if assets.get("codec_tflite") is not None:
+                kwargs["dac_tflite"] = assets["codec_tflite"]
+            if assets.get("codec_pth") is not None:
+                kwargs["codec_pth"] = assets["codec_pth"]
+            if assets.get("master_centroid") is not None:
+                kwargs["master_centroid_path"] = assets["master_centroid"]
+            if assets.get("wespeaker_onnx") is not None:
+                kwargs["wespeaker_onnx"] = assets["wespeaker_onnx"]
+            if assets.get("dnsmos_onnx") is not None:
+                kwargs["dnsmos_onnx"] = assets["dnsmos_onnx"]
+            if assets.get("room_ir") is not None:
+                kwargs["room_ir_path"] = assets["room_ir"]
+            if assets.get("room_tone") is not None:
+                kwargs["room_tone_path"] = assets["room_tone"]
+
+            return rbs.render_broadcast_studio(**kwargs)
 
     def _default_render_runner(
         self,
@@ -1055,85 +1556,112 @@ class RenderJobManager:
         python_exe = str(self.python_bin)
 
         metrics: dict[str, Any] | None = None
-        if voice_source == "MIC_VOICEOVER" and spec.get("audio_wav_path") is not None:
+        align_url: str | None = None
+        words: list[dict[str, Any]] | None = None
+        timed_clauses: list[dict[str, Any]] = []
+        if spec.get("audio_wav_path") is not None:
             voice_wav = Path(spec["audio_wav_path"])
             if not voice_wav.is_file() or voice_wav.stat().st_size == 0:
-                raise FileNotFoundError(f"Recorded mic WAV missing or empty: {voice_wav}")
+                raise FileNotFoundError(f"Uploaded audio WAV missing or empty: {voice_wav}")
+            if isinstance(spec.get("words"), list):
+                words = list(spec["words"])
+            if isinstance(spec.get("clauses"), list):
+                timed_clauses = list(spec["clauses"])
+            align_url = spec.get("align_url")
+            if words and not align_url:
+                pre_dur_ms = _probe_media_duration_ms(voice_wav)
+                if pre_dur_ms <= 0:
+                    pre_dur_ms, _ = _measure_wav_duration_and_peaks(voice_wav, num_bins=16)
+                align_filename = f"align_{spec['job_id']}.json"
+                _atomic_write_json(
+                    _build_alignment_payload(str(spec["job_id"]), pre_dur_ms, words, timed_clauses),
+                    self.renders_dir / align_filename,
+                )
+                align_url = f"/v1/renders/{align_filename}"
             report_progress(
                 status="VOICE",
                 progress_fraction=0.25,
-                stage_detail="Prepared recorded mic voiceover WAV",
+                stage_detail=(
+                    "Prepared recorded mic voiceover WAV"
+                    if voice_source == "MIC_VOICEOVER"
+                    else "Prepared pre-synthesized voiceover WAV"
+                ),
             )
         else:
-            synth_script = daemon_dir / "synthesize_and_render.py"
-            if not synth_script.is_file():
-                raise FileNotFoundError(f"synthesize_and_render.py not found at {synth_script}")
-
+            if not re.search(r"[A-Za-z0-9]", spoken_text):
+                raise ValueError("spoken_text must contain speakable words")
             assets = resolve_latest_synthesis_assets(self.models_root, self.bundles_root)
             synth_wav = work_dir / "synthesized_voice.wav"
-            report_json = work_dir / "synth_verification_report.json"
+            studio_dir = work_dir / "studio"
 
             lora_label = assets["lora_dir"].parent.name if assets.get("lora_dir") else "default"
             report_progress(
                 status="VOICE",
                 progress_fraction=0.20,
-                stage_detail=f"Synthesizing voice ({lora_label})",
+                stage_detail=f"Synthesizing multi-clause voice ({lora_label})",
             )
 
-            synth_cmd = [
-                python_exe,
-                str(synth_script),
-                "--target-text",
-                spoken_text,
-                "--seeds",
-                "948101,948102",
-                "--output-wav",
-                str(synth_wav),
-                "--report-json",
-                str(report_json),
-                "--skip-video",
-            ]
-            if assets.get("lora_dir") is not None:
-                synth_cmd.extend(["--lora-dir", str(assets["lora_dir"])])
-            if assets.get("codec_tflite") is not None:
-                synth_cmd.extend(["--codec-tflite", str(assets["codec_tflite"])])
-            if assets.get("master_centroid") is not None:
-                synth_cmd.extend(["--master-centroid", str(assets["master_centroid"])])
-            if assets.get("room_ir") is not None:
-                synth_cmd.extend(["--room-ir", str(assets["room_ir"])])
-            if assets.get("room_tone") is not None:
-                synth_cmd.extend(["--room-tone", str(assets["room_tone"])])
-
-            proc = subprocess.run(synth_cmd, capture_output=True, text=True, check=False)
-            if proc.returncode != 0:
-                raise RuntimeError(_summarize_subprocess_error("synthesize_and_render.py", proc))
-            if not synth_wav.is_file() or synth_wav.stat().st_size == 0:
-                raise RuntimeError(
-                    f"synthesize_and_render.py exited 0 but did not produce {synth_wav}"
-                )
-
-            if report_json.is_file():
-                try:
-                    report_data = json.loads(report_json.read_text(encoding="utf-8"))
-                    selected = report_data.get("selected_take") or {}
-                    gates = selected.get("mastered_gates") or selected.get("raw_gates") or {}
-                    mastering = selected.get("mastering") or {}
-                    metrics = {
-                        "cer": gates.get("cer"),
-                        "wespeaker_cosine": gates.get("wespeaker_cosine"),
-                        "dnsmos_p808": gates.get("dnsmos_p808"),
-                        "syllables_per_sec": gates.get("syllables_per_sec"),
-                        "tail_rms_dbfs": gates.get("tail_rms_dbfs"),
-                        "mastered_lufs": mastering.get("mastered_lufs"),
-                        "recognized_text": gates.get("recognized_text"),
-                        "passed_all_strict_gates": gates.get("passed_all_strict_gates"),
-                        "lora_dir": str(assets["lora_dir"]) if assets.get("lora_dir") else None,
-                        "lora_gguf": str(assets["lora_gguf"]) if assets.get("lora_gguf") else None,
-                        "codec_tflite": str(assets["codec_tflite"]) if assets.get("codec_tflite") else None,
+            caller_clauses_arg: list[dict[str, str]] | None = None
+            if isinstance(spec.get("clauses"), list):
+                cleaned_clauses = [
+                    {
+                        "id": str(c.get("id") or f"clause_{idx}"),
+                        "spoken_text": str(c.get("spoken_text") or "").strip(),
                     }
-                except Exception as exc:
-                    LOGGER.warning("Could not parse synth report %s: %s", report_json, exc)
+                    for idx, c in enumerate(spec["clauses"])
+                    if isinstance(c, Mapping) and str(c.get("spoken_text") or "").strip()
+                ]
+                if cleaned_clauses:
+                    caller_clauses_arg = cleaned_clauses
 
+            studio_report = self._run_broadcast_tts_stage(
+                project_id=str(spec["job_id"]),
+                spoken_text=spoken_text,
+                caller_clauses=caller_clauses_arg,
+                studio_dir=studio_dir,
+                assets=assets,
+            )
+            master_wav_raw = studio_report.get("master_wav_path")
+            if not master_wav_raw:
+                raise RuntimeError("Broadcast studio TTS completed without master_wav_path")
+            master_wav = Path(master_wav_raw)
+            if not master_wav.is_file() or master_wav.stat().st_size <= 44:
+                raise RuntimeError(f"Broadcast studio TTS produced missing/empty WAV: {master_wav}")
+            if master_wav.resolve() != synth_wav.resolve():
+                _atomic_publish_file(master_wav, synth_wav)
+
+            raw_metrics = studio_report.get("metrics")
+            _validate_strict_tts_metrics(raw_metrics, require_present=True)
+            assert isinstance(raw_metrics, Mapping)
+            metrics = dict(raw_metrics)
+            if assets.get("lora_dir") and not metrics.get("lora_dir"):
+                metrics["lora_dir"] = str(assets["lora_dir"])
+            if assets.get("lora_gguf") and not metrics.get("lora_gguf"):
+                metrics["lora_gguf"] = str(assets["lora_gguf"])
+            if assets.get("codec_tflite") and not metrics.get("codec_tflite"):
+                metrics["codec_tflite"] = str(assets["codec_tflite"])
+
+            words = list(studio_report.get("words") or [])
+            if not words and self._aligner_fn is not None:
+                words = list(self._aligner_fn(synth_wav, spoken_text))
+            if not words:
+                raise RuntimeError("TTS forced word alignment produced zero words.")
+
+            timed_clauses = list(
+                studio_report.get("timed_clauses")
+                or studio_report.get("clauses")
+                or []
+            )
+            voice_dur_ms = int(studio_report.get("duration_ms") or _probe_media_duration_ms(synth_wav))
+            if voice_dur_ms <= 0:
+                voice_dur_ms, _ = _measure_wav_duration_and_peaks(synth_wav, num_bins=16)
+
+            align_filename = f"align_{spec['job_id']}.json"
+            _atomic_write_json(
+                _build_alignment_payload(str(spec["job_id"]), voice_dur_ms, words, timed_clauses),
+                self.renders_dir / align_filename,
+            )
+            align_url = f"/v1/renders/{align_filename}"
             voice_wav = synth_wav
 
         head_script = daemon_dir / "generate_talking_head.py"
@@ -1147,7 +1675,14 @@ class RenderJobManager:
             metrics=metrics,
         )
 
-        raw_out_mp4 = work_dir / "talking_head.mp4"
+        voice_ms = _probe_media_duration_ms(voice_wav)
+        if voice_ms <= 0:
+            try:
+                voice_ms, _ = _measure_wav_duration_and_peaks(voice_wav, num_bins=16)
+            except Exception:
+                voice_ms = 0
+
+        seg_mp4 = work_dir / "talking_head.mp4"
         head_cmd = [
             python_exe,
             str(head_script),
@@ -1156,7 +1691,7 @@ class RenderJobManager:
             "--avatar",
             str(avatar_path),
             "--output",
-            str(raw_out_mp4),
+            str(seg_mp4),
             "--resolution",
             resolution,
             "--ratio",
@@ -1166,6 +1701,14 @@ class RenderJobManager:
         ]
         if spoken_text:
             head_cmd.extend(["--transcript", spoken_text])
+        if timed_clauses:
+            clauses_json = work_dir / "talking_head_clauses.json"
+            clauses_json.write_text(json.dumps(timed_clauses, ensure_ascii=False), encoding="utf-8")
+            head_cmd.extend(["--clauses-json", str(clauses_json)])
+        if words:
+            words_json = work_dir / "talking_head_words.json"
+            words_json.write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
+            head_cmd.extend(["--words-json", str(words_json)])
         head_cmd.extend(
             [
                 "--style-prompt",
@@ -1177,30 +1720,49 @@ class RenderJobManager:
                 ),
             ]
         )
+        head_timeout_sec = max(TALKING_HEAD_TIMEOUT_BASE_SEC, max_duration * 20)
+        try:
+            head_proc = subprocess.run(
+                head_cmd,
+                capture_output=True,
+                text=True,
+                timeout=head_timeout_sec,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"generate_talking_head.py timed out after {head_timeout_sec}s") from exc
 
-        head_proc = subprocess.run(head_cmd, capture_output=True, text=True, check=False)
         if head_proc.returncode != 0:
             raise RuntimeError(_summarize_subprocess_error("generate_talking_head.py", head_proc))
-
         head_meta: dict[str, Any] = {}
         stdout_text = (head_proc.stdout or "").strip()
         if stdout_text:
             try:
-                head_meta = json.loads(stdout_text)
-            except json.JSONDecodeError:
-                head_meta = {}
+                parsed_meta = json.loads(stdout_text)
+            except json.JSONDecodeError as exc:
+                LOGGER.error("generate_talking_head.py returned invalid JSON stdout: %s", stdout_text[:300])
+                raise RuntimeError(
+                    f"generate_talking_head.py returned invalid JSON stdout: {exc}"
+                ) from exc
+            if not isinstance(parsed_meta, dict):
+                raise RuntimeError(
+                    f"generate_talking_head.py returned non-object JSON stdout: {type(parsed_meta).__name__}"
+                )
+            head_meta = parsed_meta
 
-        # Prefer wan3.0-video's native frame-accurate lip-locked output (`raw_out_mp4`) over
-        # post-hoc audio replacement (`exact_voice_mp4`), because blind audio replacement shifts
-        # lip timing whenever the input WAV cadence differs from the generated video cadence.
-        chosen_mp4 = (
-            raw_out_mp4
-            if raw_out_mp4.is_file() and raw_out_mp4.stat().st_size > 0
-            else Path(str(head_meta.get("exact_input_voice_mp4", "")))
-        )
-        if not chosen_mp4.is_file() or chosen_mp4.stat().st_size == 0:
+        exact_raw = str(head_meta.get("exact_input_voice_mp4") or "").strip()
+        if exact_raw:
+            exact_mp4 = Path(exact_raw)
+            if not (exact_mp4.is_file() and exact_mp4.stat().st_size > 0):
+                raise RuntimeError(
+                    f"generate_talking_head.py reported exact_input_voice_mp4={exact_mp4} but file is missing or empty"
+                )
+            chosen_mp4 = exact_mp4
+        elif seg_mp4.is_file() and seg_mp4.stat().st_size > 0:
+            chosen_mp4 = seg_mp4
+        else:
             raise RuntimeError(
-                f"generate_talking_head.py exited 0 but did not produce {chosen_mp4}"
+                f"generate_talking_head.py exited 0 but did not produce {seg_mp4}"
             )
 
         chyron_headline = str(spec.get("chyron_headline") or "").strip()
@@ -1222,20 +1784,38 @@ class RenderJobManager:
                 show_live_bug=show_brand_bug,
             )
 
-        target_mp4 = self.renders_dir / f"{spec['job_id']}.mp4"
-        _atomic_publish_mp4(chosen_mp4, target_mp4)
-        duration_ms = _probe_media_duration_ms(target_mp4)
+        staged_mp4 = work_dir / f"{spec['job_id']}_staged.mp4"
+        _atomic_publish_mp4(chosen_mp4, staged_mp4)
+        expected_dur_ms = (
+            min(voice_ms, max_duration * 1000)
+            if voice_ms > 0
+            else None
+        )
+        av_qa = _probe_av_sync_metrics(staged_mp4, expected_duration_ms=expected_dur_ms)
+        metrics_out: dict[str, Any] = dict(metrics) if metrics is not None else {}
+        metrics_out["av_sync_drift_ms"] = av_qa["av_sync_drift_ms"]
+        metrics_out["video_duration_ms"] = av_qa["video_duration_ms"]
+        metrics_out["audio_duration_ms"] = av_qa["audio_duration_ms"]
+
+        duration_ms = _probe_media_duration_ms(staged_mp4)
+        if duration_ms <= 0:
+            duration_ms = av_qa["audio_duration_ms"]
         if duration_ms <= 0 and isinstance(head_meta.get("duration_sec"), (int, float)):
             duration_ms = max(0, int(round(float(head_meta["duration_sec"]) * 1000.0)))
+
+        target_mp4 = self.renders_dir / f"{spec['job_id']}.mp4"
+        _atomic_publish_file(staged_mp4, target_mp4)
 
         return {
             "output_mp4": target_mp4,
             "duration_ms": duration_ms,
-            "metrics": metrics,
+            "metrics": metrics_out,
+            "align_url": align_url,
+            "words": words,
         }
 
     def synthesize_story_tts(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Stage 1 of the Core Pipeline: synthesizes spoken WAV + real waveform & clause timings."""
+        """Stage 1 of the Core Pipeline: synthesizes spoken WAV + real waveform & forced alignment."""
         if not isinstance(payload, dict):
             raise ValueError("TTS request body must be a JSON object")
 
@@ -1246,18 +1826,22 @@ class RenderJobManager:
                 if isinstance(item, dict):
                     txt = str(item.get("spoken_text") or "").strip()
                     cid = str(item.get("id") or f"clause_{idx}")
-                    if txt:
+                    if txt and re.search(r"[A-Za-z0-9]", txt):
                         clauses_in.append({"id": cid, "spoken_text": txt})
 
         spoken_text = str(payload.get("spoken_text") or "").strip()
         if not clauses_in and spoken_text:
-            parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", spoken_text) if p.strip()]
+            parts = [
+                p.strip()
+                for p in re.split(r"(?<=[.!?])\s+", spoken_text)
+                if p.strip() and re.search(r"[A-Za-z0-9]", p)
+            ]
             clauses_in = [
                 {"id": f"clause_{idx}", "spoken_text": part}
                 for idx, part in enumerate(parts)
             ]
         if not clauses_in:
-            raise ValueError("Provide non-empty spoken_text or clauses for TTS synthesis.")
+            raise ValueError("spoken_text must contain speakable words")
 
         joined_text = " ".join(c["spoken_text"] for c in clauses_in).strip()
         tts_id = f"tts_{uuid.uuid4().hex[:16]}"
@@ -1267,53 +1851,83 @@ class RenderJobManager:
         out_wav = self.renders_dir / f"{tts_id}.wav"
 
         metrics: dict[str, Any] | None = None
+        words: list[dict[str, Any]] = []
+        timed_clauses: list[dict[str, Any]] = []
+        source_wav: Path
+
         if self._tts_runner is not None:
-            metrics = self._tts_runner(joined_text, out_wav)
+            staged_wav = work_dir / f"{tts_id}.wav"
+            with self._tts_lock:
+                metrics = self._tts_runner(joined_text, staged_wav)
+            _validate_strict_tts_metrics(metrics, require_present=False)
+            if not staged_wav.is_file() or staged_wav.stat().st_size <= 44:
+                raise RuntimeError("TTS synthesis did not produce a valid WAV file.")
+            duration_ms, peaks = _measure_wav_duration_and_peaks(staged_wav, num_bins=64)
+            if isinstance(metrics, Mapping) and isinstance(metrics.get("clauses"), list):
+                timed_clauses = list(metrics["clauses"])
+            else:
+                timed_clauses = _distribute_clause_timings(clauses_in, duration_ms)
+            if isinstance(metrics, Mapping) and isinstance(metrics.get("words"), list):
+                words = list(metrics["words"])
+            elif self._aligner_fn is not None:
+                words = list(self._aligner_fn(staged_wav, joined_text))
+            source_wav = staged_wav
         else:
-            daemon_dir = Path(__file__).resolve().parent
-            synth_script = daemon_dir / "synthesize_and_render.py"
-            if not synth_script.is_file():
-                raise FileNotFoundError(f"synthesize_and_render.py not found at {synth_script}")
             assets = resolve_latest_synthesis_assets(self.models_root, self.bundles_root)
-            report_json = work_dir / "tts_report.json"
-            synth_cmd = [
-                str(self.python_bin),
-                str(synth_script),
-                "--target-text",
-                joined_text,
-                "--seeds",
-                "948101,948102",
-                "--output-wav",
-                str(out_wav),
-                "--report-json",
-                str(report_json),
-                "--skip-video",
-            ]
-            if assets.get("lora_dir") is not None:
-                synth_cmd.extend(["--lora-dir", str(assets["lora_dir"])])
-            if assets.get("codec_tflite") is not None:
-                synth_cmd.extend(["--codec-tflite", str(assets["codec_tflite"])])
-            if assets.get("master_centroid") is not None:
-                synth_cmd.extend(["--master-centroid", str(assets["master_centroid"])])
-            if assets.get("room_ir") is not None:
-                synth_cmd.extend(["--room-ir", str(assets["room_ir"])])
-            if assets.get("room_tone") is not None:
-                synth_cmd.extend(["--room-tone", str(assets["room_tone"])])
-            proc = subprocess.run(synth_cmd, capture_output=True, text=True, check=False)
-            if proc.returncode != 0:
-                raise RuntimeError(_summarize_subprocess_error("synthesize_and_render.py", proc))
+            studio_report = self._run_broadcast_tts_stage(
+                project_id=str(payload.get("project_id") or tts_id),
+                spoken_text=joined_text,
+                caller_clauses=clauses_in,
+                studio_dir=work_dir / "studio",
+                assets=assets,
+            )
+            master_wav_raw = studio_report.get("master_wav_path")
+            if not master_wav_raw:
+                raise RuntimeError("Broadcast studio TTS completed without master_wav_path")
+            master_wav = Path(master_wav_raw)
+            if not master_wav.is_file() or master_wav.stat().st_size <= 44:
+                raise RuntimeError("TTS synthesis did not produce a valid WAV file.")
 
-        if not out_wav.is_file() or out_wav.stat().st_size <= 44:
-            raise RuntimeError("TTS synthesis did not produce a valid WAV file.")
+            raw_metrics = studio_report.get("metrics")
+            _validate_strict_tts_metrics(raw_metrics, require_present=True)
+            assert isinstance(raw_metrics, Mapping)
+            metrics = dict(raw_metrics)
+            if assets.get("lora_dir") and not metrics.get("lora_dir"):
+                metrics["lora_dir"] = str(assets["lora_dir"])
+            if assets.get("lora_gguf") and not metrics.get("lora_gguf"):
+                metrics["lora_gguf"] = str(assets["lora_gguf"])
+            if assets.get("codec_tflite") and not metrics.get("codec_tflite"):
+                metrics["codec_tflite"] = str(assets["codec_tflite"])
 
-        duration_ms, peaks = _measure_wav_duration_and_peaks(out_wav, num_bins=64)
-        timed_clauses = _distribute_clause_timings(clauses_in, duration_ms)
+            words = list(studio_report.get("words") or [])
+            if not words and self._aligner_fn is not None:
+                words = list(self._aligner_fn(master_wav, joined_text))
+            if not words:
+                raise RuntimeError("Forced word alignment produced zero words.")
+
+            timed_clauses = list(
+                studio_report.get("timed_clauses")
+                or studio_report.get("clauses")
+                or []
+            )
+            if not timed_clauses:
+                raise RuntimeError("Broadcast studio TTS produced zero timed clauses.")
+
+            duration_ms, peaks = _measure_wav_duration_and_peaks(master_wav, num_bins=64)
+            source_wav = master_wav
+
+        align_filename = f"align_{tts_id}.json"
+        align_payload = _build_alignment_payload(tts_id, duration_ms, words, timed_clauses)
+        _atomic_publish_file(source_wav, out_wav)
+        _atomic_write_json(align_payload, self.renders_dir / align_filename)
         return {
             "tts_id": tts_id,
             "audio_url": f"/v1/renders/{tts_id}.wav",
             "duration_ms": duration_ms,
             "waveform_peaks": peaks,
             "clauses": timed_clauses,
+            "words": words,
+            "align_url": f"/v1/renders/{align_filename}",
             "metrics": metrics,
         }
 
@@ -1349,13 +1963,30 @@ class RenderJobManager:
         overlays = raw_overlays if isinstance(raw_overlays, list) else []
 
         staged_out = work_dir / "chopped_final.mp4"
-        produced_mp4, broll_cuts, applied_overlays = _compose_broll_and_saved_overlays_mp4(
-            src_mp4=src_mp4,
-            out_mp4=staged_out,
-            work_dir=work_dir,
-            clauses=clauses,
-            overlays=overlays,
-        )
+        studio_stats: dict[str, Any] = {}
+        if "render_options" in payload:
+            options = StudioRenderOptions.from_payload(payload.get("render_options"))
+            studio_stats = compose_studio_cut(
+                src_mp4=src_mp4,
+                out_mp4=staged_out,
+                work_dir=work_dir,
+                clauses=clauses,
+                overlays=overlays,
+                options=options,
+                plates_dir=self.plates_dir,
+                probe_duration_ms=_probe_media_duration_ms,
+            )
+            produced_mp4 = staged_out
+            broll_cuts = int(studio_stats["broll_cut_count"])
+            applied_overlays = int(studio_stats["applied_overlay_count"])
+        else:
+            produced_mp4, broll_cuts, applied_overlays = _compose_broll_and_saved_overlays_mp4(
+                src_mp4=src_mp4,
+                out_mp4=staged_out,
+                work_dir=work_dir,
+                clauses=clauses,
+                overlays=overlays,
+            )
         target_mp4 = self.renders_dir / f"{final_id}.mp4"
         _atomic_publish_mp4(produced_mp4, target_mp4)
         duration_ms = _probe_media_duration_ms(target_mp4)
@@ -1385,7 +2016,67 @@ class RenderJobManager:
             "duration_ms": duration_ms,
             "broll_cut_count": broll_cuts,
             "applied_overlay_count": applied_overlays,
+            **{k: v for k, v in studio_stats.items() if k not in ("broll_cut_count", "applied_overlay_count")},
         }
+
+    @property
+    def plates_dir(self) -> Path:
+        return self.renders_dir / "plates"
+
+    def _resolve_source_head_mp4(self, payload: dict[str, Any]) -> Path:
+        source_job_id = str(payload.get("source_job_id") or "").strip()
+        if not source_job_id:
+            raise ValueError("source_job_id is required.")
+        resolved = self.resolve_render_file(f"{source_job_id}.mp4")
+        if resolved is None:
+            raise ValueError(f"Talking-head render '{source_job_id}.mp4' not found on rig.")
+        return resolved
+
+    def detect_silence_gaps_for_render(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Lists internal pauses in a talking-head render that ``strip_silence`` would remove."""
+        if not isinstance(payload, dict):
+            raise ValueError("Silence-gaps request body must be a JSON object")
+        src = self._resolve_source_head_mp4(payload)
+        total_ms = _probe_media_duration_ms(src)
+        if total_ms <= 0:
+            raise RuntimeError(f"Could not probe duration of {src.name}.")
+        gaps = detect_silence_gaps(src, total_ms)
+        return {
+            "source_job_id": str(payload.get("source_job_id")),
+            "duration_ms": total_ms,
+            "gaps": [{"start_ms": s, "end_ms": e} for s, e in gaps],
+            "removable_ms": sum(e - s for s, e in gaps),
+        }
+
+    def generate_backdrop(self, payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("Backdrop request body must be a JSON object")
+        return generate_backdrop_plate(
+            prompt=str(payload.get("prompt") or ""),
+            aspect=str(payload.get("aspect") or "9:16"),
+            plates_dir=self.plates_dir,
+            bl_bin=bl_bin,
+            runner=self._plate_runner,
+        )
+
+
+# S2-Pro emits ~21.5 codec frames per second of speech (320 tokens -> 14.86 s measured on this rig).
+TTS_TOKENS_PER_SEC = 21.5
+TTS_WORDS_PER_SEC = 2.5
+TTS_MIN_TOKENS = 320
+# Leaves room for the reference prompt inside the 4096-token context.
+TTS_MAX_TOKENS = 2400
+
+
+def tts_token_budget(text: str) -> int:
+    """Generation cap sized to the script so long scripts are not cut off mid-sentence.
+
+    Budget = expected speech seconds (words / 2.5) x tokens-per-second x 1.4 headroom; the model
+    stops on its own end token, so headroom costs nothing when the speech is shorter.
+    """
+    words = len(text.split())
+    budget = int(round((words / TTS_WORDS_PER_SEC) * TTS_TOKENS_PER_SEC * 1.4))
+    return max(TTS_MIN_TOKENS, min(TTS_MAX_TOKENS, budget))
 
 
 def _measure_wav_duration_and_peaks(wav_path: Path, *, num_bins: int = 64) -> tuple[int, list[float]]:
@@ -1471,7 +2162,7 @@ def _compose_broll_and_saved_overlays_mp4(
         f_body = ImageFont.load_default()
         f_tag = ImageFont.load_default()
 
-    timed_pngs: list[tuple[Path, float, float]] = []
+    timed_pngs: list[tuple[Path, float, float, bool]] = []
     broll_count = 0
     overlay_count = 0
 
@@ -1487,10 +2178,11 @@ def _compose_broll_and_saved_overlays_mp4(
             continue
         caption = str(item.get("broll_caption") or item.get("spoken_text") or "").strip()[:88]
         png_path = work_dir / f"broll_plate_{idx}.png"
-        img = Image.new("RGBA", (720, 1280), (10, 12, 18, 242))
+        img = Image.new("RGBA", (720, 1280), (10, 12, 18, 245))
         draw = ImageDraw.Draw(img)
-        draw.rectangle([(40, 220), (680, 760)], fill=(18, 22, 32, 255), outline=(184, 255, 0, 220), width=3)
-        draw.text((68, 256), "B-ROLL CUTAWAY", font=f_tag, fill=(184, 255, 0, 255))
+        # B-roll evidence card framed below the top-right corner talking-head PiP window
+        draw.rounded_rectangle([(36, 420), (684, 960)], radius=18, fill=(18, 22, 32, 255), outline=(184, 255, 0, 220), width=3)
+        draw.text((64, 456), "B-ROLL CUTAWAY", font=f_tag, fill=(184, 255, 0, 255))
         words = caption.split()
         lines: list[str] = []
         cur = ""
@@ -1505,9 +2197,11 @@ def _compose_broll_and_saved_overlays_mp4(
         if cur:
             lines.append(cur)
         for line_i, line_txt in enumerate(lines[:5]):
-            draw.text((68, 330 + line_i * 58), line_txt, font=f_title, fill=(244, 246, 250, 255))
+            draw.text((64, 524 + line_i * 58), line_txt, font=f_title, fill=(244, 246, 250, 255))
+        # Crisp broadcast frame for the live top-right corner talking-head PiP (236x316 at x=448, y=56)
+        draw.rounded_rectangle([(444, 52), (688, 376)], radius=16, fill=(0, 0, 0, 0), outline=(184, 255, 0, 235), width=3)
         img.save(png_path)
-        timed_pngs.append((png_path, start_ms / 1000.0, end_ms / 1000.0))
+        timed_pngs.append((png_path, start_ms / 1000.0, end_ms / 1000.0, True))
         broll_count += 1
 
     for idx, ovl in enumerate(overlays):
@@ -1532,7 +2226,7 @@ def _compose_broll_and_saved_overlays_mp4(
         if subline:
             draw.text((54, 1134), subline, font=f_body, fill=(180, 192, 210, 255))
         img.save(png_path)
-        timed_pngs.append((png_path, start_s, max(start_s + 0.25, end_s)))
+        timed_pngs.append((png_path, start_s, max(start_s + 0.25, end_s), False))
         overlay_count += 1
 
     if not timed_pngs:
@@ -1540,18 +2234,37 @@ def _compose_broll_and_saved_overlays_mp4(
         return out_mp4, 0, 0
 
     cmd = ["ffmpeg", "-y", "-i", str(src_mp4)]
-    for png_path, _, _ in timed_pngs:
+    for png_path, _, _, _ in timed_pngs:
         cmd.extend(["-loop", "1", "-i", str(png_path)])
 
-    filter_parts = ["[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30[v0]"]
-    for idx, (_, s_sec, e_sec) in enumerate(timed_pngs):
+    has_pip_cutaway = any(is_cutaway for _, _, _, is_cutaway in timed_pngs)
+    if has_pip_cutaway:
+        filter_parts = [
+            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30,split=2[v0][vsrc_pip]",
+            "[vsrc_pip]scale=236:316:force_original_aspect_ratio=increase,crop=236:316[vpip]",
+        ]
+    else:
+        filter_parts = ["[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30[v0]"]
+
+    step_label = "v0"
+    broll_enable_terms: list[str] = []
+    for idx, (_, s_sec, e_sec, is_cutaway) in enumerate(timed_pngs):
         in_idx = idx + 1
-        prev_label = f"v{idx}"
         next_label = f"v{idx + 1}"
+        if is_cutaway:
+            broll_enable_terms.append(f"between(t,{s_sec:.3f},{e_sec:.3f})")
         filter_parts.append(
-            f"[{prev_label}][{in_idx}:v]overlay=0:0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[{next_label}]"
+            f"[{step_label}][{in_idx}:v]overlay=0:0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[{next_label}]"
         )
-    final_v = f"v{len(timed_pngs)}"
+        step_label = next_label
+    if has_pip_cutaway and broll_enable_terms:
+        pip_enable = "+".join(broll_enable_terms)
+        final_v = "vfinal_pip"
+        filter_parts.append(
+            f"[{step_label}][vpip]overlay=448:56:shortest=1:enable='{pip_enable}'[{final_v}]"
+        )
+    else:
+        final_v = step_label
     filter_complex = ";".join(filter_parts)
     cmd.extend(
         [
@@ -1719,8 +2432,13 @@ def _extract_first_json_object(raw_text: str, *, required_key: str | None = None
     raise RuntimeError(f"AI model did not return valid JSON: {raw_text.strip()[:200]}")
 
 
-def _run_ai_assist(payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) -> dict[str, Any]:
-    """Real DashScope `qwen3.8-max` AI writer for Aircheck text inputs via `bl text chat`."""
+def _run_ai_assist(
+    payload: dict[str, Any],
+    *,
+    bl_bin: Path = DEFAULT_BL_BIN,
+    llm_router: LlmRouter | None = None,
+) -> dict[str, Any]:
+    """Mixed local/remote AI writer for Aircheck text inputs via ``LlmRouter``."""
     if not isinstance(payload, dict):
         raise ValueError("AI assist body must be a JSON object")
 
@@ -1733,9 +2451,21 @@ def _run_ai_assist(payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) ->
     if not text and not context:
         raise ValueError("Type a quick idea or draft text first before tapping AI assist.")
 
-    resolved_bl = bl_bin if bl_bin.is_file() else Path(shutil.which("bl") or "")
-    if not resolved_bl.is_file():
-        raise RuntimeError("Bailian CLI `bl` is not available on this Mac rig.")
+    raw_provider = payload.get("llm_provider")
+    if raw_provider is not None:
+        if not isinstance(raw_provider, str) or not raw_provider.strip():
+            raise ValueError("llm_provider must be a non-empty string")
+        llm_provider: str | None = raw_provider.strip()
+    else:
+        llm_provider = None
+
+    raw_model = payload.get("llm_model")
+    if raw_model is not None:
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            raise ValueError("llm_model must be a non-empty string")
+        llm_model: str | None = raw_model.strip()
+    else:
+        llm_model = None
 
     system_prompt = (
         "You are a deadpan, overly serious breaking-news cable TV producer writing punchy, "
@@ -1789,58 +2519,75 @@ def _run_ai_assist(payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) ->
             f'Return STRICT JSON ONLY: {{"text":"Spoken segment here."}}'
         )
 
-    proc = subprocess.run(
-        [
-            str(resolved_bl),
-            "text",
-            "chat",
-            "--model",
-            "qwen3.8-max",
-            "--enable-thinking",
-            "false",
-            "--enable-search",
-            "false",
-            "--system",
-            system_prompt,
-            "--message",
-            user_prompt,
-            "--output",
-            "json",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=45,
-        check=False,
+    router = llm_router or LlmRouter(bl_bin=bl_bin)
+    res = router.complete(
+        "ai_assist",
+        system_prompt,
+        user_prompt,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        max_tokens=1024,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(_summarize_subprocess_error("bl text chat", proc))
 
-    outer = _extract_first_json_object(proc.stdout)
-    content = str(outer.get("content") or "").strip()
-    if not content and isinstance(outer.get("choices"), list) and outer["choices"]:
-        first_choice = outer["choices"][0]
-        if isinstance(first_choice, dict):
-            msg = first_choice.get("message")
-            if isinstance(msg, dict):
-                content = str(msg.get("content") or "").strip()
-    if not content:
-        raise RuntimeError("AI writer returned empty content.")
+    try:
+        inner = _extract_first_json_object(res.text)
+    except RuntimeError as exc:
+        raise LlmProviderError(
+            str(exc),
+            provider=res.provider,
+            stage="ai_assist",
+            model=res.model,
+            status_code=502,
+            error_code="llm_invalid_response",
+        ) from exc
 
-    inner = _extract_first_json_object(content)
     if mode == "flesh_out_story":
         headline = str(inner.get("headline") or "").strip().upper()[:40]
         subline = str(inner.get("subline") or "").strip().upper()[:52]
+        if not headline:
+            raise LlmProviderError(
+                "AI response missing headline.",
+                provider=res.provider,
+                stage="ai_assist",
+                model=res.model,
+                status_code=502,
+                error_code="llm_invalid_response",
+            )
+        if not subline:
+            raise LlmProviderError(
+                "AI response missing subline.",
+                provider=res.provider,
+                stage="ai_assist",
+                model=res.model,
+                status_code=502,
+                error_code="llm_invalid_response",
+            )
         raw_segs = inner.get("segments")
         if not isinstance(raw_segs, list):
-            raise RuntimeError("AI response missing segments list.")
-        segments = [str(s).strip() for s in raw_segs if str(s).strip()]
+            raise LlmProviderError(
+                "AI response missing segments list.",
+                provider=res.provider,
+                stage="ai_assist",
+                model=res.model,
+                status_code=502,
+                error_code="llm_invalid_response",
+            )
+        segments = [s.strip() for s in raw_segs if isinstance(s, str) and s.strip()]
         if not segments:
-            raise RuntimeError("AI response returned zero segments.")
+            raise LlmProviderError(
+                "AI response returned zero segments.",
+                provider=res.provider,
+                stage="ai_assist",
+                model=res.model,
+                status_code=502,
+                error_code="llm_invalid_response",
+            )
         return {
             "mode": mode,
-            "headline": headline or seed[:34].upper(),
-            "subline": subline or "DEVELOPING STORY · LIVE",
+            "headline": headline,
+            "subline": subline,
             "segments": segments,
+            "llm_meta": res.llm_meta,
         }
 
     if mode == "generate_overlay_brief":
@@ -1855,7 +2602,14 @@ def _run_ai_assist(payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) ->
         except (TypeError, ValueError):
             dur_sec = 4
         if not headline:
-            raise RuntimeError("AI overlay brief missing headline.")
+            raise LlmProviderError(
+                "AI overlay brief missing headline.",
+                provider=res.provider,
+                stage="ai_assist",
+                model=res.model,
+                status_code=502,
+                error_code="llm_invalid_response",
+            )
         return {
             "mode": mode,
             "kind": kind,
@@ -1863,14 +2617,22 @@ def _run_ai_assist(payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) ->
             "subline": subline,
             "callout_stat": callout_stat,
             "duration_sec": dur_sec,
+            "llm_meta": res.llm_meta,
         }
 
     polished = str(inner.get("text") or "").strip()
     if not polished:
-        raise RuntimeError("AI writer returned empty text.")
+        raise LlmProviderError(
+            "AI writer returned empty text.",
+            provider=res.provider,
+            stage="ai_assist",
+            model=res.model,
+            status_code=502,
+            error_code="llm_empty_response",
+        )
     if mode in ("polish_headline", "polish_subline"):
         polished = polished.upper()
-    return {"mode": mode, "text": polished}
+    return {"mode": mode, "text": polished, "llm_meta": res.llm_meta}
 
 
 class OtaHttpServer(ThreadingHTTPServer):
@@ -1878,6 +2640,7 @@ class OtaHttpServer(ThreadingHTTPServer):
 
     allow_reuse_address = True
     daemon_threads = True
+    request_queue_size = 128
 
     def __init__(
         self,
@@ -1886,6 +2649,8 @@ class OtaHttpServer(ThreadingHTTPServer):
         *,
         render_manager: RenderJobManager | None = None,
         draft_engine: DraftPassEngine | None = None,
+        llm_router: LlmRouter | None = None,
+        llm_config_path: Path | str | None = None,
         quiet: bool = False,
     ) -> None:
         self.store = store
@@ -1893,7 +2658,19 @@ class OtaHttpServer(ThreadingHTTPServer):
             renders_dir=store.bundles_root.parent / "renders",
             bundles_root=store.bundles_root,
         )
-        self.draft_engine = draft_engine or DraftPassEngine()
+        env_llm_cfg = os.environ.get("AIRCHECK_LLM_CONFIG_PATH", "").strip()
+        resolved_llm_cfg = (
+            Path(llm_config_path)
+            if llm_config_path is not None
+            else (
+                Path(env_llm_cfg)
+                if env_llm_cfg
+                else (self.render_manager.renders_dir / "llm_config.json")
+            )
+        )
+        self.llm_config_path = resolved_llm_cfg
+        self.llm_router = llm_router or LlmRouter(config_path=resolved_llm_cfg)
+        self.draft_engine = draft_engine or DraftPassEngine(llm_router=self.llm_router)
         self.quiet = quiet
         self._remotion_lock = threading.Lock()
         self._remotion_state_path = self.render_manager.renders_dir / "remotion_state.json"
@@ -2063,12 +2840,29 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             self._handle_health(head_only=head_only)
             return
 
+        if raw_path == "/v1/llm/providers":
+            self._handle_get_llm_providers(head_only=head_only)
+            return
+
         if raw_path == "/v1/default-avatar":
             self._handle_default_avatar(head_only=head_only)
             return
 
         if raw_path == "/v1/renders":
             self._handle_list_renders(head_only=head_only)
+            return
+
+        if raw_path.startswith("/v1/plates/") and raw_path.endswith(".png"):
+            plate_id = raw_path[len("/v1/plates/") : -len(".png")]
+            resolved_plate = studio_plate_path(self.server.render_manager.plates_dir, plate_id)
+            if resolved_plate is None:
+                self._send_json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": "not_found", "detail": f"Plate '{plate_id}' not found"},
+                    head_only=head_only,
+                )
+                return
+            self._serve_file_with_range(resolved_plate, "image/png", head_only=head_only)
             return
 
         if raw_path.startswith("/v1/render-thumbs/"):
@@ -2170,6 +2964,10 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         if manifest_error is not None:
             payload["manifest_error"] = manifest_error
 
+        self._send_json(HTTPStatus.OK, payload, head_only=head_only)
+
+    def _handle_get_llm_providers(self, *, head_only: bool) -> None:
+        payload = self.server.llm_router.list_providers()
         self._send_json(HTTPStatus.OK, payload, head_only=head_only)
 
     def _handle_default_avatar(self, *, head_only: bool) -> None:
@@ -2431,6 +3229,9 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/render-video":
             self._handle_post_render_video()
             return
+        if parsed.path == "/v1/llm/config":
+            self._handle_post_llm_config()
+            return
         if parsed.path == "/v1/ai-assist":
             self._handle_post_ai_assist()
             return
@@ -2452,17 +3253,39 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/draft/density":
             self._handle_post_draft_pass("density", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
             return
+        if parsed.path == "/v1/draft/arc":
+            self._handle_post_draft_pass("arc", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
+        if parsed.path == "/v1/draft/synthesize-script":
+            self._handle_post_draft_pass("synthesize_script", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
         if parsed.path == "/v1/draft/rewrite":
             self._handle_post_draft_pass("rewrite", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
             return
         if parsed.path == "/v1/remotion/install":
             self._handle_post_remotion_install()
             return
+        is_async = urllib.parse.parse_qs(parsed.query).get("async", ["0"])[0] in ("1", "true")
+        if is_async and parsed.path in ASYNC_TASK_ROUTES:
+            self._handle_post_async_task(parsed.path)
+            return
         if parsed.path == "/v1/core/tts":
             self._handle_post_core_tts()
             return
         if parsed.path == "/v1/core/chop-broll":
             self._handle_post_core_chop_broll()
+            return
+        if parsed.path == "/v1/core/silence-gaps":
+            self._handle_post_render_json(
+                lambda body: self.server.render_manager.detect_silence_gaps_for_render(body),
+                error_code="silence_gaps_failed",
+            )
+            return
+        if parsed.path == "/v1/newsroom/backdrop":
+            self._handle_post_render_json(
+                lambda body: self.server.render_manager.generate_backdrop(body),
+                error_code="backdrop_failed",
+            )
             return
 
         self._send_json(
@@ -2526,6 +3349,31 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
 
         self._send_json(HTTPStatus.ACCEPTED, enqueued)
 
+    def _handle_post_llm_config(self) -> None:
+        text_body = self._read_post_utf8_body(
+            max_bytes=64 * 1024,
+            empty_detail="Empty LLM config payload",
+        )
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"},
+            )
+            return
+        try:
+            updated = self.server.llm_router.update_config(decoded)
+        except ValueError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "invalid_llm_config", "detail": str(exc)},
+            )
+            return
+        self._send_json(HTTPStatus.OK, updated)
+
     def _handle_post_ai_assist(self) -> None:
         text_body = self._read_post_utf8_body(
             max_bytes=256 * 1024,
@@ -2542,17 +3390,33 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            result = _run_ai_assist(decoded)
+            result = _run_ai_assist(decoded, llm_router=self.server.llm_router)
         except ValueError as exc:
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
                 {"error": "invalid_ai_request", "detail": str(exc)},
             )
             return
+        except LlmProviderError as exc:
+            self._send_json(
+                exc.status_code,
+                {
+                    "error": exc.error_code or "ai_assist_failed",
+                    "detail": str(exc),
+                    "provider": exc.provider,
+                    "stage": exc.stage,
+                },
+            )
+            return
         except Exception as exc:
             self._send_json(
                 HTTPStatus.BAD_GATEWAY,
-                {"error": "ai_assist_failed", "detail": str(exc)},
+                {
+                    "error": "ai_assist_failed",
+                    "detail": str(exc),
+                    "provider": "unknown",
+                    "stage": "ai_assist",
+                },
             )
             return
         self._send_json(HTTPStatus.OK, result)
@@ -2573,6 +3437,7 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        stage = f"draft.{pass_name}"
         handler = getattr(self.server.draft_engine, pass_name)
         try:
             result = handler(decoded)
@@ -2582,10 +3447,26 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
                 {"error": "invalid_draft_request", "detail": str(exc)},
             )
             return
+        except LlmProviderError as exc:
+            self._send_json(
+                exc.status_code,
+                {
+                    "error": exc.error_code or "draft_pass_failed",
+                    "detail": str(exc),
+                    "provider": exc.provider,
+                    "stage": exc.stage,
+                },
+            )
+            return
         except Exception as exc:
             self._send_json(
                 HTTPStatus.BAD_GATEWAY,
-                {"error": "draft_pass_failed", "detail": str(exc)},
+                {
+                    "error": "draft_pass_failed",
+                    "detail": str(exc),
+                    "provider": "unknown",
+                    "stage": stage,
+                },
             )
             return
         self._send_json(HTTPStatus.OK, result)
@@ -2665,6 +3546,50 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(HTTPStatus.OK, result)
 
+    def _handle_post_async_task(self, path: str) -> None:
+        rm = self.server.render_manager
+        task_kind, fn = {
+            "/v1/core/tts": ("tts", rm.synthesize_story_tts),
+            "/v1/core/chop-broll": ("chop", rm.chop_talking_head_into_broll),
+            "/v1/newsroom/backdrop": ("backdrop", rm.generate_backdrop),
+        }[path]
+        text_body = self._read_post_utf8_body(max_bytes=rm.max_render_body_bytes, empty_detail="Empty request payload")
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"})
+            return
+        try:
+            accepted = rm.submit_async_task(task_kind, fn, decoded)
+        except AsyncQueueFullError as exc:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "queue_full", "detail": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
+            return
+        self._send_json(HTTPStatus.ACCEPTED, accepted)
+
+    def _handle_post_render_json(self, fn: Callable[[dict[str, Any]], dict[str, Any]], *, error_code: str) -> None:
+        text_body = self._read_post_utf8_body(max_bytes=64 * 1024, empty_detail="Empty request payload")
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"})
+            return
+        try:
+            result = fn(decoded)
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
+            return
+        except Exception as exc:
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": error_code, "detail": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, result)
+
     def _handle_post_core_chop_broll(self) -> None:
         text_body = self._read_post_utf8_body(
             max_bytes=self.server.render_manager.max_render_body_bytes,
@@ -2710,7 +3635,12 @@ def create_ota_server(
     default_avatar_path: Path | str = DEFAULT_AVATAR_PATH,
     render_runner: RenderRunnerFn | None = None,
     tts_runner: Callable[[str, Path], dict[str, Any] | None] | None = None,
+    tts_studio_runner: Callable[..., dict[str, Any]] | None = None,
+    aligner_fn: Callable[[Path, str], list[dict[str, Any]]] | None = None,
     draft_engine: DraftPassEngine | None = None,
+    plate_runner: Callable[[str, str, Path], None] | None = None,
+    llm_router: LlmRouter | None = None,
+    llm_config_path: Path | str | None = None,
     quiet: bool = False,
 ) -> OtaHttpServer:
     """Factory creating an OtaHttpServer bound to `(host, port)`."""
@@ -2736,12 +3666,17 @@ def create_ota_server(
         default_avatar_path=default_avatar_path,
         render_runner=render_runner,
         tts_runner=tts_runner,
+        tts_studio_runner=tts_studio_runner,
+        aligner_fn=aligner_fn,
+        plate_runner=plate_runner,
     )
     return OtaHttpServer(
         (host, port),
         store,
         render_manager=render_manager,
         draft_engine=draft_engine,
+        llm_router=llm_router,
+        llm_config_path=llm_config_path,
         quiet=quiet,
     )
 

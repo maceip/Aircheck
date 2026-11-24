@@ -1,11 +1,20 @@
 package com.example.data.gateway
 
+import com.example.data.AlignedWord
+import com.example.data.CoreRenderOptions
+import com.example.data.NewsroomLook
+import com.example.data.RigQualityMetrics
+import com.example.data.SilenceGap
+import com.example.data.StudioCutStats
+
 import com.example.data.CoreStoryClause
 import com.example.data.OverlayObjectKind
 import com.example.data.RenderJobStatus
 import com.example.data.SavedNewsroomOverlay
 import com.example.data.ScriptProject
 import com.example.data.local.CasStoredAsset
+
+class RigJobNotFoundException(message: String) : IllegalStateException(message)
 
 data class EnqueuedRenderResult(
     val jobId: String,
@@ -40,7 +49,10 @@ data class CoreTtsSynthesisResult(
     val audioUrl: String,
     val durationMs: Long,
     val waveformPeaks: List<Float>,
-    val timedClauses: List<CoreStoryClause>
+    val timedClauses: List<CoreStoryClause>,
+    val words: List<AlignedWord> = emptyList(),
+    val alignUrl: String? = null,
+    val metrics: RigQualityMetrics? = null
 )
 
 data class ChoppedBrollResult(
@@ -48,7 +60,30 @@ data class ChoppedBrollResult(
     val videoUrl: String,
     val durationMs: Long,
     val brollCutCount: Int,
-    val appliedOverlayCount: Int
+    val appliedOverlayCount: Int,
+    val studioStats: StudioCutStats? = null
+)
+
+/**
+ * Durable rig task handle: [resumeTaskId] continues polling an existing rig task (after process
+ * death); [onSubmitted] persists a newly created task id before polling starts.
+ */
+class RigTaskHandle(
+    val resumeTaskId: String?,
+    val onSubmitted: suspend (String) -> Unit,
+    val onProgress: (String) -> Unit = {}
+)
+
+data class SilenceGapsResult(
+    val durationMs: Long,
+    val gaps: List<SilenceGap>,
+    val removableMs: Long
+)
+
+data class BackdropPlateResult(
+    val plateId: String,
+    val url: String,
+    val prompt: String
 )
 
 data class GeneratedOverlayBriefResult(
@@ -69,7 +104,11 @@ data class MacRigJobSnapshot(
     val durationMs: Long,
     val cer: Double? = null,
     val wespeakerCosine: Double? = null,
-    val dnsmosP808: Double? = null
+    val dnsmosP808: Double? = null,
+    val errorKind: String? = null,
+    val words: List<AlignedWord> = emptyList(),
+    val alignUrl: String? = null,
+    val metrics: RigQualityMetrics? = null
 )
 
 data class RemoteRenderSummary(
@@ -94,7 +133,10 @@ interface MacRigRenderGateway {
         photoSha: String?,
         resolution: String = "720P",
         ratio: String = "9:16",
-        maxDurationSec: Int = 10
+        maxDurationSec: Int = 10,
+        words: List<AlignedWord> = emptyList(),
+        alignUrl: String? = null,
+        useRemotion: Boolean? = null
     ): EnqueuedRenderResult
 
     suspend fun pollMacRigJob(rigBaseUrl: String, jobId: String): MacRigJobSnapshot
@@ -103,10 +145,13 @@ interface MacRigRenderGateway {
 
     suspend fun downloadAudioWavToCas(audioUrl: String): CasStoredAsset
 
+    suspend fun fetchAlignedWords(alignUrl: String): List<AlignedWord> = emptyList()
+
     suspend fun synthesizeCoreStoryTts(
         rigBaseUrl: String,
         projectId: String,
-        clauses: List<CoreStoryClause>
+        clauses: List<CoreStoryClause>,
+        task: RigTaskHandle? = null
     ): CoreTtsSynthesisResult
 
     suspend fun chopTalkingHeadIntoBroll(
@@ -116,8 +161,25 @@ interface MacRigRenderGateway {
         sourceJobId: String?,
         sourceMp4Sha: String?,
         clauses: List<CoreStoryClause>,
-        overlays: List<SavedNewsroomOverlay> = emptyList()
+        overlays: List<SavedNewsroomOverlay> = emptyList(),
+        renderOptions: CoreRenderOptions? = null,
+        look: NewsroomLook? = null,
+        task: RigTaskHandle? = null,
+        alignedWords: List<AlignedWord> = emptyList(),
+        alignUrl: String? = null,
+        useRemotion: Boolean? = null
     ): ChoppedBrollResult
+
+    /** `POST /v1/core/silence-gaps`: internal pauses in a rig talking-head render. */
+    suspend fun detectSilenceGaps(rigBaseUrl: String, sourceJobId: String): SilenceGapsResult
+
+    /** `POST /v1/newsroom/backdrop`: generates a studio backdrop plate image on the rig. */
+    suspend fun generateBackdropPlate(
+        rigBaseUrl: String,
+        prompt: String,
+        aspect: String,
+        task: RigTaskHandle? = null
+    ): BackdropPlateResult
 
     suspend fun generateAiOverlayBrief(
         rigBaseUrl: String,

@@ -349,7 +349,8 @@ class TestDraftingPassesHttpServer(unittest.TestCase):
             },
         )
         self.assertEqual(status, 200)
-        self.assertEqual(set(data.keys()), {"extracted_angles", "blindspots"})
+        self.assertEqual(set(data.keys()), {"extracted_angles", "blindspots", "llm_meta"})
+        self.assertEqual(set(data["llm_meta"].keys()), {"provider", "model", "is_local"})
         self.assertEqual(len(data["extracted_angles"]), 2)
         self.assertEqual(len(data["blindspots"]), 3)
         for item in data["extracted_angles"] + data["blindspots"]:
@@ -482,7 +483,9 @@ class TestDraftingPassesHttpServer(unittest.TestCase):
             },
         )
         self.assertEqual(status, 200)
-        self.assertEqual(data, {"alternatives": ["cut", "dropped", ""]})
+        self.assertEqual(set(data.keys()), {"alternatives", "llm_meta"})
+        self.assertEqual(data["alternatives"], ["cut", "dropped", ""])
+        self.assertEqual(set(data["llm_meta"].keys()), {"provider", "model", "is_local"})
 
         # Missing or empty <replace> -> 400
         for bad_marked in (
@@ -644,6 +647,169 @@ class TestDraftingPassesHttpServer(unittest.TestCase):
         st, body = self._get(port, "/v1/default-avatar")
         self.assertEqual(st, 200)
         self.assertEqual(body, self.default_avatar.read_bytes())
+
+    def test_rewrite_endpoint_and_llm_overrides(self) -> None:
+        def fake_llm(_sys: str, user: str) -> str:
+            if "seed_clean" in user or "raw voice/text seed" in user:
+                return json.dumps({"text": "Local Whisper ran in 738ms with zero cloud wait."})
+            return json.dumps({"text": "Cut <lock>738ms latency</lock> cleanly."})
+
+        port = self._start_server(llm_caller=fake_llm)
+
+        st, data = self._post_json(
+            port,
+            "/v1/draft/rewrite",
+            {
+                "text": "um yeah local whisper ran in 738ms with no cloud wait",
+                "mode": "seed_clean",
+                "llm_provider": "local_mlx",
+                "llm_model": "default_model",
+            },
+        )
+        self.assertEqual(st, 200)
+        self.assertTrue(data["lock_parity_preserved"])
+        self.assertEqual(data["llm_meta"], {"provider": "local_mlx", "model": "default_model", "is_local": True})
+
+        st, data = self._post_json(
+            port,
+            "/v1/draft/rewrite",
+            {
+                "text": "Please cut <lock>738ms latency</lock> cleanly right now.",
+                "mode": "cut_polish",
+                "llm_provider": "remote_openai",
+                "llm_model": "gpt-4.1-mini",
+            },
+        )
+        self.assertEqual(st, 200)
+        self.assertIn("738ms latency", data["text"])
+        self.assertEqual(data["llm_meta"], {"provider": "remote_openai", "model": "gpt-4.1-mini", "is_local": False})
+
+        # Invalid llm_provider / empty llm_model -> 400
+        st, _ = self._post_json(
+            port,
+            "/v1/draft/rewrite",
+            {"text": "Hello world.", "llm_provider": "bogus_provider"},
+        )
+        self.assertEqual(st, 400)
+        st, _ = self._post_json(
+            port,
+            "/v1/draft/angles",
+            {"seed_transcript": "Valid seed.", "llm_model": "   "},
+        )
+        self.assertEqual(st, 400)
+
+    def test_locked_pass_never_masks_empty_or_failed_llm_with_fallback(self) -> None:
+        # 1. Empty text on locked seam-heal MUST return 502 (never build_lock_preserving_fallback)
+        port = self._start_server(llm_caller=lambda _s, _u: json.dumps({"text": "   "}))
+        st, err = self._post_json(
+            port,
+            "/v1/draft/seam-heal",
+            {
+                "marked_text": "We cut the rest, and <lock>Local Whisper ran in 738ms</lock>.",
+                "operation": "strike_cut",
+                "llm_provider": "local_mlx",
+            },
+        )
+        self.assertEqual(st, 502)
+        self.assertEqual(err["provider"], "local_mlx")
+        self.assertEqual(err["stage"], "draft.seam_heal")
+        self.tearDown()
+
+        # 2. Non-ASCII dash only text (sanitizes to empty) on unlocked density MUST return 502 (never fall through)
+        self.setUp()
+        port = self._start_server(llm_caller=lambda _s, _u: json.dumps({"text": "\u2014"}))
+        st, err = self._post_json(
+            port,
+            "/v1/draft/density",
+            {
+                "marked_text": "Regular unlocked prose sentence here.",
+                "delta_percent": -10,
+                "llm_provider": "remote_openai",
+            },
+        )
+        self.assertEqual(st, 502)
+        self.assertEqual(err["provider"], "remote_openai")
+        self.assertEqual(err["stage"], "draft.density")
+        self.tearDown()
+
+        # 3. Non-JSON / provider error on locked rewrite MUST return 502 with provider & stage
+        self.setUp()
+        port = self._start_server(llm_caller=lambda _s, _u: "not valid json at all")
+        st, err = self._post_json(
+            port,
+            "/v1/draft/rewrite",
+            {
+                "text": "Keep <lock>exact words</lock> safe.",
+                "mode": "cut_polish",
+                "llm_provider": "local_ollama",
+            },
+        )
+        self.assertEqual(st, 502)
+        self.assertEqual(err["provider"], "local_ollama")
+        self.assertEqual(err["stage"], "draft.rewrite")
+
+    def test_locked_emdash_only_returns_502_never_200_fallback(self) -> None:
+        for endpoint, payload, expected_stage in (
+            (
+                "/v1/draft/seam-heal",
+                {
+                    "marked_text": "Cut here, and <lock>Exact locked claim</lock> stays.",
+                    "operation": "strike_cut",
+                    "llm_provider": "remote_openai",
+                },
+                "draft.seam_heal",
+            ),
+            (
+                "/v1/draft/density",
+                {
+                    "marked_text": "Tighten prose around <lock>Exact locked claim</lock> now.",
+                    "delta_percent": -10,
+                    "llm_provider": "remote_openai",
+                },
+                "draft.density",
+            ),
+            (
+                "/v1/draft/rewrite",
+                {
+                    "text": "Polish around <lock>Exact locked claim</lock> cleanly.",
+                    "mode": "cut_polish",
+                    "llm_provider": "remote_openai",
+                },
+                "draft.rewrite",
+            ),
+        ):
+            calls = {"n": 0}
+
+            def emdash_llm(_s: str, _u: str, _calls: dict[str, int] = calls) -> str:
+                _calls["n"] += 1
+                return json.dumps({"text": "\u2014"})
+
+            port = self._start_server(llm_caller=emdash_llm, max_lock_retries=1)
+            st, err = self._post_json(port, endpoint, payload)
+            self.assertEqual(st, 502, f"Expected 502 for locked emdash on {endpoint}, got {st}: {err}")
+            self.assertEqual(calls["n"], 2)
+            self.assertEqual(err["provider"], "remote_openai")
+            self.assertEqual(err["stage"], expected_stage)
+            self.tearDown()
+            self.setUp()
+
+        # Genuine non-empty lock-parity violation still preserves locks cleanly via fallback
+        port = self._start_server(
+            llm_caller=lambda _s, _u: json.dumps({"text": "Completely replaced without claim."}),
+            max_lock_retries=1,
+        )
+        st, data = self._post_json(
+            port,
+            "/v1/draft/rewrite",
+            {
+                "text": "Polish around <lock>Exact locked claim</lock> cleanly.",
+                "mode": "cut_polish",
+                "llm_provider": "remote_openai",
+            },
+        )
+        self.assertEqual(st, 200)
+        self.assertTrue(data["lock_parity_preserved"])
+        self.assertIn("Exact locked claim", data["text"])
 
 
 if __name__ == "__main__":

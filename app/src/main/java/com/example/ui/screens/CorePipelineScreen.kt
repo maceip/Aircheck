@@ -42,6 +42,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -97,8 +98,14 @@ fun CorePipelineScreen(
     val session = uiState.corePipelineSession
     val activeStage = session.stage
 
-    var rawStoryDraft by remember(session.id, session.clauses.size) {
+    var rawStoryDraft by remember(session.id, activeStage) {
         mutableStateOf(session.fullStoryText)
+    }
+    LaunchedEffect(session.id, session.clauses) {
+        val normalizeWs: (String) -> String = { it.trim().replace(Regex("\\s+"), " ") }
+        if (normalizeWs(rawStoryDraft) != normalizeWs(session.fullStoryText)) {
+            rawStoryDraft = session.fullStoryText
+        }
     }
 
     val micPermLauncher = rememberLauncherForActivityResult(

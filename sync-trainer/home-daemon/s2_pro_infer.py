@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -84,8 +85,136 @@ RAS_HIGH_TOP_P: float = 0.9
 DEFAULT_S2_PRO_HF_DIR = Path("/Users/mac/Downloads/voicestudio-models/s2-pro-hf")
 DEFAULT_LORA_DIR = Path("/Users/mac/Downloads/voicestudio-models/lora-work-v001/peft_lora_adapter")
 DEFAULT_CODEC_PTH = Path("/Users/mac/Downloads/voicestudio-models/s2-pro/codec.pth")
+DEFAULT_FINETUNED_CODEC_PTH = Path(
+    "/Users/mac/Downloads/voicestudio-models/dac-finetune-v002/codec_finetuned_v002.pth"
+)
 DEFAULT_CODEC_TFLITE = Path("/Users/mac/Downloads/voicestudio-models/bundles/v001/codec_decoder_fp16.tflite")
 DEFAULT_VENV_LRT_PYTHON = Path("/Users/mac/.venv-lrt/bin/python")
+
+_TFLITE_INTERPRETER_CACHE_LOCK = threading.Lock()
+_TFLITE_INTERPRETER_CACHE: dict[
+    tuple[str, int],
+    tuple[Any, int, int, tuple[int, ...], threading.Lock],
+] = {}
+_REF_CODES_CACHE_LOCK = threading.Lock()
+_REF_CODES_CACHE: dict[tuple[str, int, int, str, float | None], tuple[np.ndarray, float]] = {}
+
+
+_BUNDLE_VER_RE = re.compile(r"(?:^|[_-])v(\d+)(?:$|[._-])", flags=re.IGNORECASE)
+
+
+def _extract_custom_models_root(tflite_path: Path) -> Path | None:
+    """Return custom `models_root` if `tflite_path` is inside a non-default `bundles/<ver>/` tree."""
+    p = Path(tflite_path)
+    if len(p.parents) >= 3 and p.parents[1].name == "bundles":
+        models_root = p.parents[2]
+        if models_root.resolve() != DEFAULT_CODEC_PTH.parents[1].resolve():
+            return models_root
+    return None
+
+
+def _is_v002_tflite_bundle(tflite_path: Path) -> tuple[bool, Path | None]:
+    """Detect whether `tflite_path` targets a v002+ fine-tuned DAC bundle and locate its `.pth`."""
+    p = Path(tflite_path)
+    parent = p.parent
+    ver_match = _BUNDLE_VER_RE.search(parent.name) or _BUNDLE_VER_RE.search(p.name)
+    version_num = int(ver_match.group(1)) if ver_match else 0
+    is_v2 = version_num >= 2
+
+    export_report = parent / "codec_export_report.json"
+    if export_report.is_file():
+        try:
+            rep = json.loads(export_report.read_text(encoding="utf-8"))
+            ckpt_raw = str(rep.get("checkpoint_path") or "").strip()
+            if ckpt_raw:
+                ckpt_path = Path(ckpt_raw)
+                if "v002" in ckpt_raw.lower() or "dac-finetune" in ckpt_raw.lower():
+                    is_v2 = True
+                    if ckpt_path.is_file():
+                        return True, ckpt_path
+        except Exception:
+            pass
+
+    bundle_manifest = parent / "bundle_manifest.json"
+    if bundle_manifest.is_file():
+        try:
+            man = json.loads(bundle_manifest.read_text(encoding="utf-8"))
+            bver = str(man.get("bundle_version") or "")
+            lver = int(man.get("lora_version") or 0)
+            bver_match = _BUNDLE_VER_RE.search(bver)
+            bver_num = int(bver_match.group(1)) if bver_match else 0
+            if lver >= 2 or bver_num >= 2 or "v002" in bver.lower():
+                is_v2 = True
+                version_num = max(version_num, lver, bver_num, 2)
+        except Exception:
+            pass
+
+    if not is_v2:
+        return False, None
+
+    custom_root = _extract_custom_models_root(p)
+    # Derive `<models_root>/dac-finetune-v002/codec_finetuned_v002.pth`
+    candidates: list[Path] = []
+    if len(p.parents) >= 3 and p.parents[1].name == "bundles":
+        models_root = p.parents[2]
+        if version_num >= 2:
+            candidates.append(
+                models_root / f"dac-finetune-v{version_num:03d}" / f"codec_finetuned_v{version_num:03d}.pth"
+            )
+        candidates.append(models_root / "dac-finetune-v002" / "codec_finetuned_v002.pth")
+    elif len(p.parents) >= 2:
+        candidates.append(p.parents[1] / "dac-finetune-v002" / "codec_finetuned_v002.pth")
+    if custom_root is None:
+        candidates.append(DEFAULT_FINETUNED_CODEC_PTH)
+
+    for cand in candidates:
+        if cand.is_file():
+            return True, cand
+    return True, None
+
+
+def resolve_pytorch_dac_checkpoint(
+    codec_pth: Path | None = None,
+    *,
+    tflite_path: Path | None = None,
+) -> Path:
+    """Resolve the PyTorch ModdedDAC checkpoint matching the active TFLite bundle.
+
+    - Explicit `codec_pth` != `DEFAULT_CODEC_PTH` is honored.
+    - When `tflite_path` points to a `v002` bundle and `codec_pth` is None or `DEFAULT_CODEC_PTH`,
+      prefer `<models_root>/dac-finetune-v002/codec_finetuned_v002.pth`. If `tflite_path` lives in
+      a custom `bundles/<ver>/` root lacking `dac-finetune-v002`, check `<models_root>/s2-pro/codec.pth`
+      and never leak to host-global `DEFAULT_FINETUNED_CODEC_PTH`.
+    - When both `codec_pth` and `tflite_path` are None, check `DEFAULT_CODEC_TFLITE`.
+    """
+    if codec_pth is not None and Path(codec_pth) != DEFAULT_CODEC_PTH:
+        return Path(codec_pth)
+
+    if tflite_path is not None:
+        tp = Path(tflite_path)
+        custom_root = _extract_custom_models_root(tp)
+        is_v2, matched_pth = _is_v002_tflite_bundle(tp)
+        if is_v2:
+            if matched_pth is not None and matched_pth.is_file():
+                return matched_pth
+            if custom_root is None and DEFAULT_FINETUNED_CODEC_PTH.is_file():
+                return DEFAULT_FINETUNED_CODEC_PTH
+        if custom_root is not None:
+            custom_base = custom_root / "s2-pro" / "codec.pth"
+            if custom_base.is_file():
+                return custom_base
+        return Path(codec_pth) if codec_pth is not None else DEFAULT_CODEC_PTH
+
+    if codec_pth is not None:
+        return Path(codec_pth)
+
+    is_v2_default, matched_default = _is_v002_tflite_bundle(DEFAULT_CODEC_TFLITE)
+    if is_v2_default:
+        if matched_default is not None and matched_default.is_file():
+            return matched_default
+        if DEFAULT_FINETUNED_CODEC_PTH.is_file():
+            return DEFAULT_FINETUNED_CODEC_PTH
+    return DEFAULT_CODEC_PTH
 
 
 @dataclass(frozen=True)
@@ -302,6 +431,30 @@ def _stitch_decoded_windows(
     return out
 
 
+def _get_cached_tflite_interpreter(
+    model_path: Path,
+    *,
+    num_threads: int,
+) -> tuple[Any, int, int, tuple[int, ...], threading.Lock]:
+    from ai_edge_litert.interpreter import Interpreter
+
+    cache_key = (str(model_path.resolve()), int(num_threads))
+    with _TFLITE_INTERPRETER_CACHE_LOCK:
+        cached = _TFLITE_INTERPRETER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        interp = Interpreter(model_path=str(model_path), num_threads=int(num_threads))
+        in_details = interp.get_input_details()
+        out_details = interp.get_output_details()
+        interp.allocate_tensors()
+        in_idx = int(in_details[0]["index"])
+        out_idx = int(out_details[0]["index"])
+        expected_shape = tuple(int(d) for d in in_details[0]["shape"])
+        entry = (interp, in_idx, out_idx, expected_shape, threading.Lock())
+        _TFLITE_INTERPRETER_CACHE[cache_key] = entry
+        return entry
+
+
 def decode_codes_tflite_inprocess(
     codes_list: Sequence[np.ndarray],
     tflite_path: Path = DEFAULT_CODEC_TFLITE,
@@ -313,83 +466,77 @@ def decode_codes_tflite_inprocess(
 ) -> list[tuple[np.ndarray, dict[str, Any]]]:
     """Decode one or more `[10, T]` code arrays in-process via `ai_edge_litert.interpreter`.
 
-    Loads `codec_decoder_fp16.tflite` once and reuses the Interpreter across all windows
-    and all candidate takes.
+    Caches the loaded `Interpreter` thread-safely by `(resolved_path, num_threads)` and
+    guards invocation with a per-interpreter `threading.Lock`.
     """
-    from ai_edge_litert.interpreter import Interpreter
-
     model_path = Path(tflite_path)
     if not model_path.is_file():
         raise FileNotFoundError(f"Missing codec TFLite model: {model_path}")
 
-    interp = Interpreter(model_path=str(model_path), num_threads=num_threads)
-    in_details = interp.get_input_details()
-    out_details = interp.get_output_details()
-    interp.allocate_tensors()
-
-    in_idx = in_details[0]["index"]
-    out_idx = out_details[0]["index"]
-    expected_shape = tuple(int(d) for d in in_details[0]["shape"])
+    interp, in_idx, out_idx, expected_shape, interp_lock = _get_cached_tflite_interpreter(
+        model_path, num_threads=num_threads
+    )
     if expected_shape != (1, NUM_CODEBOOKS, chunk_frames):
         raise ValueError(
             f"Unexpected TFLite input shape {expected_shape}, expected (1, {NUM_CODEBOOKS}, {chunk_frames})"
         )
 
     results: list[tuple[np.ndarray, dict[str, Any]]] = []
-    for raw_codes in codes_list:
-        codes = np.asarray(raw_codes, dtype=np.int32)
-        if codes.ndim == 3:
-            codes = codes[0]
-        if codes.ndim != 2 or codes.shape[0] != NUM_CODEBOOKS:
-            raise ValueError(f"Expected codes shape [10, T], got {codes.shape}")
+    with interp_lock:
+        for raw_codes in codes_list:
+            codes = np.asarray(raw_codes, dtype=np.int32)
+            if codes.ndim == 3:
+                codes = codes[0]
+            if codes.ndim != 2 or codes.shape[0] != NUM_CODEBOOKS:
+                raise ValueError(f"Expected codes shape [10, T], got {codes.shape}")
 
-        # Clamp strictly to valid ModdedDAC codebook ranges before TFLite embedding lookup
-        clamped = codes.copy()
-        clamped[0] = np.clip(clamped[0], 0, NUM_SEMANTIC_TOKENS - 1)
-        clamped[1:] = np.clip(clamped[1:], 0, RESIDUAL_CODEBOOK_SIZE - 1)
+            # Clamp strictly to valid ModdedDAC codebook ranges before TFLite embedding lookup
+            clamped = codes.copy()
+            clamped[0] = np.clip(clamped[0], 0, NUM_SEMANTIC_TOKENS - 1)
+            clamped[1:] = np.clip(clamped[1:], 0, RESIDUAL_CODEBOOK_SIZE - 1)
 
-        total_frames = int(clamped.shape[1])
-        windows = plan_chunked_decode_windows(
-            total_frames,
-            chunk_frames=chunk_frames,
-            overlap_frames=overlap_frames,
-            xfade_frames=xfade_frames,
-        )
+            total_frames = int(clamped.shape[1])
+            windows = plan_chunked_decode_windows(
+                total_frames,
+                chunk_frames=chunk_frames,
+                overlap_frames=overlap_frames,
+                xfade_frames=xfade_frames,
+            )
 
-        window_pcms: list[np.ndarray] = []
-        t0 = time.perf_counter()
-        for start, valid, _, _ in windows:
-            chunk = np.zeros((1, NUM_CODEBOOKS, chunk_frames), dtype=np.int32)
-            seg = clamped[:, start : start + valid]
-            chunk[0, :, :valid] = seg
-            if valid < chunk_frames:
-                # Edge-pad trailing frames with the final valid frame so causal convs stay smooth
-                chunk[0, :, valid:] = seg[:, -1:]
-            interp.set_tensor(in_idx, np.ascontiguousarray(chunk, dtype=np.int32))
-            interp.invoke()
-            pcm_out = np.array(interp.get_tensor(out_idx), copy=True, dtype=np.float32).reshape(-1)
-            window_pcms.append(pcm_out)
+            window_pcms: list[np.ndarray] = []
+            t0 = time.perf_counter()
+            for start, valid, _, _ in windows:
+                chunk = np.zeros((1, NUM_CODEBOOKS, chunk_frames), dtype=np.int32)
+                seg = clamped[:, start : start + valid]
+                chunk[0, :, :valid] = seg
+                if valid < chunk_frames:
+                    # Edge-pad trailing frames with the final valid frame so causal convs stay smooth
+                    chunk[0, :, valid:] = seg[:, -1:]
+                interp.set_tensor(in_idx, np.ascontiguousarray(chunk, dtype=np.int32))
+                interp.invoke()
+                pcm_out = np.array(interp.get_tensor(out_idx), copy=True, dtype=np.float32).reshape(-1)
+                window_pcms.append(pcm_out)
 
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        stitched = _stitch_decoded_windows(
-            window_pcms,
-            windows,
-            total_frames=total_frames,
-            frame_length_samples=FRAME_LENGTH_SAMPLES,
-        )
-        meta = {
-            "decoder": "ai_edge_litert_fp16",
-            "tflite_path": str(model_path),
-            "total_frames": total_frames,
-            "num_chunks": len(windows),
-            "chunk_frames": chunk_frames,
-            "overlap_frames": overlap_frames,
-            "xfade_frames": xfade_frames,
-            "output_samples": int(stitched.size),
-            "duration_sec": round(float(stitched.size) / float(SAMPLE_RATE_HZ), 4),
-            "decode_ms": round(elapsed_ms, 2),
-        }
-        results.append((stitched, meta))
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            stitched = _stitch_decoded_windows(
+                window_pcms,
+                windows,
+                total_frames=total_frames,
+                frame_length_samples=FRAME_LENGTH_SAMPLES,
+            )
+            meta = {
+                "decoder": "ai_edge_litert_fp16",
+                "tflite_path": str(model_path),
+                "total_frames": total_frames,
+                "num_chunks": len(windows),
+                "chunk_frames": chunk_frames,
+                "overlap_frames": overlap_frames,
+                "xfade_frames": xfade_frames,
+                "output_samples": int(stitched.size),
+                "duration_sec": round(float(stitched.size) / float(SAMPLE_RATE_HZ), 4),
+                "decode_ms": round(elapsed_ms, 2),
+            }
+            results.append((stitched, meta))
 
     return results
 
@@ -463,7 +610,7 @@ def decode_codes_batch_tflite(
             "--decode-tflite-out",
             str(manifest_out),
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if proc.returncode != 0:
             raise RuntimeError(
                 f"LiteRT batch decode failed (rc={proc.returncode}):\n"
@@ -1121,6 +1268,92 @@ def load_s2_pro_dual_ar(
     return model, tokenizer, lora_stats
 
 
+class WarmS2ProEngine:
+    """Thread-safe warm holder for S2ProDualAR + LoRA weights across multi-clause & sequential TTS jobs."""
+
+    def __init__(self) -> None:
+        self._load_lock = threading.Lock()
+        self._infer_lock = threading.RLock()
+        self._key: tuple[Any, ...] | None = None
+        self._model: "S2ProDualAR | None" = None
+        self._tokenizer: Any = None
+        self._lora_stats: LoRAMergeStats | None = None
+
+    @property
+    def lock(self) -> threading.RLock:
+        return self._infer_lock
+
+    def get_or_load(
+        self,
+        s2_pro_hf_dir: Path = DEFAULT_S2_PRO_HF_DIR,
+        *,
+        lora_dir: Path | None = DEFAULT_LORA_DIR,
+        lora_scale: float = 1.0,
+        dtype: "torch.dtype" = None,
+        device: str = "mps",
+        max_seq_len: int = 2048,
+    ) -> tuple["S2ProDualAR", Any, LoRAMergeStats | None]:
+        eff_lora = None if (lora_dir is None or float(lora_scale) == 0.0) else str(Path(lora_dir).resolve())
+        key = (
+            str(Path(s2_pro_hf_dir).resolve()),
+            eff_lora,
+            round(float(lora_scale), 6),
+            str(device),
+            int(max_seq_len),
+            str(dtype) if dtype is not None else "auto",
+        )
+        with self._infer_lock:
+            with self._load_lock:
+                if self._key == key and self._model is not None and self._tokenizer is not None:
+                    return self._model, self._tokenizer, self._lora_stats
+                if self._model is not None:
+                    del self._model
+                    self._model = None
+                    self._tokenizer = None
+                    self._lora_stats = None
+                    self._key = None
+                    if "torch" in globals() and torch.backends.mps.is_available():
+                        torch.mps.empty_cache()
+                model, tokenizer, lora_stats = load_s2_pro_dual_ar(
+                    Path(s2_pro_hf_dir),
+                    lora_dir=lora_dir,
+                    lora_scale=lora_scale,
+                    dtype=dtype,
+                    device=device,
+                    max_seq_len=max_seq_len,
+                )
+                self._model = model
+                self._tokenizer = tokenizer
+                self._lora_stats = lora_stats
+                self._key = key
+                return model, tokenizer, lora_stats
+
+    def unload(self) -> None:
+        with self._infer_lock:
+            with self._load_lock:
+                if self._model is not None:
+                    del self._model
+                self._model = None
+                self._tokenizer = None
+                self._lora_stats = None
+                self._key = None
+                if "torch" in globals() and torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+
+
+_SHARED_WARM_ENGINE_LOCK = threading.Lock()
+_SHARED_WARM_ENGINE: WarmS2ProEngine | None = None
+
+
+def get_shared_warm_engine() -> WarmS2ProEngine:
+    """Return the process-wide thread-safe `WarmS2ProEngine` singleton."""
+    global _SHARED_WARM_ENGINE
+    with _SHARED_WARM_ENGINE_LOCK:
+        if _SHARED_WARM_ENGINE is None:
+            _SHARED_WARM_ENGINE = WarmS2ProEngine()
+        return _SHARED_WARM_ENGINE
+
+
 # ---------------------------------------------------------------------------
 # Prompt Conditioning & Sampling (Exact Upstream fish-speech S2-Pro Format)
 # ---------------------------------------------------------------------------
@@ -1433,9 +1666,24 @@ def encode_reference_audio_to_codes(
     device: str = "mps",
     max_seconds: float | None = None,
 ) -> tuple[np.ndarray, float]:
-    """Encode a real reference WAV into `[10, T_ref]` ModdedDAC discrete codes."""
+    """Encode a real reference WAV into `[10, T_ref]` ModdedDAC discrete codes (cached by file stat)."""
     import scipy.signal as spsig
     import soundfile as sf
+
+    ref_resolved = Path(ref_wav_path).resolve()
+    st = ref_resolved.stat()
+    codec_resolved = Path(codec_pth).resolve()
+    cache_key = (
+        str(ref_resolved),
+        int(st.st_mtime_ns),
+        int(st.st_size),
+        str(codec_resolved),
+        None if max_seconds is None else float(max_seconds),
+    )
+    with _REF_CODES_CACHE_LOCK:
+        cached = _REF_CODES_CACHE.get(cache_key)
+        if cached is not None:
+            return cached[0].copy(), cached[1]
 
     modded_dac_path = Path(__file__).resolve().parent / "modded_dac.py"
     spec = importlib.util.spec_from_file_location("voicestudio_modded_dac", str(modded_dac_path))
@@ -1445,7 +1693,7 @@ def encode_reference_audio_to_codes(
     sys.modules["voicestudio_modded_dac"] = modded_dac
     spec.loader.exec_module(modded_dac)
 
-    wav, sr = sf.read(str(ref_wav_path), dtype="float32", always_2d=False)
+    wav, sr = sf.read(str(ref_resolved), dtype="float32", always_2d=False)
     if wav.ndim > 1:
         wav = wav.mean(axis=1, dtype=np.float32)
     if sr != SAMPLE_RATE_HZ:
@@ -1458,7 +1706,7 @@ def encode_reference_audio_to_codes(
     wav = np.ascontiguousarray(wav, dtype=np.float32)
     dur_sec = float(wav.size) / float(SAMPLE_RATE_HZ)
 
-    dac = modded_dac.load_s2_pro_dac(str(codec_pth), device=device, strict=True)
+    dac = modded_dac.load_s2_pro_dac(str(codec_resolved), device=device, strict=True)
     with torch.inference_mode():
         codes_t, code_lens = modded_dac.encode_waveform_44k(dac, torch.from_numpy(wav))
         n_frames = int(code_lens[0].item())
@@ -1466,16 +1714,22 @@ def encode_reference_audio_to_codes(
     del dac
     if device == "mps" and torch.backends.mps.is_available():
         torch.mps.empty_cache()
+
+    with _REF_CODES_CACHE_LOCK:
+        _REF_CODES_CACHE[cache_key] = (codes_np.copy(), dur_sec)
     return codes_np, dur_sec
 
 
 def decode_codes_pytorch_dac(
     codes: np.ndarray,
-    codec_pth: Path = DEFAULT_CODEC_PTH,
+    codec_pth: Path | None = DEFAULT_CODEC_PTH,
     *,
+    tflite_path: Path | None = None,
     device: str = "cpu",
 ) -> np.ndarray:
     """Decode `[10, T]` codes via full-sequence PyTorch `ModdedDAC.from_indices` for parity checks."""
+    resolved_codec_pth = resolve_pytorch_dac_checkpoint(codec_pth, tflite_path=tflite_path)
+
     modded_dac_path = Path(__file__).resolve().parent / "modded_dac.py"
     spec = importlib.util.spec_from_file_location("voicestudio_modded_dac", str(modded_dac_path))
     if spec is None or spec.loader is None:
@@ -1490,7 +1744,7 @@ def decode_codes_pytorch_dac(
     clamped[0] = np.clip(clamped[0], 0, NUM_SEMANTIC_TOKENS - 1)
     clamped[1:] = np.clip(clamped[1:], 0, RESIDUAL_CODEBOOK_SIZE - 1)
 
-    dac = modded_dac.load_s2_pro_dac(str(codec_pth), device=device, strict=True)
+    dac = modded_dac.load_s2_pro_dac(str(resolved_codec_pth), device=device, strict=True)
     with torch.inference_mode():
         pcm = dac.from_indices(torch.from_numpy(clamped[None]).to(device=device))
         out = pcm[0, 0].detach().cpu().float().numpy()

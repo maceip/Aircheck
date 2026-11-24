@@ -7,7 +7,13 @@ import androidx.datastore.core.DataStoreFactory
 import androidx.datastore.core.Serializer
 import androidx.datastore.dataStoreFile
 import com.example.data.BrandChannel
+import com.example.data.DEFAULT_REMOTE_LLM_PROVIDER_ID
+import com.example.data.LlmProviderChoice
+import com.example.data.LlmRoutingSettings
+import com.example.data.LlmStage
+import com.example.data.LlmStageConfig
 import com.example.data.PersonaProfile
+import com.example.data.SUPPORTED_REMOTE_LLM_PROVIDERS
 import com.example.data.Stage4Mode
 import com.example.data.StageProviderSettings
 import com.example.data.VoiceSource
@@ -62,7 +68,16 @@ data class AircheckProfileProto(
     @ProtoNumber(22) val remotionUsedCount: Int = 0,
     @ProtoNumber(23) val remotionInstallRequested: Boolean = false,
     @ProtoNumber(24) val remotionInstallNote: String = "",
-    @ProtoNumber(25) val phoneOnlyVoiceMode: Boolean = true
+    @ProtoNumber(25) val phoneOnlyVoiceMode: Boolean = true,
+    @ProtoNumber(26) val draftingLlmProvider: String = LlmProviderChoice.MAC_RIG_DEFAULT.id,
+    @ProtoNumber(27) val draftingLlmRemoteProvider: String = DEFAULT_REMOTE_LLM_PROVIDER_ID,
+    @ProtoNumber(28) val draftingLlmModel: String = "",
+    @ProtoNumber(29) val scriptEditLlmProvider: String = LlmProviderChoice.MAC_RIG_DEFAULT.id,
+    @ProtoNumber(30) val scriptEditLlmRemoteProvider: String = DEFAULT_REMOTE_LLM_PROVIDER_ID,
+    @ProtoNumber(31) val scriptEditLlmModel: String = "",
+    @ProtoNumber(32) val newsroomOverlayLlmProvider: String = LlmProviderChoice.MAC_RIG_DEFAULT.id,
+    @ProtoNumber(33) val newsroomOverlayLlmRemoteProvider: String = DEFAULT_REMOTE_LLM_PROVIDER_ID,
+    @ProtoNumber(34) val newsroomOverlayLlmModel: String = ""
 )
 
 data class StudioSettings(
@@ -76,7 +91,8 @@ data class StudioSettings(
     val remotionUsedCount: Int = 0,
     val remotionInstallRequested: Boolean = false,
     val remotionInstallNote: String = "",
-    val phoneOnlyVoiceMode: Boolean = true
+    val phoneOnlyVoiceMode: Boolean = true,
+    val llmRouting: LlmRoutingSettings = LlmRoutingSettings()
 )
 
 @OptIn(ExperimentalSerializationApi::class)
@@ -172,6 +188,67 @@ class AircheckProfileStore(
         }
     }
 
+    suspend fun setDefaultPhotoSha(photoSha: String) {
+        val clean = photoSha.trim()
+        dataStore.updateData { it.copy(defaultPhotoSha = clean) }
+    }
+
+    suspend fun setLlmStageConfig(
+        stage: LlmStage,
+        provider: LlmProviderChoice,
+        modelOverride: String = "",
+        remoteProviderId: String? = null
+    ) {
+        val cleanModel = modelOverride.trim()
+        dataStore.updateData { current ->
+            val resolvedRemote = normalizeRemoteProviderId(
+                candidate = remoteProviderId ?: when (stage) {
+                    LlmStage.DRAFTING -> current.draftingLlmRemoteProvider
+                    LlmStage.SCRIPT_EDIT -> current.scriptEditLlmRemoteProvider
+                    LlmStage.NEWSROOM_OVERLAY -> current.newsroomOverlayLlmRemoteProvider
+                }
+            )
+            when (stage) {
+                LlmStage.DRAFTING -> current.copy(
+                    draftingLlmProvider = provider.id,
+                    draftingLlmRemoteProvider = resolvedRemote,
+                    draftingLlmModel = cleanModel
+                )
+                LlmStage.SCRIPT_EDIT -> current.copy(
+                    scriptEditLlmProvider = provider.id,
+                    scriptEditLlmRemoteProvider = resolvedRemote,
+                    scriptEditLlmModel = cleanModel
+                )
+                LlmStage.NEWSROOM_OVERLAY -> current.copy(
+                    newsroomOverlayLlmProvider = provider.id,
+                    newsroomOverlayLlmRemoteProvider = resolvedRemote,
+                    newsroomOverlayLlmModel = cleanModel
+                )
+            }
+        }
+    }
+
+    suspend fun setLlmStageConfig(
+        stage: LlmStage,
+        rawProviderId: String,
+        modelOverride: String = ""
+    ) {
+        val trimmed = rawProviderId.trim().lowercase()
+        val choice = LlmProviderChoice.fromRaw(trimmed)
+        val remoteOverride = trimmed.takeIf { it in SUPPORTED_REMOTE_LLM_PROVIDERS }
+        setLlmStageConfig(
+            stage = stage,
+            provider = choice,
+            modelOverride = modelOverride,
+            remoteProviderId = remoteOverride
+        )
+    }
+
+    private fun normalizeRemoteProviderId(candidate: String?): String {
+        val clean = candidate?.trim()?.lowercase().orEmpty()
+        return if (clean in SUPPORTED_REMOTE_LLM_PROVIDERS) clean else DEFAULT_REMOTE_LLM_PROVIDER_ID
+    }
+
     private fun AircheckProfileProto.toDomain(): StudioSettings = StudioSettings(
         brandChannel = BrandChannel.fromRaw(brandChannel),
         voiceSource = VoiceSource.fromRaw(voiceSource),
@@ -200,6 +277,23 @@ class AircheckProfileStore(
         remotionUsedCount = remotionUsedCount.coerceAtLeast(0),
         remotionInstallRequested = remotionInstallRequested,
         remotionInstallNote = remotionInstallNote,
-        phoneOnlyVoiceMode = phoneOnlyVoiceMode
+        phoneOnlyVoiceMode = phoneOnlyVoiceMode,
+        llmRouting = LlmRoutingSettings(
+            drafting = LlmStageConfig(
+                provider = LlmProviderChoice.fromRaw(draftingLlmProvider),
+                remoteProviderId = normalizeRemoteProviderId(draftingLlmRemoteProvider),
+                modelOverride = draftingLlmModel.trim()
+            ),
+            scriptEdit = LlmStageConfig(
+                provider = LlmProviderChoice.fromRaw(scriptEditLlmProvider),
+                remoteProviderId = normalizeRemoteProviderId(scriptEditLlmRemoteProvider),
+                modelOverride = scriptEditLlmModel.trim()
+            ),
+            newsroomOverlay = LlmStageConfig(
+                provider = LlmProviderChoice.fromRaw(newsroomOverlayLlmProvider),
+                remoteProviderId = normalizeRemoteProviderId(newsroomOverlayLlmRemoteProvider),
+                modelOverride = newsroomOverlayLlmModel.trim()
+            )
+        )
     )
 }

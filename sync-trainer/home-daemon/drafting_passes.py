@@ -1,24 +1,28 @@
 """Tactile Mobile Plain-Text Drafting Engine passes for the Mac :8443 rig daemon.
 
-Provides the 6 stateless HTTP pass handlers wired into ``ota_server.py``:
-  1. ``POST /v1/draft/transcribe``  -> local ``whisper-cli`` WAV transcription
-  2. ``POST /v1/draft/angles``      -> 2-3 extracted claims + 3 structural blindspots
-  3. ``POST /v1/draft/synthesize``  -> 3-posture draft fanout (DIRECT/RECEIPT/CONTRARIAN) or 1-slot refresh
-  4. ``POST /v1/draft/brush-swap``  -> 2 terse plain-spoken replacements + "" clean cut
-  5. ``POST /v1/draft/seam-heal``   -> lock-preserving seam repair after cut/splice/reorder/mention
-  6. ``POST /v1/draft/density``     -> lock-preserving compression/expansion (-25%..+15%)
+Provides the 9 stateless HTTP pass handlers wired into ``ota_server.py``:
+  1. ``POST /v1/draft/transcribe``         -> local ``whisper-cli`` WAV transcription
+  2. ``POST /v1/draft/angles``             -> 2-3 extracted claims + 3 structural blindspots
+  3. ``POST /v1/draft/arc``                -> 4-beat spoken arc (HOOK/DETAIL/SHIFT/PAYOFF) or single-beat reroll
+  4. ``POST /v1/draft/synthesize``         -> 3-posture draft fanout (DIRECT/RECEIPT/CONTRARIAN) or 1-slot refresh
+  5. ``POST /v1/draft/synthesize-script``  -> 3 full spoken script versions (DIRECT/PUNCHY/STORY) sized to target_sec
+  6. ``POST /v1/draft/brush-swap``         -> terse plain-spoken replacements + "" clean cut
+  7. ``POST /v1/draft/seam-heal``          -> lock-preserving seam repair after cut/splice/reorder/mention
+  8. ``POST /v1/draft/density``            -> lock-preserving compression/expansion (-25%..+15%)
+  9. ``POST /v1/draft/rewrite``            -> inline seed_clean / cut_polish rewrite with lock conservation
 
 Constitutional guarantees:
   - Zero fake, mocked, or placeholder production responses. Transcription always invokes real
     ``/opt/homebrew/bin/whisper-cli`` with the fastest existing ggml model under ``/Users/mac/models``.
-    LLM passes always invoke real ``/Users/mac/.local/bin/bl text chat --enable-thinking false
-    --enable-search false --output json``.
+    All 8 LLM passes route through ``LlmRouter`` (supporting mixed local ``local_mlx`` / ``local_ollama`` /
+    ``local_llama_cpp`` and remote ``remote_bailian`` / ``remote_openai`` / ``remote_gemini`` /
+    ``remote_anthropic`` providers with explicit HTTP 502/503 errors on provider failure or empty output).
   - Strict style enforcement in every LLM system prompt and output sanitizer (no metaphors,
     no rhetorical questions, no em/en dashes, no throat-clearing openers, plain ASCII only).
-  - Strict ``<lock>...</lock>`` token conservation on ``seam-heal`` and ``density``: every locked
-    substring from input is verified character-for-character identical in output; any LLM output
-    violating lock parity is deterministically rejected in favor of a lock-preserving fallback
-    constructed directly from the caller's locked spans.
+  - Strict ``<lock>...</lock>`` token conservation on ``seam-heal``, ``density``, and ``rewrite``:
+    every locked substring from input is verified character-for-character identical in output; any
+    non-empty valid JSON LLM output violating lock parity is deterministically rejected in favor of
+    a lock-preserving fallback constructed directly from the caller's locked spans.
 """
 
 from __future__ import annotations
@@ -37,6 +41,15 @@ import unicodedata
 import wave
 from pathlib import Path
 from typing import Any, Callable, Sequence
+
+from llm_router import (
+    ALL_PROVIDERS,
+    LOCAL_PROVIDERS,
+    STAGE_DEFAULT_MAX_TOKENS,
+    LlmProviderError,
+    LlmRouter,
+    parse_bl_chat_content as _router_parse_bl_chat_content,
+)
 
 LOGGER = logging.getLogger("voicestudio.drafting_passes")
 
@@ -148,6 +161,38 @@ _UNICODE_PUNCT_MAP: dict[str, str] = {
     "\u2212": "-",
 }
 
+BRUSH_NUDGE_DIRECTIVES: dict[str, str] = {
+    "simpler": "Use shorter, plainer, more common words than the original span.",
+    "sharper": "Make the phrasing more pointed, vivid, and assertive than the original span.",
+    "less_formal": "Make the phrasing casual and conversational, like talking to a friend.",
+    "more": "Offer three fresh options unlike any earlier ones.",
+}
+
+ARC_DEFAULT_TARGET_SEC = 60
+SCRIPT_POSTURE_LABELS: tuple[str, ...] = ("DIRECT", "PUNCHY", "STORY")
+# Conversational broadcast read rate used to size the word budget for a target runtime.
+ARC_SPEAKING_WORDS_PER_SEC = 2.5
+ARC_BEAT_LABELS: tuple[str, ...] = ("HOOK", "DETAIL", "SHIFT", "PAYOFF")
+ARC_BEAT_PURPOSE: dict[str, str] = {
+    "HOOK": "the surprising core tension in one line",
+    "DETAIL": "the concrete evidence or mechanism behind it",
+    "SHIFT": "what people are doing about it, or the turn",
+    "PAYOFF": "the takeaway or demand that closes the video",
+}
+# Fraction of the runtime at which each beat ends (HOOK ends at 8s of a 60s video, etc.).
+_ARC_BEAT_END_FRACTIONS: tuple[float, ...] = (8 / 60, 28 / 60, 48 / 60, 1.0)
+
+
+def _arc_windows(target_sec: int) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    start = 0
+    for frac in _ARC_BEAT_END_FRACTIONS:
+        end = target_sec if frac >= 1.0 else int(round(target_sec * frac))
+        out.append((start, end))
+        start = end
+    return out
+
+
 LlmCallerFn = Callable[[str, str], str]
 TranscribeRunnerFn = Callable[[Path, Path, Path], str]
 
@@ -189,44 +234,8 @@ def _extract_json_objects(raw_text: str) -> list[dict[str, Any]]:
 
 
 def parse_bl_chat_content(raw_stdout: str) -> str:
-    """Extracts assistant text from ``bl text chat --output json`` stdout.
-
-    Supports both Bailian CLI compact ``{"content": "..."}`` payloads and OpenAI-compatible
-    ``{"choices": [{"message": {"content": "..."}}]}`` payloads, ignoring warning envelopes.
-    """
-    objs = _extract_json_objects(raw_stdout)
-    if not objs:
-        raise RuntimeError(f"bl text chat returned non-JSON output: {raw_stdout.strip()[:240]}")
-
-    for obj in objs:
-        if "error" in obj and isinstance(obj["error"], dict):
-            msg = obj["error"].get("message") or json.dumps(obj["error"])
-            raise RuntimeError(f"bl text chat error: {msg}")
-
-    for obj in objs:
-        raw_content = obj.get("content")
-        if isinstance(raw_content, str) and raw_content.strip():
-            return raw_content.strip()
-        choices = obj.get("choices")
-        if isinstance(choices, list) and choices:
-            first_choice = choices[0]
-            if isinstance(first_choice, dict):
-                message = first_choice.get("message")
-                if isinstance(message, dict):
-                    msg_content = message.get("content")
-                    if isinstance(msg_content, str) and msg_content.strip():
-                        return msg_content.strip()
-                    if isinstance(msg_content, list):
-                        parts = [
-                            str(part.get("text") or "")
-                            for part in msg_content
-                            if isinstance(part, dict)
-                        ]
-                        joined = "".join(parts).strip()
-                        if joined:
-                            return joined
-
-    raise RuntimeError("bl text chat returned empty assistant content.")
+    """Extracts assistant text from ``bl text chat --output json`` stdout."""
+    return _router_parse_bl_chat_content(raw_stdout)
 
 
 def _extract_first_json_object(raw_text: str, *, required_keys: Sequence[str] = ()) -> dict[str, Any]:
@@ -677,8 +686,28 @@ def _format_steering_block(steering_constraints: Sequence[str]) -> str:
     return f"\nUSER STEERING CONSTRAINTS (MUST OBEY):\n{bullet_lines}\n"
 
 
+def _extract_llm_overrides(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    raw_provider = payload.get("llm_provider")
+    if raw_provider is not None:
+        if not isinstance(raw_provider, str) or raw_provider.strip() not in ALL_PROVIDERS:
+            raise ValueError(f"Unsupported llm_provider: {raw_provider!r}")
+        llm_provider: str | None = raw_provider.strip()
+    else:
+        llm_provider = None
+
+    raw_model = payload.get("llm_model")
+    if raw_model is not None:
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            raise ValueError("llm_model must be a non-empty string")
+        llm_model: str | None = raw_model.strip()
+    else:
+        llm_model = None
+
+    return llm_provider, llm_model
+
+
 class DraftPassEngine:
-    """Stateless Mac rig executor for all 6 ``/v1/draft/*`` endpoints."""
+    """Stateless Mac rig executor for all ``/v1/draft/*`` endpoints."""
 
     def __init__(
         self,
@@ -688,9 +717,10 @@ class DraftPassEngine:
         whisper_model_path: Path | str | None = None,
         bl_bin: Path | str = DEFAULT_BL_BIN,
         llm_model: str | None = None,
-        llm_timeout_sec: int = 45,
+        llm_timeout_sec: float | None = None,
         max_lock_retries: int = 1,
         llm_caller: LlmCallerFn | None = None,
+        llm_router: LlmRouter | None = None,
         transcribe_runner: TranscribeRunnerFn | None = None,
     ) -> None:
         self._whisper_bin = whisper_bin
@@ -702,45 +732,77 @@ class DraftPassEngine:
             or os.environ.get("AIRCHECK_DRAFT_LLM_MODEL", "").strip()
             or DEFAULT_DRAFT_LLM_MODEL
         )
-        self._llm_timeout_sec = llm_timeout_sec
+        self._llm_timeout_sec: float | None = (
+            float(llm_timeout_sec) if llm_timeout_sec is not None else None
+        )
         self._max_lock_retries = max(0, int(max_lock_retries))
         self._llm_caller = llm_caller
+        if llm_router is not None:
+            self._llm_router: LlmRouter | None = llm_router
+        elif llm_caller is None:
+            router_kwargs: dict[str, Any] = {
+                "bl_bin": self._bl_bin,
+                "default_draft_model": self._llm_model,
+            }
+            if self._llm_timeout_sec is not None:
+                router_kwargs["timeout_sec"] = self._llm_timeout_sec
+            self._llm_router = LlmRouter(**router_kwargs)
+        else:
+            self._llm_router = None
         self._transcribe_runner = transcribe_runner
 
-    def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
+    def _call_llm(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        stage: str = "draft.angles",
+        llm_provider: str | None = None,
+        llm_model: str | None = None,
+        max_tokens: int | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        if llm_provider is not None and llm_provider not in ALL_PROVIDERS:
+            raise ValueError(f"Unsupported llm_provider: {llm_provider!r}")
+        if llm_model is not None and (not isinstance(llm_model, str) or not llm_model.strip()):
+            raise ValueError("llm_model must be a non-empty string")
+
         if self._llm_caller is not None:
-            return self._llm_caller(system_prompt, user_prompt)
+            eff_provider = llm_provider or "custom_caller"
+            eff_model = llm_model or self._llm_model
+            is_local = (eff_provider in LOCAL_PROVIDERS) if llm_provider else True
+            try:
+                content = self._llm_caller(system_prompt, user_prompt)
+            except LlmProviderError:
+                raise
+            except Exception as exc:
+                raise LlmProviderError(
+                    str(exc),
+                    provider=eff_provider,
+                    stage=stage,
+                    model=eff_model,
+                    status_code=502,
+                ) from exc
+            return str(content or ""), {
+                "provider": eff_provider,
+                "model": eff_model,
+                "is_local": is_local,
+            }
 
-        resolved_bl = self._bl_bin if self._bl_bin.is_file() else Path(shutil.which("bl") or "")
-        if not resolved_bl.is_file():
-            raise RuntimeError("Bailian CLI `bl` is not available on this Mac rig.")
-
-        proc = subprocess.run(
-            [
-                str(resolved_bl),
-                "text",
-                "chat",
-                "--model",
-                self._llm_model,
-                "--enable-thinking",
-                "false",
-                "--enable-search",
-                "false",
-                "--system",
-                system_prompt,
-                "--message",
-                user_prompt,
-                "--output",
-                "json",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=self._llm_timeout_sec,
-            check=False,
+        assert self._llm_router is not None
+        complete_kwargs: dict[str, Any] = {
+            "llm_provider": llm_provider,
+            "llm_model": llm_model,
+            "max_tokens": max_tokens or STAGE_DEFAULT_MAX_TOKENS.get(stage, 1024),
+        }
+        if self._llm_timeout_sec is not None:
+            complete_kwargs["timeout_sec"] = self._llm_timeout_sec
+        res = self._llm_router.complete(
+            stage,
+            system_prompt,
+            user_prompt,
+            **complete_kwargs,
         )
-        if proc.returncode != 0:
-            raise RuntimeError(_summarize_subprocess_error("bl text chat", proc))
-        return parse_bl_chat_content(proc.stdout)
+        return res.text, res.llm_meta
 
     # 1. POST /v1/draft/transcribe
     def transcribe(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -786,6 +848,7 @@ class DraftPassEngine:
     def angles(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Angles request body must be a JSON object")
+        llm_provider, llm_model = _extract_llm_overrides(payload)
         seed_raw = payload.get("seed_transcript")
         if not isinstance(seed_raw, str) or not seed_raw.strip():
             raise ValueError("seed_transcript must be a non-empty string")
@@ -813,7 +876,9 @@ class DraftPassEngine:
             '"blindspots":[{"id":"bs_1","label":"...","preview":"..."}]}'
         )
 
+        stage = "draft.angles"
         last_err: Exception | None = None
+        last_meta: dict[str, Any] = {"provider": llm_provider or "unknown", "model": llm_model or self._llm_model, "is_local": False}
         for attempt in range(2):
             prompt = user_prompt
             if attempt > 0:
@@ -821,7 +886,14 @@ class DraftPassEngine:
                     "\nCORRECTION: Previous response was incomplete. You MUST return 2 to 3 "
                     "extracted_angles AND exactly 3 blindspots with non-empty label and preview."
                 )
-            content = self._call_llm(system_prompt, prompt)
+            content, last_meta = self._call_llm(
+                system_prompt,
+                prompt,
+                stage=stage,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                max_tokens=1024,
+            )
             try:
                 parsed = _extract_first_json_object(
                     content, required_keys=("extracted_angles", "blindspots")
@@ -835,10 +907,142 @@ class DraftPassEngine:
                 return {
                     "extracted_angles": extracted,
                     "blindspots": blindspots,
+                    "llm_meta": last_meta,
                 }
             except RuntimeError as exc:
                 last_err = exc
-        raise last_err or RuntimeError("Angles pass failed to return valid angle lists.")
+        raise LlmProviderError(
+            str(last_err or "Angles pass failed to return valid angle lists."),
+            provider=last_meta["provider"],
+            stage=stage,
+            model=last_meta.get("model"),
+            status_code=502,
+        )
+
+    # 2b. POST /v1/draft/arc
+    def arc(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Proposes a 4-beat spoken arc (HOOK / DETAIL / SHIFT / PAYOFF) sized to ``target_sec``.
+
+        With ``reroll_index`` + ``existing_beats`` only that one beat is rewritten; every other
+        beat is returned verbatim.
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("Arc request body must be a JSON object")
+        llm_provider, llm_model = _extract_llm_overrides(payload)
+        seed_raw = payload.get("seed_transcript")
+        if not isinstance(seed_raw, str) or not seed_raw.strip():
+            raise ValueError("seed_transcript must be a non-empty string")
+        seed = seed_raw.strip()
+        steering = _parse_string_list(payload.get("steering_constraints"), "steering_constraints")
+        angles = _parse_string_list(payload.get("selected_angles"), "selected_angles")
+        try:
+            target_sec = int(payload.get("target_sec") or ARC_DEFAULT_TARGET_SEC)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("target_sec must be an integer") from exc
+        if not 15 <= target_sec <= 180:
+            raise ValueError("target_sec must be between 15 and 180")
+        word_budget = int(round(target_sec * ARC_SPEAKING_WORDS_PER_SEC))
+        windows = _arc_windows(target_sec)
+
+        reroll_raw = payload.get("reroll_index")
+        existing: list[str] = []
+        reroll_index: int | None = None
+        if reroll_raw is not None:
+            try:
+                reroll_index = int(reroll_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("reroll_index must be an integer") from exc
+            raw_existing = payload.get("existing_beats")
+            if not isinstance(raw_existing, list) or len(raw_existing) != len(ARC_BEAT_LABELS):
+                raise ValueError(
+                    f"existing_beats must list exactly {len(ARC_BEAT_LABELS)} beat texts when rerolling"
+                )
+            existing = [sanitize_plain_ascii(str(t or ""), strip_throat_clearing=False) for t in raw_existing]
+            if not 0 <= reroll_index < len(ARC_BEAT_LABELS):
+                raise ValueError("reroll_index out of range")
+
+        system_prompt = (
+            "You outline short spoken-video scripts as a fixed 4-beat arc for a solo creator.\n"
+            + STYLE_CONSTRAINTS_SYSTEM_BLOCK
+        )
+        angle_block = ("SELECTED ANGLES TO COVER: " + " | ".join(angles) + "\n") if angles else ""
+        beat_spec = "\n".join(
+            f"- {label} ({lo}-{hi}s): {ARC_BEAT_PURPOSE[label]}"
+            for label, (lo, hi) in zip(ARC_BEAT_LABELS, windows)
+        )
+        if reroll_index is None:
+            user_prompt = (
+                f"SEED VOICE NOTE:\n{seed}\n{angle_block}{_format_steering_block(steering)}\n"
+                f"Target runtime {target_sec}s (about {word_budget} spoken words total).\n"
+                f"Write ONE plain-ASCII sentence (6 to 14 words) for each beat:\n{beat_spec}\n\n"
+                'Return STRICT JSON ONLY: {"beats":["hook","detail","shift","payoff"]}'
+            )
+        else:
+            label = ARC_BEAT_LABELS[reroll_index]
+            current = "\n".join(f"{ARC_BEAT_LABELS[i]}: {t}" for i, t in enumerate(existing))
+            user_prompt = (
+                f"SEED VOICE NOTE:\n{seed}\n{angle_block}{_format_steering_block(steering)}\n"
+                f"CURRENT ARC:\n{current}\n"
+                f"Rewrite ONLY the {label} beat ({ARC_BEAT_PURPOSE[label]}) as one new plain-ASCII "
+                f"sentence (6 to 14 words) that differs clearly from: {existing[reroll_index]}\n\n"
+                'Return STRICT JSON ONLY: {"beat":"..."}'
+            )
+
+        stage = "draft.arc"
+        last_err: Exception | None = None
+        last_meta: dict[str, Any] = {"provider": llm_provider or "unknown", "model": llm_model or self._llm_model, "is_local": False}
+        for attempt in range(2):
+            prompt = user_prompt
+            if attempt > 0:
+                prompt += "\nCORRECTION: Return the exact JSON schema with non-empty sentences."
+            content, last_meta = self._call_llm(
+                system_prompt,
+                prompt,
+                stage=stage,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                max_tokens=1024,
+            )
+            try:
+                if reroll_index is None:
+                    parsed = _extract_first_json_object(content, required_keys=("beats",))
+                    raw_beats = parsed.get("beats")
+                    if not isinstance(raw_beats, list):
+                        raise RuntimeError("AI arc response missing beats list")
+                    texts = [
+                        sanitize_plain_ascii(str(b), strip_throat_clearing=True)
+                        for b in raw_beats
+                        if isinstance(b, str)
+                    ]
+                    texts = [t for t in texts if t]
+                    if len(texts) < len(ARC_BEAT_LABELS):
+                        raise RuntimeError(f"AI arc returned {len(texts)} beats, expected 4")
+                    texts = texts[: len(ARC_BEAT_LABELS)]
+                else:
+                    parsed = _extract_first_json_object(content, required_keys=("beat",))
+                    new_text = sanitize_plain_ascii(str(parsed.get("beat") or ""), strip_throat_clearing=True)
+                    if not new_text:
+                        raise RuntimeError("AI arc reroll returned an empty beat")
+                    texts = list(existing)
+                    texts[reroll_index] = new_text
+                return {
+                    "target_sec": target_sec,
+                    "word_budget": word_budget,
+                    "beats": [
+                        {"label": label, "start_sec": lo, "end_sec": hi, "text": text}
+                        for label, (lo, hi), text in zip(ARC_BEAT_LABELS, windows, texts)
+                    ],
+                    "llm_meta": last_meta,
+                }
+            except RuntimeError as exc:
+                last_err = exc
+        raise LlmProviderError(
+            str(last_err or "Arc pass failed to return a valid 4-beat arc."),
+            provider=last_meta["provider"],
+            stage=stage,
+            model=last_meta.get("model"),
+            status_code=502,
+        )
 
     def _normalize_angle_items(
         self, raw_items: Any, *, prefix: str, min_count: int, max_count: int
@@ -880,6 +1084,7 @@ class DraftPassEngine:
     def synthesize(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Synthesize request body must be a JSON object")
+        llm_provider, llm_model = _extract_llm_overrides(payload)
         seed_raw = payload.get("seed_transcript")
         if not isinstance(seed_raw, str) or not seed_raw.strip():
             raise ValueError("seed_transcript must be a non-empty string")
@@ -948,7 +1153,9 @@ class DraftPassEngine:
             )
             expected_postures = [target_posture]
 
+        stage = "draft.synthesize"
         last_err: Exception | None = None
+        last_meta: dict[str, Any] = {"provider": llm_provider or "unknown", "model": llm_model or self._llm_model, "is_local": False}
         for attempt in range(2):
             prompt = user_prompt
             if attempt > 0:
@@ -956,7 +1163,14 @@ class DraftPassEngine:
                     f"\nCORRECTION: Return exactly {len(expected_postures)} candidate(s) with non-empty "
                     "plain ASCII text <= 280 characters."
                 )
-            content = self._call_llm(system_prompt, prompt)
+            content, last_meta = self._call_llm(
+                system_prompt,
+                prompt,
+                stage=stage,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                max_tokens=1024,
+            )
             try:
                 parsed = _extract_first_json_object(content, required_keys=("candidates",))
                 raw_candidates = parsed.get("candidates")
@@ -1009,15 +1223,151 @@ class DraftPassEngine:
                             "AI synthesize slot refresh repeated an existing draft verbatim"
                         )
 
-                return {"candidates": out_candidates}
+                return {"candidates": out_candidates, "llm_meta": last_meta}
             except RuntimeError as exc:
                 last_err = exc
-        raise last_err or RuntimeError("Synthesize pass failed to return valid candidates.")
+        raise LlmProviderError(
+            str(last_err or "Synthesize pass failed to return valid candidates."),
+            provider=last_meta["provider"],
+            stage=stage,
+            model=last_meta.get("model"),
+            status_code=502,
+        )
+
+    # 3b. POST /v1/draft/synthesize-script
+    def synthesize_script(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Writes 3 spoken video-script versions (DIRECT / PUNCHY / STORY) sized to ``target_sec``.
+
+        Each version is one paragraph per arc beat, joined by blank lines so the client keeps
+        paragraph boundaries.
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("Synthesize-script request body must be a JSON object")
+        llm_provider, llm_model = _extract_llm_overrides(payload)
+        seed_raw = payload.get("seed_transcript")
+        if not isinstance(seed_raw, str) or not seed_raw.strip():
+            raise ValueError("seed_transcript must be a non-empty string")
+        seed = seed_raw.strip()
+        angles = _parse_string_list(payload.get("selected_angles"), "selected_angles")
+        steering = _parse_string_list(payload.get("steering_constraints"), "steering_constraints")
+        arc_beats = _parse_string_list(payload.get("arc_beats"), "arc_beats")
+        try:
+            target_sec = int(payload.get("target_sec") or ARC_DEFAULT_TARGET_SEC)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("target_sec must be an integer") from exc
+        if not 15 <= target_sec <= 180:
+            raise ValueError("target_sec must be between 15 and 180")
+        word_budget = int(round(target_sec * ARC_SPEAKING_WORDS_PER_SEC))
+        beat_count = len(arc_beats) if arc_beats else len(ARC_BEAT_LABELS)
+
+        system_prompt = (
+            "You write tight spoken scripts for solo creators reading to camera.\n"
+            + STYLE_CONSTRAINTS_SYSTEM_BLOCK
+        )
+        arc_block = ""
+        if arc_beats:
+            arc_block = "APPROVED ARC (one paragraph per beat, in order):\n" + "\n".join(
+                f"{i + 1}. {b}" for i, b in enumerate(arc_beats)
+            ) + "\n"
+        angle_block = ("ANGLES TO COVER: " + " | ".join(angles) + "\n") if angles else ""
+        user_prompt = (
+            f"SEED VOICE NOTE:\n{seed}\n{arc_block}{angle_block}{_format_steering_block(steering)}\n"
+            f"Write 3 distinct versions of a {target_sec}s script, each about {word_budget} spoken words, "
+            f"each exactly {beat_count} paragraphs (one per beat):\n"
+            "- posture_label='DIRECT': states the argument plainly.\n"
+            "- posture_label='PUNCHY': short hard-hitting sentences.\n"
+            "- posture_label='STORY': told through a concrete moment.\n\n"
+            "Return STRICT JSON ONLY:\n"
+            '{"versions":[{"posture_label":"DIRECT","paragraphs":["..."]},'
+            '{"posture_label":"PUNCHY","paragraphs":["..."]},'
+            '{"posture_label":"STORY","paragraphs":["..."]}]}'
+        )
+        stage = "draft.synthesize_script"
+        expected = list(SCRIPT_POSTURE_LABELS)
+        last_err: Exception | None = None
+        last_meta: dict[str, Any] = {"provider": llm_provider or "unknown", "model": llm_model or self._llm_model, "is_local": False}
+        for attempt in range(3):
+            prompt = user_prompt
+            if attempt > 0:
+                prompt += (
+                    f"\nCORRECTION: Return exactly 3 versions, each with exactly {beat_count} "
+                    "non-empty paragraphs."
+                )
+            content, last_meta = self._call_llm(
+                system_prompt,
+                prompt,
+                stage=stage,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                max_tokens=2048,
+            )
+            try:
+                parsed = _extract_first_json_object(content, required_keys=("versions",))
+                raw_versions = parsed.get("versions")
+                if not isinstance(raw_versions, list):
+                    raise RuntimeError("AI synthesize-script response missing versions list")
+                by_label: dict[str, list[str]] = {}
+                positional: list[list[str]] = []
+                for entry in raw_versions:
+                    if not isinstance(entry, dict):
+                        continue
+                    paras_raw = entry.get("paragraphs")
+                    if not isinstance(paras_raw, list):
+                        continue
+                    paras = [
+                        sanitize_plain_ascii(str(x), strip_throat_clearing=True)
+                        for x in paras_raw
+                        if isinstance(x, str)
+                    ]
+                    paras = [x for x in paras if x]
+                    if len(paras) > beat_count:
+                        # Fold overflow paragraphs into the final beat rather than discarding the version.
+                        paras = paras[: beat_count - 1] + [" ".join(paras[beat_count - 1 :])]
+                    if len(paras) != beat_count:
+                        continue
+                    positional.append(paras)
+                    label = str(entry.get("posture_label") or "").strip().upper()
+                    if label in expected and label not in by_label:
+                        by_label[label] = paras
+                out: list[dict[str, Any]] = []
+                used: set[int] = set()
+                for label in expected:
+                    paras = by_label.get(label)
+                    if paras is None:
+                        idx = next((i for i in range(len(positional)) if i not in used and positional[i] not in by_label.values()), None)
+                        if idx is None:
+                            raise RuntimeError(f"AI synthesize-script missing version {label}")
+                        used.add(idx)
+                        paras = positional[idx]
+                    text = "\n\n".join(paras)
+                    out.append(
+                        {
+                            "posture_label": label,
+                            "text": text,
+                            "word_count": len(text.split()),
+                        }
+                    )
+                return {
+                    "target_sec": target_sec,
+                    "word_budget": word_budget,
+                    "candidates": out,
+                    "llm_meta": last_meta,
+                }
+            except RuntimeError as exc:
+                last_err = exc
+        raise LlmProviderError(
+            str(last_err or "Synthesize-script pass failed to return 3 versions."),
+            provider=last_meta["provider"],
+            stage=stage,
+            model=last_meta.get("model"),
+            status_code=502,
+        )
 
     # 4. POST /v1/draft/brush-swap
     def brush_swap(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Brush-swap request body must be a JSON object")
+        llm_provider, llm_model = _extract_llm_overrides(payload)
         marked_raw = payload.get("marked_text")
         if not isinstance(marked_raw, str) or not marked_raw.strip():
             raise ValueError("marked_text must be a non-empty string")
@@ -1032,6 +1382,19 @@ class DraftPassEngine:
             raise ValueError("<replace>...</replace> span must not be empty")
 
         steering = _parse_string_list(payload.get("steering_constraints"), "steering_constraints")
+        nudge_raw = payload.get("nudge")
+        nudge = str(nudge_raw).strip().lower() if nudge_raw is not None else ""
+        if nudge and nudge not in BRUSH_NUDGE_DIRECTIVES:
+            raise ValueError(
+                f"nudge must be one of {sorted(BRUSH_NUDGE_DIRECTIVES)} (got {nudge_raw!r})"
+            )
+        exclude = _parse_string_list(payload.get("exclude_alternatives"), "exclude_alternatives")
+        want_count = 3 if nudge == "more" else 2
+        nudge_block = ""
+        if nudge:
+            nudge_block = f"TONE NUDGE: {BRUSH_NUDGE_DIRECTIVES[nudge]}\n"
+        if exclude:
+            nudge_block += "DO NOT REPEAT ANY OF THESE EARLIER OPTIONS: " + " | ".join(exclude) + "\n"
         system_prompt = (
             "You propose compact drop-in word or phrase replacements for ONLY the substring wrapped "
             "in <replace>...</replace>, fitting cleanly into the surrounding text and respecting "
@@ -1042,22 +1405,33 @@ class DraftPassEngine:
             f"MARKED DRAFT:\n{marked_text}\n"
             f"TARGET SPAN TO REPLACE: {target_span}\n"
             f"{_format_steering_block(steering)}\n"
-            "Return 2 distinct, terse, plain-spoken ASCII replacement phrases for ONLY the "
+            f"{nudge_block}"
+            f"Return {want_count} distinct, terse, plain-spoken ASCII replacement phrases for ONLY the "
             "<replace>...</replace> span (not the full sentence). Option 1 must be the strongest "
-            "terse plain-spoken replacement; Option 2 must be a distinct second alternative. "
-            "Neither option should simply repeat the original target span.\n\n"
-            'Return STRICT JSON ONLY: {"alternatives":["opt1","opt2"]}'
+            "terse plain-spoken replacement; later options must be distinct alternatives. "
+            "No option should simply repeat the original target span.\n\n"
+            "Return STRICT JSON ONLY: "
+            + ('{"alternatives":["opt1","opt2","opt3"]}' if want_count == 3 else '{"alternatives":["opt1","opt2"]}')
         )
 
+        stage = "draft.brush_swap"
         last_err: Exception | None = None
+        last_meta: dict[str, Any] = {"provider": llm_provider or "unknown", "model": llm_model or self._llm_model, "is_local": False}
         for attempt in range(2):
             prompt = user_prompt
             if attempt > 0:
                 prompt += (
-                    "\nCORRECTION: Return exactly 2 distinct non-empty plain-ASCII replacement "
-                    'strings in {"alternatives":["opt1","opt2"]}.'
+                    f"\nCORRECTION: Return exactly {want_count} distinct non-empty plain-ASCII "
+                    'replacement strings in {"alternatives":[...]}.'
                 )
-            content = self._call_llm(system_prompt, prompt)
+            content, last_meta = self._call_llm(
+                system_prompt,
+                prompt,
+                stage=stage,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                max_tokens=512,
+            )
             try:
                 parsed = _extract_first_json_object(content, required_keys=("alternatives",))
                 raw_alts = parsed.get("alternatives")
@@ -1065,7 +1439,7 @@ class DraftPassEngine:
                     raise RuntimeError("AI brush-swap response missing alternatives list")
 
                 cleaned_alts: list[str] = []
-                seen_lower: set[str] = set()
+                seen_lower: set[str] = {e.lower() for e in exclude}
                 target_lower = target_span.lower()
                 deferred_same: list[str] = []
 
@@ -1088,30 +1462,43 @@ class DraftPassEngine:
                         deferred_same.append(cand)
                     else:
                         cleaned_alts.append(cand)
-                    if len(cleaned_alts) >= 2:
+                    if len(cleaned_alts) >= want_count:
                         break
 
-                if len(cleaned_alts) < 2:
+                if len(cleaned_alts) < want_count:
                     for same in deferred_same:
                         cleaned_alts.append(same)
-                        if len(cleaned_alts) >= 2:
+                        if len(cleaned_alts) >= want_count:
                             break
 
-                if len(cleaned_alts) < 2:
+                if len(cleaned_alts) < want_count:
                     raise RuntimeError(
-                        f"AI brush-swap returned {len(cleaned_alts)} non-empty alternatives, expected 2"
+                        f"AI brush-swap returned {len(cleaned_alts)} non-empty alternatives, expected {want_count}"
                     )
 
-                # Exact 3-element contract: [top terse replacement, second alternative, "" clean cut]
-                return {"alternatives": [cleaned_alts[0], cleaned_alts[1], ""]}
+                # Contract: [want_count replacements..., "" clean cut]
+                result: dict[str, Any] = {
+                    "alternatives": [*cleaned_alts[:want_count], ""],
+                    "llm_meta": last_meta,
+                }
+                if nudge:
+                    result["nudge"] = nudge
+                return result
             except RuntimeError as exc:
                 last_err = exc
-        raise last_err or RuntimeError("Brush-swap pass failed to return valid alternatives.")
+        raise LlmProviderError(
+            str(last_err or "Brush-swap pass failed to return valid alternatives."),
+            provider=last_meta["provider"],
+            stage=stage,
+            model=last_meta.get("model"),
+            status_code=502,
+        )
 
     # 5. POST /v1/draft/seam-heal
     def seam_heal(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Seam-heal request body must be a JSON object")
+        llm_provider, llm_model = _extract_llm_overrides(payload)
         marked_raw = payload.get("marked_text")
         if not isinstance(marked_raw, str) or not marked_raw.strip():
             raise ValueError("marked_text must be a non-empty string")
@@ -1153,22 +1540,28 @@ class DraftPassEngine:
             'Return STRICT JSON ONLY: {"text":"..."}'
         )
 
-        healed = self._run_lock_conserving_text_pass(
+        healed, llm_meta = self._run_lock_conserving_text_pass(
+            stage="draft.seam_heal",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             marked_text=marked_text,
             locked_spans=locked_spans,
             operation=operation,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            max_tokens=1024,
         )
         return {
             "text": healed,
             "lock_parity_preserved": True,
+            "llm_meta": llm_meta,
         }
 
     # 6. POST /v1/draft/density
     def density(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Density request body must be a JSON object")
+        llm_provider, llm_model = _extract_llm_overrides(payload)
         marked_raw = payload.get("marked_text")
         if not isinstance(marked_raw, str) or not marked_raw.strip():
             raise ValueError("marked_text must be a non-empty string")
@@ -1229,16 +1622,21 @@ class DraftPassEngine:
             'Return STRICT JSON ONLY: {"text":"..."}'
         )
 
-        adjusted = self._run_lock_conserving_text_pass(
+        adjusted, llm_meta = self._run_lock_conserving_text_pass(
+            stage="draft.density",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             marked_text=marked_text,
             locked_spans=locked_spans,
             operation=None,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            max_tokens=1024,
         )
         return {
             "text": adjusted,
             "lock_parity_preserved": True,
+            "llm_meta": llm_meta,
         }
 
     # ------------------------------------------------------------------
@@ -1248,10 +1646,12 @@ class DraftPassEngine:
     def rewrite(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Request body must be a JSON object")
+        llm_provider, llm_model = _extract_llm_overrides(payload)
 
         raw_text = payload.get("text")
         if not isinstance(raw_text, str) or not strip_lock_tags(raw_text).strip():
             raise ValueError("text must be a non-empty string")
+        _validate_balanced_lock_tags(raw_text)
 
         mode = str(payload.get("mode") or "seed_clean").strip().lower()
         if mode not in ("seed_clean", "cut_polish"):
@@ -1285,42 +1685,92 @@ class DraftPassEngine:
             'Return STRICT JSON ONLY: {"text":"..."}'
         )
 
-        rewritten = self._run_lock_conserving_text_pass(
+        rewritten, llm_meta = self._run_lock_conserving_text_pass(
+            stage="draft.rewrite",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             marked_text=raw_text,
             locked_spans=locked_spans,
             operation=None,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            max_tokens=1024,
         )
         return {
             "text": rewritten,
             "lock_parity_preserved": True,
+            "llm_meta": llm_meta,
         }
 
     def _run_lock_conserving_text_pass(
         self,
         *,
+        stage: str,
         system_prompt: str,
         user_prompt: str,
         marked_text: str,
         locked_spans: list[str],
         operation: str | None,
-    ) -> str:
+        llm_provider: str | None = None,
+        llm_model: str | None = None,
+        max_tokens: int = 1024,
+    ) -> tuple[str, dict[str, Any]]:
         attempts = 1 + (self._max_lock_retries if locked_spans else 0)
         prompt = user_prompt
+        last_meta: dict[str, Any] = {
+            "provider": llm_provider or "unknown",
+            "model": llm_model or self._llm_model,
+            "is_local": False,
+        }
         for attempt in range(attempts):
-            content = self._call_llm(system_prompt, prompt)
-            parsed = _extract_first_json_object(content, required_keys=("text",))
+            content, last_meta = self._call_llm(
+                system_prompt,
+                prompt,
+                stage=stage,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                max_tokens=max_tokens,
+            )
+            try:
+                parsed = _extract_first_json_object(content, required_keys=("text",))
+            except RuntimeError as exc:
+                raise LlmProviderError(
+                    str(exc),
+                    provider=last_meta["provider"],
+                    stage=stage,
+                    model=last_meta.get("model"),
+                    status_code=502,
+                ) from exc
+
             raw_text = parsed.get("text")
             if not isinstance(raw_text, str) or not strip_lock_tags(raw_text).strip():
+                raise LlmProviderError(
+                    "AI pass returned empty text.",
+                    provider=last_meta["provider"],
+                    stage=stage,
+                    model=last_meta.get("model"),
+                    status_code=502,
+                )
+
+            sanitized_plain = sanitize_plain_ascii(
+                strip_lock_tags(raw_text),
+                strip_throat_clearing=True,
+            ).strip()
+            if not sanitized_plain:
                 if attempt + 1 < attempts:
-                    continue
-                if locked_spans:
-                    LOGGER.warning(
-                        "LLM returned empty text on locked pass; falling back to lock-preserving text"
+                    prompt = (
+                        f"{user_prompt}\n\n"
+                        "EMPTY OUTPUT REJECTED. Return non-empty plain-ASCII prose in "
+                        '{"text":"..."}.'
                     )
-                    return build_lock_preserving_fallback(marked_text, operation=operation)
-                raise RuntimeError("AI pass returned empty text.")
+                    continue
+                raise LlmProviderError(
+                    "AI pass returned empty text after sanitization.",
+                    provider=last_meta["provider"],
+                    stage=stage,
+                    model=last_meta.get("model"),
+                    status_code=502,
+                )
 
             if verify_lock_parity(locked_spans, raw_text):
                 sanitized = sanitize_preserving_locks(
@@ -1328,8 +1778,23 @@ class DraftPassEngine:
                     locked_spans,
                     strip_throat_clearing=True,
                 )
-                if verify_lock_parity(locked_spans, sanitized) and sanitized.strip():
-                    return sanitized
+                if not sanitized.strip():
+                    if attempt + 1 < attempts:
+                        prompt = (
+                            f"{user_prompt}\n\n"
+                            "EMPTY OUTPUT REJECTED. Return non-empty plain-ASCII prose in "
+                            '{"text":"..."}.'
+                        )
+                        continue
+                    raise LlmProviderError(
+                        "AI pass returned empty text after sanitization.",
+                        provider=last_meta["provider"],
+                        stage=stage,
+                        model=last_meta.get("model"),
+                        status_code=502,
+                    )
+                if verify_lock_parity(locked_spans, sanitized):
+                    return sanitized, last_meta
 
             missing = [span for span in locked_spans if span not in strip_lock_tags(raw_text)]
             LOGGER.warning(
@@ -1348,8 +1813,14 @@ class DraftPassEngine:
                     'Return STRICT JSON ONLY: {"text":"..."}'
                 )
 
-        # Deterministic rejection of lock-violating LLM output: return lock-preserving fallback.
+        # Deterministic rejection of lock-violating non-empty JSON LLM output: return lock-preserving fallback.
         fallback = build_lock_preserving_fallback(marked_text, operation=operation)
         if not verify_lock_parity(locked_spans, fallback):
-            raise RuntimeError("Lock parity invariant failed unexpectedly on fallback text")
-        return fallback
+            raise LlmProviderError(
+                "Lock parity invariant failed unexpectedly on fallback text",
+                provider=last_meta["provider"],
+                stage=stage,
+                model=last_meta.get("model"),
+                status_code=502,
+            )
+        return fallback, last_meta
