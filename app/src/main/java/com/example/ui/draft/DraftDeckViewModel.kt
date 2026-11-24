@@ -38,6 +38,15 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 @Immutable
+data class DraftSessionSummary(
+    val id: String,
+    val title: String,
+    val stage: Stage,
+    val isThinking: Boolean,
+    val charCount: Int
+)
+
+@Immutable
 data class DraftDeckUiState(
     val document: DraftDocument = DraftDocument(id = UUID.randomUUID().toString()),
     val isRecordingSeed: Boolean = false,
@@ -62,10 +71,15 @@ data class DraftDeckUiState(
     val isRadarExpanded: Boolean = false,
     val isImportingArchive: Boolean = false,
     val lastSeedRigOnline: Boolean = false,
-    val rigBaseUrl: String = DraftApiClient.DEFAULT_RIG_LAN_URL
+    val rigBaseUrl: String = DraftApiClient.DEFAULT_RIG_LAN_URL,
+    val sessions: List<DraftSessionSummary> = emptyList(),
+    val isSessionSwitcherOpen: Boolean = false
 ) {
     val isAnyRecording: Boolean
         get() = isRecordingSeed || isRecordingSteer || isRecordingSplice
+
+    val hasAnyBackgroundThinking: Boolean
+        get() = sessions.any { it.id != document.id && it.isThinking }
 
     val activeCharCount: Int
         get() = when (document.stage) {
@@ -121,7 +135,18 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
     private var flashJob: Job? = null
     private var graphRefreshJob: Job? = null
 
+    // Concurrent multi-draft async session store: switching or pulling down for a new subject
+    // NEVER cancels in-flight LLM passes on prior cards.
+    private val sessionsLock = Any()
+    private val storedSessions = LinkedHashMap<String, DraftDeckUiState>()
+    private val sessionJobs = HashMap<String, HashMap<String, Job>>()
+
     init {
+        synchronized(sessionsLock) {
+            val initial = _uiState.value
+            storedSessions[initial.document.id] = initial
+        }
+        syncSessionSummariesIntoUi()
         viewModelScope.launch {
             profileStore.settingsFlow.collect { settings ->
                 val url = settings.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
@@ -499,6 +524,246 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun spinUpNewDraftSession() {
+        val current = _uiState.value
+        val freshDoc = DraftDocument(id = UUID.randomUUID().toString(), stage = Stage.SEED)
+        val freshState = DraftDeckUiState(
+            document = freshDoc,
+            graphMatches = emptyList(),
+            graphContactCount = current.graphContactCount,
+            lastSeedRigOnline = current.lastSeedRigOnline,
+            rigBaseUrl = current.rigBaseUrl,
+            statusNotice = if (current.isBusy) {
+                "New draft ready · prior card still thinking"
+            } else {
+                "New draft ready"
+            },
+            isSessionSwitcherOpen = false
+        )
+        synchronized(sessionsLock) {
+            storedSessions[current.document.id] = current.copy(isSessionSwitcherOpen = false)
+            storedSessions[freshDoc.id] = freshState
+        }
+        clearBrushBaseline()
+        _uiState.value = freshState.copy(sessions = buildSessionSummariesLocked())
+        refreshGraphMatches()
+    }
+
+    fun switchToSession(sessionId: String) {
+        val current = _uiState.value
+        if (sessionId == current.document.id) {
+            _uiState.update { it.copy(isSessionSwitcherOpen = false) }
+            return
+        }
+        val restored: DraftDeckUiState? = synchronized(sessionsLock) {
+            storedSessions[current.document.id] = current.copy(isSessionSwitcherOpen = false)
+            storedSessions[sessionId]
+        }
+        if (restored == null) return
+        clearBrushBaseline()
+        _uiState.value = restored.copy(
+            graphContactCount = current.graphContactCount,
+            lastSeedRigOnline = current.lastSeedRigOnline || restored.lastSeedRigOnline,
+            rigBaseUrl = current.rigBaseUrl,
+            isSessionSwitcherOpen = false,
+            sessions = buildSessionSummariesLocked()
+        )
+        refreshGraphMatches()
+    }
+
+    fun toggleSessionSwitcher() {
+        setSessionSwitcherOpen(!_uiState.value.isSessionSwitcherOpen)
+    }
+
+    fun setSessionSwitcherOpen(open: Boolean) {
+        val current = _uiState.value
+        synchronized(sessionsLock) {
+            storedSessions[current.document.id] = current.copy(isSessionSwitcherOpen = open)
+        }
+        _uiState.update {
+            it.copy(
+                isSessionSwitcherOpen = open,
+                sessions = buildSessionSummariesLocked()
+            )
+        }
+    }
+
+    fun aiRewriteCurrentInput() {
+        val snapshot = _uiState.value
+        val targetSessionId = snapshot.document.id
+        val stage = snapshot.document.stage
+
+        if (stage == Stage.SEED) {
+            val cleanSeed = DraftStateReducer.sanitizeAscii(snapshot.document.seedTranscript).trim()
+            if (cleanSeed.isEmpty()) {
+                updateSession(targetSessionId) {
+                    it.copy(errorMessage = "Record or type a rough idea before tapping AI rewrite.")
+                }
+                return
+            }
+            launchSessionJob(targetSessionId, "pass") {
+                updateSession(targetSessionId) {
+                    it.copy(isBusy = true, busyLabel = "Rewriting seed...", errorMessage = null)
+                }
+                try {
+                    val response = draftApiClient.rewrite(
+                        text = cleanSeed,
+                        mode = "seed_clean",
+                        steeringConstraints = snapshot.document.steeringConstraints
+                    )
+                    val cleanOut = DraftStateReducer.sanitizeAscii(response.text).trim()
+                    if (cleanOut.isBlank()) {
+                        throw IOException("Mac rig returned an empty rewrite.")
+                    }
+                    updateSession(targetSessionId) { cur ->
+                        cur.copy(
+                            document = cur.document.copy(seedTranscript = cleanOut),
+                            lastSeedRigOnline = true,
+                            isBusy = false,
+                            busyLabel = null,
+                            statusNotice = "Seed sharpened."
+                        )
+                    }
+                    refreshAnglesFromSeedInternal(
+                        silentOnError = true,
+                        targetSessionId = targetSessionId
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    handleSessionApiFailure(targetSessionId, "AI rewrite failed", e)
+                }
+            }
+        } else {
+            val activeCandidate = snapshot.document.activeCandidate ?: return
+            val marked = DraftStateReducer.renderMarkedTextWithLocks(activeCandidate.clauses)
+            if (marked.isBlank()) return
+            launchSessionJob(targetSessionId, "pass") {
+                updateSession(targetSessionId) {
+                    it.copy(isBusy = true, busyLabel = "Sharpening draft...", errorMessage = null)
+                }
+                try {
+                    val response = draftApiClient.rewrite(
+                        text = marked,
+                        mode = "cut_polish",
+                        steeringConstraints = snapshot.document.steeringConstraints
+                    )
+                    val parity = DraftStateReducer.verifyLockParity(
+                        originalClauses = activeCandidate.clauses,
+                        mutatedText = response.text,
+                        source = EditSource.BRUSH_SWAP
+                    )
+                    val updated = if (parity.preserved) {
+                        DraftStateReducer.applyVerifiedMutation(
+                            draft = activeCandidate,
+                            mutatedText = response.text,
+                            source = EditSource.BRUSH_SWAP
+                        )
+                    } else {
+                        throw IOException("AI rewrite altered locked words; kept your draft unchanged.")
+                    }
+                    updateSession(targetSessionId) { cur ->
+                        val idx = cur.document.activeCandidateIndex
+                        val newCandidates = cur.document.candidates.mapIndexed { i, c ->
+                            if (i == idx) updated else c
+                        }
+                        cur.copy(
+                            document = cur.document.copy(candidates = newCandidates),
+                            lastSeedRigOnline = true,
+                            isBusy = false,
+                            busyLabel = null,
+                            rawKeyboardMode = false,
+                            statusNotice = "Draft sharpened."
+                        )
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    handleSessionApiFailure(targetSessionId, "AI rewrite failed", e)
+                }
+            }
+        }
+    }
+
+    private fun launchSessionJob(
+        sessionId: String,
+        slotKey: String,
+        block: suspend () -> Unit
+    ): Job {
+        val job = viewModelScope.launch { block() }
+        synchronized(sessionsLock) {
+            val map = sessionJobs.getOrPut(sessionId) { HashMap() }
+            map[slotKey]?.cancel()
+            map[slotKey] = job
+        }
+        return job
+    }
+
+    private fun updateSession(
+        sessionId: String,
+        transform: (DraftDeckUiState) -> DraftDeckUiState
+    ) {
+        val isActive = _uiState.value.document.id == sessionId
+        if (isActive) {
+            _uiState.update { cur ->
+                val next = transform(cur)
+                synchronized(sessionsLock) {
+                    storedSessions[sessionId] = next
+                }
+                next.copy(sessions = buildSessionSummariesLocked())
+            }
+        } else {
+            val updatedSummaries = synchronized(sessionsLock) {
+                val existing = storedSessions[sessionId] ?: return@synchronized null
+                storedSessions[sessionId] = transform(existing)
+                buildSessionSummariesLocked()
+            }
+            if (updatedSummaries != null) {
+                _uiState.update { cur -> cur.copy(sessions = updatedSummaries) }
+            }
+        }
+    }
+
+    private fun handleSessionApiFailure(sessionId: String, prefix: String, error: Exception) {
+        val offline = error is IOException && error !is DraftApiClient.HttpStatusException
+        val detail = error.message?.trim().takeUnless { it.isNullOrBlank() } ?: "Unknown error"
+        updateSession(sessionId) { state ->
+            state.copy(
+                isBusy = false,
+                busyLabel = null,
+                densityDeltaPercent = 0,
+                lastSeedRigOnline = if (offline) false else state.lastSeedRigOnline,
+                errorMessage = "$prefix: $detail"
+            )
+        }
+    }
+
+    private fun syncSessionSummariesIntoUi() {
+        val summaries = buildSessionSummariesLocked()
+        _uiState.update { it.copy(sessions = summaries) }
+    }
+
+    private fun buildSessionSummariesLocked(): List<DraftSessionSummary> =
+        synchronized(sessionsLock) {
+            val current = _uiState.value
+            storedSessions[current.document.id] = current
+            storedSessions.values.mapIndexed { idx, s ->
+                val rawPreview = s.activePlainText.trim()
+                val title = if (rawPreview.isNotBlank()) {
+                    rawPreview.lineSequence().firstOrNull().orEmpty().take(28)
+                } else {
+                    "Draft ${idx + 1}"
+                }
+                DraftSessionSummary(
+                    id = s.document.id,
+                    title = title,
+                    stage = s.document.stage,
+                    isThinking = s.isBusy,
+                    charCount = s.activeCharCount
+                )
+            }
+        }
+
     fun refreshAnglesFromSeed() {
         val seed = _uiState.value.document.seedTranscript.trim()
         if (seed.isEmpty()) {
@@ -508,15 +773,20 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
         refreshAnglesFromSeedInternal(silentOnError = false)
     }
 
-    private fun refreshAnglesFromSeedInternal(silentOnError: Boolean) {
-        val snapshotDoc = _uiState.value.document
+    private fun refreshAnglesFromSeedInternal(
+        silentOnError: Boolean,
+        targetSessionId: String = _uiState.value.document.id
+    ) {
+        val snapshotState = synchronized(sessionsLock) {
+            storedSessions[targetSessionId]
+        } ?: _uiState.value
+        val snapshotDoc = snapshotState.document
         val cleanSeed = DraftStateReducer.sanitizeAscii(snapshotDoc.seedTranscript).trim()
         if (cleanSeed.isEmpty()) return
 
-        anglesJob?.cancel()
-        anglesJob = viewModelScope.launch {
+        anglesJob = launchSessionJob(targetSessionId, "angles") {
             if (!silentOnError) {
-                _uiState.update {
+                updateSession(targetSessionId) {
                     it.copy(isBusy = true, busyLabel = "Extracting angles...", errorMessage = null)
                 }
             }
@@ -528,7 +798,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 // Row A (Extracted Angles) ON by default; Row B (Blindspots) OFF by default.
                 val extracted = response.toExtractedAngleChips(defaultSelected = true)
                 val blindspots = response.toBlindspotAngleChips(defaultSelected = false)
-                _uiState.update { state ->
+                updateSession(targetSessionId) { state ->
                     state.copy(
                         document = state.document.copy(
                             extractedAngles = extracted,
@@ -543,9 +813,9 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 throw e
             } catch (e: Exception) {
                 if (!silentOnError) {
-                    handleApiFailure("Angle extraction failed", e)
+                    handleSessionApiFailure(targetSessionId, "Angle extraction failed", e)
                 } else {
-                    _uiState.update {
+                    updateSession(targetSessionId) {
                         it.copy(
                             lastSeedRigOnline = if (e is IOException && e !is DraftApiClient.HttpStatusException) false else it.lastSeedRigOnline
                         )
@@ -556,17 +826,20 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun synthesizeThreeCandidates() {
-        val doc = _uiState.value.document
+        val snapshot = _uiState.value
+        val targetSessionId = snapshot.document.id
+        val doc = snapshot.document
         val cleanSeed = DraftStateReducer.sanitizeAscii(doc.seedTranscript).trim()
         if (cleanSeed.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "Record or type a seed thought before synthesizing.") }
+            updateSession(targetSessionId) {
+                it.copy(errorMessage = "Record or type a seed thought before synthesizing.")
+            }
             return
         }
 
         val selectedAngles = collectSelectedAngleSpecs(doc)
-        activePassJob?.cancel()
-        activePassJob = viewModelScope.launch {
-            _uiState.update {
+        activePassJob = launchSessionJob(targetSessionId, "pass") {
+            updateSession(targetSessionId) {
                 it.copy(
                     isBusy = true,
                     busyLabel = "Synthesizing 3 candidates...",
@@ -592,9 +865,11 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 if (candidates.isEmpty()) {
                     throw IOException("Mac rig returned zero draft candidates.")
                 }
-                clearBrushBaseline()
-                editGeneration.incrementAndGet()
-                _uiState.update { state ->
+                if (_uiState.value.document.id == targetSessionId) {
+                    clearBrushBaseline()
+                    editGeneration.incrementAndGet()
+                }
+                updateSession(targetSessionId) { state ->
                     state.copy(
                         document = state.document.copy(
                             stage = Stage.PICK,
@@ -613,11 +888,13 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                         busyLabel = null
                     )
                 }
-                refreshGraphMatches()
+                if (_uiState.value.document.id == targetSessionId) {
+                    refreshGraphMatches()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                handleApiFailure("Synthesis failed", e)
+                handleSessionApiFailure(targetSessionId, "Synthesis failed", e)
             }
         }
     }
@@ -695,10 +972,10 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
 
         val existingTexts = doc.candidates.map { it.plainText() }.filter { it.isNotBlank() }
         val selectedAngles = collectSelectedAngleSpecs(doc)
+        val targetSessionId = doc.id
 
-        activePassJob?.cancel()
-        activePassJob = viewModelScope.launch {
-            _uiState.update {
+        activePassJob = launchSessionJob(targetSessionId, "pass") {
+            updateSession(targetSessionId) {
                 it.copy(
                     isBusy = true,
                     busyLabel = "Refreshing v${slotIdx + 1}...",
@@ -720,9 +997,11 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     text = replacementDto.text,
                     source = EditSource.MODEL_INIT
                 )
-                clearBrushBaseline()
-                editGeneration.incrementAndGet()
-                _uiState.update { state ->
+                if (_uiState.value.document.id == targetSessionId) {
+                    clearBrushBaseline()
+                    editGeneration.incrementAndGet()
+                }
+                updateSession(targetSessionId) { state ->
                     val updatedList = state.document.candidates.mapIndexed { idx, existing ->
                         if (idx == slotIdx) replacement else existing
                     }
@@ -734,11 +1013,13 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                         statusNotice = "Regenerated v${slotIdx + 1} (${replacement.postureLabel})."
                     )
                 }
-                refreshGraphMatches()
+                if (_uiState.value.document.id == targetSessionId) {
+                    refreshGraphMatches()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                handleApiFailure("Slot regeneration failed", e)
+                handleSessionApiFailure(targetSessionId, "Slot regeneration failed", e)
             }
         }
     }
@@ -753,10 +1034,10 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
 
         val existingTexts = doc.candidates.map { it.plainText() }.filter { it.isNotBlank() }
         val selectedAngles = collectSelectedAngleSpecs(doc)
+        val targetSessionId = doc.id
 
-        activePassJob?.cancel()
-        activePassJob = viewModelScope.launch {
-            _uiState.update {
+        activePassJob = launchSessionJob(targetSessionId, "pass") {
+            updateSession(targetSessionId) {
                 it.copy(
                     isBusy = true,
                     busyLabel = "Regenerating all 3 drafts...",
@@ -781,9 +1062,11 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 if (candidates.isEmpty()) {
                     throw IOException("Mac rig returned zero regenerated candidates.")
                 }
-                clearBrushBaseline()
-                editGeneration.incrementAndGet()
-                _uiState.update { state ->
+                if (_uiState.value.document.id == targetSessionId) {
+                    clearBrushBaseline()
+                    editGeneration.incrementAndGet()
+                }
+                updateSession(targetSessionId) { state ->
                     state.copy(
                         document = state.document.copy(
                             candidates = candidates,
@@ -794,11 +1077,13 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                         busyLabel = null
                     )
                 }
-                refreshGraphMatches()
+                if (_uiState.value.document.id == targetSessionId) {
+                    refreshGraphMatches()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                handleApiFailure("Regenerate all failed", e)
+                handleSessionApiFailure(targetSessionId, "Regenerate all failed", e)
             }
         }
     }
@@ -876,10 +1161,10 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
 
         val baselineSnapshot = activeCandidate
         val requestGen = editGeneration.get()
+        val targetSessionId = state.document.id
 
-        activePassJob?.cancel()
-        activePassJob = viewModelScope.launch {
-            _uiState.update {
+        activePassJob = launchSessionJob(targetSessionId, "pass") {
+            updateSession(targetSessionId) {
                 it.copy(isBusy = true, busyLabel = "Swapping phrase...", errorMessage = null)
             }
             try {
@@ -891,13 +1176,10 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                 if (alternatives.isEmpty()) {
                     throw IOException("Server returned no brush-swap alternatives.")
                 }
-                if (editGeneration.get() != requestGen) {
-                    _uiState.update { it.copy(isBusy = false, busyLabel = null) }
-                    return@launch
+                if (_uiState.value.document.id == targetSessionId && editGeneration.get() != requestGen) {
+                    updateSession(targetSessionId) { it.copy(isBusy = false, busyLabel = null) }
+                    return@launchSessionJob
                 }
-
-                brushBaselineDraft = baselineSnapshot
-                brushBaselineRange = charRange
 
                 val firstAlt = alternatives[0]
                 val swapped = DraftStateReducer.applyBrushSwap(
@@ -912,10 +1194,14 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     updated = swapped,
                     replacement = firstAlt
                 )
-                lastAppliedBrushRange = appliedRange
-                editGeneration.incrementAndGet()
+                if (_uiState.value.document.id == targetSessionId) {
+                    brushBaselineDraft = baselineSnapshot
+                    brushBaselineRange = charRange
+                    lastAppliedBrushRange = appliedRange
+                    editGeneration.incrementAndGet()
+                }
 
-                _uiState.update { cur ->
+                updateSession(targetSessionId) { cur ->
                     val idx = cur.document.activeCandidateIndex
                     val newCandidates = cur.document.candidates.mapIndexed { i, c ->
                         if (i == idx) swapped else c
@@ -931,12 +1217,14 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                         busyLabel = null
                     )
                 }
-                scheduleFlashClear(appliedRange)
-                refreshGraphMatches()
+                if (_uiState.value.document.id == targetSessionId) {
+                    scheduleFlashClear(appliedRange)
+                    refreshGraphMatches()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                handleApiFailure("Brush swap failed", e)
+                handleSessionApiFailure(targetSessionId, "Brush swap failed", e)
             }
         }
     }
@@ -1183,10 +1471,10 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
 
         dismissBrushStrip()
         val requestGen = editGeneration.get()
+        val targetSessionId = state.document.id
 
-        activePassJob?.cancel()
-        activePassJob = viewModelScope.launch {
-            _uiState.update {
+        activePassJob = launchSessionJob(targetSessionId, "pass") {
+            updateSession(targetSessionId) {
                 it.copy(
                     densityDeltaPercent = clamped,
                     isBusy = true,
@@ -1200,9 +1488,9 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     deltaPercent = clamped,
                     steeringConstraints = state.document.steeringConstraints
                 )
-                if (editGeneration.get() != requestGen) {
-                    _uiState.update { it.copy(densityDeltaPercent = 0, isBusy = false, busyLabel = null) }
-                    return@launch
+                if (_uiState.value.document.id == targetSessionId && editGeneration.get() != requestGen) {
+                    updateSession(targetSessionId) { it.copy(densityDeltaPercent = 0, isBusy = false, busyLabel = null) }
+                    return@launchSessionJob
                 }
 
                 val parity = DraftStateReducer.verifyLockParity(
@@ -1211,7 +1499,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     source = EditSource.DENSITY_SCRUB
                 )
                 if (!parity.preserved) {
-                    _uiState.update {
+                    updateSession(targetSessionId) {
                         it.copy(
                             densityDeltaPercent = 0,
                             lastSeedRigOnline = true,
@@ -1220,7 +1508,7 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                             errorMessage = "Density change rejected: locked words (${parity.missingPhrases.joinToString()}) were altered."
                         )
                     }
-                    return@launch
+                    return@launchSessionJob
                 }
 
                 val updated = DraftStateReducer.applyVerifiedMutation(
@@ -1228,21 +1516,27 @@ class DraftDeckViewModel(application: Application) : AndroidViewModel(applicatio
                     mutatedText = response.text,
                     source = EditSource.DENSITY_SCRUB
                 )
-                replaceActiveCandidate(updated, dismissBrush = true)
-                _uiState.update {
-                    it.copy(
+                updateSession(targetSessionId) { cur ->
+                    val idx = cur.document.activeCandidateIndex
+                    val newCandidates = cur.document.candidates.mapIndexed { i, c ->
+                        if (i == idx) updated else c
+                    }
+                    cur.copy(
+                        document = cur.document.copy(candidates = newCandidates),
                         densityDeltaPercent = 0,
                         lastSeedRigOnline = true,
                         isBusy = false,
                         busyLabel = null
                     )
                 }
-                refreshGraphMatches()
+                if (_uiState.value.document.id == targetSessionId) {
+                    editGeneration.incrementAndGet()
+                    refreshGraphMatches()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _uiState.update { it.copy(densityDeltaPercent = 0) }
-                handleApiFailure("Density scrub failed", e)
+                handleSessionApiFailure(targetSessionId, "Density scrub failed", e)
             }
         }
     }

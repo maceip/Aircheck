@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
@@ -36,6 +37,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -155,6 +159,7 @@ fun CutSurgeryEyeZone(
     onGlobalScrubUndo: (Int) -> Unit,
     onCommitRawKeyboardEdit: (String) -> Unit,
     onExitRawKeyboardMode: () -> Unit,
+    onAiRewriteRaw: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val accent = LocalAircheckTokens.current.channelAccent
@@ -196,6 +201,8 @@ fun CutSurgeryEyeZone(
             if (rawKeyboardMode) {
                 CutRawKeyboardEditor(
                     initialPlainText = candidate.plainText(),
+                    isBusy = isBusy,
+                    onAiRewrite = onAiRewriteRaw,
                     onCommitRawKeyboardEdit = onCommitRawKeyboardEdit,
                     onExitRawKeyboardMode = onExitRawKeyboardMode
                 )
@@ -290,6 +297,8 @@ fun CutSurgeryEyeZone(
 @Composable
 private fun CutRawKeyboardEditor(
     initialPlainText: String,
+    isBusy: Boolean,
+    onAiRewrite: () -> Unit,
     onCommitRawKeyboardEdit: (String) -> Unit,
     onExitRawKeyboardMode: () -> Unit
 ) {
@@ -340,6 +349,30 @@ private fun CutRawKeyboardEditor(
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isBusy) AcidVoltLime else Color(0xFF243300))
+                    .border(1.dp, AcidVoltLime, RoundedCornerShape(8.dp))
+                    .clickable(enabled = !isBusy, role = Role.Button) {
+                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        onCommitRawKeyboardEdit(textFieldState.text.toString())
+                        onAiRewrite()
+                    }
+                    .padding(horizontal = 12.dp, vertical = 9.dp)
+                    .testTag("cut_raw_ai_rewrite_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.AutoAwesome,
+                    contentDescription = "AI rewrite draft",
+                    tint = if (isBusy) OledVoid else AcidVoltLime,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))

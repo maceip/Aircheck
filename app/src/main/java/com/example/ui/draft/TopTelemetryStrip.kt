@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Settings
@@ -47,6 +48,7 @@ import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.OledVoid
 import com.example.ui.theme.OnAirCrimson
 import com.example.ui.theme.StudioCrisp
+import com.example.ui.theme.TelemetryCyan
 import com.example.ui.theme.TelemetryMuted
 
 private val TelemetryStripTextStyle = TextStyle(
@@ -73,9 +75,13 @@ fun TopTelemetryStrip(
     charCount: Int,
     isSplitActive: Boolean = false,
     isRigOnline: Boolean = false,
+    sessionCount: Int = 1,
+    activeSessionIndex: Int = 0,
+    hasBackgroundThinking: Boolean = false,
     onSelectStage: (Stage) -> Unit,
     onSelectCandidateSlot: (Int) -> Unit,
     onSplitOverflow: () -> Unit,
+    onToggleSessionSwitcher: () -> Unit = {},
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -218,11 +224,47 @@ fun TopTelemetryStrip(
 
         Spacer(modifier = Modifier.width(6.dp))
 
-        // Right: Live character counter + overflow Split 1/2 pill + Settings gear
+        // Right: Session pill (when multi-draft active) + Live character counter + overflow Split 1/2 + Settings gear
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            if (sessionCount > 1) {
+                Row(
+                    modifier = Modifier
+                        .testTag("session_switcher_pill")
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (hasBackgroundThinking) AcidVoltLimeDim else ConsoleElevated)
+                        .border(
+                            1.dp,
+                            if (hasBackgroundThinking) TelemetryCyan else GraphiteHairline,
+                            RoundedCornerShape(4.dp)
+                        )
+                        .clickable(role = Role.Button) {
+                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            onToggleSessionSwitcher()
+                        }
+                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    if (hasBackgroundThinking) {
+                        Box(
+                            modifier = Modifier
+                                .size(5.dp)
+                                .clip(CircleShape)
+                                .background(TelemetryCyan)
+                        )
+                    }
+                    Text(
+                        text = "${activeSessionIndex + 1}/$sessionCount",
+                        style = TelemetryStripTextStyle.copy(fontWeight = FontWeight.Bold),
+                        color = if (hasBackgroundThinking) TelemetryCyan else StudioCrisp,
+                        maxLines = 1
+                    )
+                }
+            }
+
             Text(
                 text = counterLabel,
                 style = TelemetryStripTextStyle.copy(

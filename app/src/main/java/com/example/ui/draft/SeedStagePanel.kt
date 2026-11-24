@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,12 +33,14 @@ import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -132,11 +135,20 @@ fun SeedEyeZone(
     onToggleRawKeyboardMode: () -> Unit,
     onRemoveSteeringConstraint: (Int) -> Unit,
     onRefreshAngles: () -> Unit,
+    onAiRewriteSeed: () -> Unit = {},
+    onPullDownNewDraft: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val view = LocalView.current
+    val density = LocalDensity.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
+    val scrollState = rememberScrollState()
+    val pullThresholdPx = with(density) { 68.dp.toPx() }
+    var pullDownPx by remember { mutableFloatStateOf(0f) }
+    var pullArmedHapticFired by remember { mutableStateOf(false) }
+    val currentOnPullDownNewDraft by rememberUpdatedState(onPullDownNewDraft)
+    val currentCanPullNew by rememberUpdatedState(!rawKeyboardMode && !isRecordingSeed && !isRecordingSteer)
 
     LaunchedEffect(rawKeyboardMode) {
         if (rawKeyboardMode) {
@@ -151,9 +163,70 @@ fun SeedEyeZone(
         modifier = modifier
             .fillMaxSize()
             .background(OledVoid)
+            .pointerInput(rawKeyboardMode, isRecordingSeed, isRecordingSteer) {
+                if (!currentCanPullNew) return@pointerInput
+                detectVerticalDragGestures(
+                    onDragStart = {
+                        pullDownPx = 0f
+                        pullArmedHapticFired = false
+                    },
+                    onVerticalDrag = { _, dragAmount ->
+                        if (scrollState.value == 0 && (dragAmount > 0f || pullDownPx > 0f)) {
+                            val next = (pullDownPx + dragAmount).coerceIn(0f, pullThresholdPx * 1.45f)
+                            if (next >= pullThresholdPx && !pullArmedHapticFired) {
+                                pullArmedHapticFired = true
+                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            } else if (next < pullThresholdPx) {
+                                pullArmedHapticFired = false
+                            }
+                            pullDownPx = next
+                        }
+                    },
+                    onDragEnd = {
+                        val shouldSpawn = pullDownPx >= pullThresholdPx
+                        pullDownPx = 0f
+                        pullArmedHapticFired = false
+                        if (shouldSpawn) {
+                            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                            currentOnPullDownNewDraft()
+                        }
+                    },
+                    onDragCancel = {
+                        pullDownPx = 0f
+                        pullArmedHapticFired = false
+                    }
+                )
+            }
             .padding(horizontal = 16.dp, vertical = 12.dp)
+            .testTag("seed_eye_zone_root")
     ) {
-        // Quiet top strip: live recording/busy status on left, Raw Kbd toggle on right (max 2 labels)
+        if (pullDownPx > 8f) {
+            val armed = pullDownPx >= pullThresholdPx
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (armed) AcidVoltLimeDim else ConsoleElevated)
+                    .border(
+                        1.dp,
+                        if (armed) AcidVoltLime else GraphiteHairline,
+                        RoundedCornerShape(6.dp)
+                    )
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .testTag("seed_pull_new_indicator"),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (armed) "Release for new draft (prior card stays live)" else "↓ Pull down for new draft",
+                    style = SeedMonoLabelStyle,
+                    color = if (armed) AcidVoltLime else TelemetryMuted,
+                    maxLines = 1
+                )
+            }
+        }
+
+        // Quiet top strip: live status on left, ✨ AI rewrite + Done/Angles on right (max 2 labels)
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -209,6 +282,43 @@ fun SeedEyeZone(
                                 onRefreshAngles()
                             }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+
+                // Inline ✨ AI rewrite / clean button directly on the Seed text field
+                val canRewrite = seedTranscript.isNotBlank() && !isRecordingSeed && !isRecordingSteer
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .testTag("seed_ai_rewrite_button")
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(
+                            when {
+                                isBusy -> AcidVoltLime
+                                canRewrite -> AcidVoltLimeDim
+                                else -> ConsoleElevated
+                            }
+                        )
+                        .border(
+                            1.dp,
+                            if (canRewrite || isBusy) AcidVoltLime else GraphiteHairline,
+                            RoundedCornerShape(6.dp)
+                        )
+                        .clickable(enabled = canRewrite && !isBusy, role = Role.Button) {
+                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            onAiRewriteSeed()
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.AutoAwesome,
+                        contentDescription = "AI rewrite seed",
+                        tint = when {
+                            isBusy -> PureBlackInk
+                            canRewrite -> AcidVoltLime
+                            else -> TelemetryMuted.copy(alpha = 0.5f)
+                        },
+                        modifier = Modifier.size(16.dp)
                     )
                 }
 
@@ -286,7 +396,7 @@ fun SeedEyeZone(
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
+                        .verticalScroll(scrollState)
                 ) {
                     if (seedTranscript.isBlank()) {
                         Text(

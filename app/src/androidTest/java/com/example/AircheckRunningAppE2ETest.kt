@@ -95,7 +95,8 @@ class AircheckRunningAppE2ETest {
         composeRule.onNodeWithTag("raw_kbd_toggle_button").assertIsDisplayed()
         assertNoErrorBanner("cold boot")
 
-        // Enter a real drafting seed via explicit [Raw Kbd] escape hatch -> triggers real /v1/draft/angles.
+        // Enter Draft #1 seed via [Raw Kbd] -> tap inline ✨ AI rewrite -> verify stretched Siri
+        // thinking hairline + async background execution!
         composeRule.onNodeWithTag("raw_kbd_toggle_button").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             composeRule.onAllNodesWithTag("seed_raw_input").fetchSemanticsNodes().isNotEmpty()
@@ -107,23 +108,50 @@ class AircheckRunningAppE2ETest {
         Espresso.closeSoftKeyboard()
         composeRule.onNodeWithTag("raw_kbd_toggle_button").performClick()
 
-        // Wait for real /v1/draft/angles Row A & Row B chips to populate from Mac :8443.
+        // Tap inline ✨ AI rewrite button on Seed and capture live stretched Siri hairline mid-thinking!
+        composeRule.onNodeWithTag("seed_ai_rewrite_button").performClick()
+        Thread.sleep(350L)
+        captureScreenshot(screenshotDir, "tactile_01a_siri_thinking.png")
+
+        // Wait for real /v1/draft/rewrite + /v1/draft/angles Row A & Row B chips to populate from Mac :8443.
         composeRule.waitUntil(timeoutMillis = 45_000L) {
-            assertNoErrorBanner("stage 1 angles extraction")
+            assertNoErrorBanner("stage 1 rewrite and angles extraction")
             composeRule.onAllNodesWithTag("seed_extracted_angles_row").fetchSemanticsNodes().isNotEmpty() &&
                 composeRule.onAllNodesWithTag("seed_blindspot_angles_row").fetchSemanticsNodes().isNotEmpty()
         }
-        Thread.sleep(500L)
+        Thread.sleep(400L)
         captureScreenshot(screenshotDir, "tactile_01_seed.png")
 
-        // 2. Stage 2 (02 PICK): Tap [ Synthesize 3 -> ] -> real /v1/draft/synthesize returns 3 postures.
+        // Fire async Synthesize 3 on Draft #1 -> IMMEDIATELY pull-down (pull-to-refresh motion)
+        // to spin up Draft #2 WITHOUT waiting or cancelling Draft #1!
         composeRule.onNodeWithTag("seed_synthesize_button").performClick()
+        Thread.sleep(200L)
+        composeRule.onNodeWithTag("seed_eye_zone_root").performTouchInput {
+            swipe(
+                start = Offset(centerX, top + 60f),
+                end = Offset(centerX, top + 460f),
+                durationMillis = 320L
+            )
+        }
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodesWithTag("session_switcher_pill").fetchSemanticsNodes().isNotEmpty()
+        }
+        // Prove Draft #2 is a fresh empty card while Draft #1 runs asynchronously in background!
+        composeRule.onNodeWithTag("session_switcher_pill").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodesWithTag("session_switcher_sheet").fetchSemanticsNodes().isNotEmpty()
+        }
+        Thread.sleep(250L)
+        captureScreenshot(screenshotDir, "tactile_01b_async_sessions.png")
+
+        // Switch freely back to Draft #1 -> verify Draft #1 finished synthesizing into 02 PICK!
+        composeRule.onNodeWithTag("session_card_0").performClick()
         composeRule.waitUntil(timeoutMillis = 45_000L) {
-            assertNoErrorBanner("stage 2 synthesize 3")
+            assertNoErrorBanner("stage 2 async synthesize 3 on draft 1")
             composeRule.onAllNodesWithTag("pick_candidate_pager").fetchSemanticsNodes().isNotEmpty() &&
                 composeRule.onAllNodesWithTag("slot_toggle_2").fetchSemanticsNodes().isNotEmpty()
         }
-        Thread.sleep(500L)
+        Thread.sleep(400L)
         captureScreenshot(screenshotDir, "tactile_02_pick.png")
 
         // Commit active candidate to Stage 3 (03 CUT).

@@ -352,7 +352,7 @@ private fun PickCandidateCard(
         val footerCue = when {
             rawDragY <= -triggerThresholdPx -> "Release to promote to 03 CUT"
             rawDragY >= triggerThresholdPx -> "Release to discard & regen v${slotIndex + 1}"
-            else -> "Tap clause to salvage · Swipe up cut · Swipe down regen"
+            else -> "Tap salvage · ↑ Cut · ↓ Regen"
         }
         val footerColor = when {
             rawDragY <= -triggerThresholdPx -> AcidVoltLime

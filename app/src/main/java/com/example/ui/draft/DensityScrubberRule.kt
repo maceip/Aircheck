@@ -32,7 +32,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -76,7 +79,8 @@ fun DensityScrubberRule(
     isApplying: Boolean,
     onDeltaPreview: (Int) -> Unit,
     onDeltaCommit: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isThinking: Boolean = false
 ) {
     val view = LocalView.current
     val density = LocalDensity.current
@@ -97,20 +101,35 @@ fun DensityScrubberRule(
     val displayedDelta = if (isDragging) dragPreviewDelta else snapDensityDelta(currentDeltaPercent)
     val formattedDelta = formatDensityDelta(displayedDelta)
 
-    val applyingPulse = if (isApplying) {
-        val transition = rememberInfiniteTransition(label = "density_applying_pulse")
-        transition.animateFloat(
-            initialValue = 0.45f,
-            targetValue = 1.0f,
+    val siriThinkingActive = isThinking || isApplying
+    val siriFlowPhase: Float
+    val siriGlowBreath: Float
+    if (siriThinkingActive) {
+        val siriTransition = rememberInfiniteTransition(label = "siri_hairline_thinking")
+        siriFlowPhase = siriTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 480, easing = LinearEasing),
+                animation = tween(durationMillis = 1600, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "siri_flow_phase"
+        ).value
+        siriGlowBreath = siriTransition.animateFloat(
+            initialValue = 0.65f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 820, easing = LinearEasing),
                 repeatMode = RepeatMode.Reverse
             ),
-            label = "density_pulse_alpha"
+            label = "siri_glow_breath"
         ).value
     } else {
-        1f
+        siriFlowPhase = 0f
+        siriGlowBreath = 0f
     }
+
+    val applyingPulse = if (isApplying) siriGlowBreath else 1f
 
     val minStepPx = with(density) { 22.dp.toPx() }
     val dragModifier = if (active) {
@@ -167,17 +186,15 @@ fun DensityScrubberRule(
             .onSizeChanged { widthPx = it.width }
             .then(dragModifier)
             .semantics {
-                contentDescription = if (active) {
-                    "Density scrubber rule"
-                } else {
-                    "Stage divider"
+                contentDescription = when {
+                    siriThinkingActive -> "AI thinking hairline glow"
+                    active -> "Density scrubber rule"
+                    else -> "Stage divider"
                 }
-                if (active) {
-                    stateDescription = if (isApplying) {
-                        "Applying $formattedDelta"
-                    } else {
-                        formattedDelta
-                    }
+                if (siriThinkingActive) {
+                    stateDescription = "Thinking"
+                } else if (active) {
+                    stateDescription = formattedDelta
                 }
             }
             .testTag("divider_density_scrubber"),
@@ -187,13 +204,96 @@ fun DensityScrubberRule(
             val centerY = size.height / 2f
             val hairlinePx = 1.dp.toPx()
 
-            // Base 1dp horizontal hairline centered vertically inside the 24dp touch target
-            drawLine(
-                color = GraphiteHairline,
-                start = Offset(0f, centerY),
-                end = Offset(size.width, centerY),
-                strokeWidth = hairlinePx
-            )
+            if (siriThinkingActive) {
+                // Stretched new-Siri iridescent liquid plasma hairline glow while AI is thinking
+                val w = size.width.coerceAtLeast(1f)
+                val shift = siriFlowPhase * w
+                val siriColors = listOf(
+                    Color(0xFF18D4F5), // Luminous Cyan
+                    Color(0xFF7B61FF), // Electric Violet
+                    Color(0xFFFF3B9A), // Siri Magenta
+                    Color(0xFFFF8A00), // Warm Coral
+                    Color(0xFFB8FF00), // Aircheck Volt Lime
+                    Color(0xFF18D4F5)  // Seamless Loop Cyan
+                )
+                val flowBrush = Brush.linearGradient(
+                    colors = siriColors,
+                    start = Offset(shift - w, centerY),
+                    end = Offset(shift + w, centerY),
+                    tileMode = TileMode.Repeated
+                )
+                val softHaloBrush = Brush.linearGradient(
+                    colors = siriColors.map { it.copy(alpha = 0.24f * siriGlowBreath) },
+                    start = Offset(shift - w, centerY),
+                    end = Offset(shift + w, centerY),
+                    tileMode = TileMode.Repeated
+                )
+                val midBloomBrush = Brush.linearGradient(
+                    colors = siriColors.map { it.copy(alpha = 0.52f * siriGlowBreath) },
+                    start = Offset(shift - w, centerY),
+                    end = Offset(shift + w, centerY),
+                    tileMode = TileMode.Repeated
+                )
+                // Feathered ambient light bleed above and below the stretched hairline
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0.0f to Color.Transparent,
+                        0.32f to Color(0xFF7B61FF).copy(alpha = 0.14f * siriGlowBreath),
+                        0.50f to Color(0xFFFF3B9A).copy(alpha = 0.22f * siriGlowBreath),
+                        0.68f to Color(0xFF18D4F5).copy(alpha = 0.14f * siriGlowBreath),
+                        1.0f to Color.Transparent
+                    ),
+                    topLeft = Offset(0f, 0f),
+                    size = Size(w, size.height)
+                )
+                // Soft outer ribbon (9dp)
+                drawLine(
+                    brush = softHaloBrush,
+                    start = Offset(0f, centerY),
+                    end = Offset(w, centerY),
+                    strokeWidth = 9.dp.toPx(),
+                    cap = StrokeCap.Butt
+                )
+                // Mid chromatic bloom (4.5dp)
+                drawLine(
+                    brush = midBloomBrush,
+                    start = Offset(0f, centerY),
+                    end = Offset(w, centerY),
+                    strokeWidth = 4.5.dp.toPx(),
+                    cap = StrokeCap.Butt
+                )
+                // Crisp iridescent plasma core (2.2dp)
+                drawLine(
+                    brush = flowBrush,
+                    start = Offset(0f, centerY),
+                    end = Offset(w, centerY),
+                    strokeWidth = 2.2.dp.toPx(),
+                    cap = StrokeCap.Butt
+                )
+                // Razor-thin specular white-hot filament (0.8dp)
+                val filamentX = (siriFlowPhase * 1.4f - 0.2f) * w
+                drawLine(
+                    brush = Brush.horizontalGradient(
+                        0.0f to Color.Transparent,
+                        0.5f to Color.White.copy(alpha = 0.85f * siriGlowBreath),
+                        1.0f to Color.Transparent,
+                        startX = filamentX - w * 0.22f,
+                        endX = filamentX + w * 0.22f
+                    ),
+                    start = Offset(0f, centerY),
+                    end = Offset(w, centerY),
+                    strokeWidth = 0.9.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
+            } else {
+                // Base 1dp horizontal hairline centered vertically inside the 24dp touch target
+                drawLine(
+                    color = GraphiteHairline,
+                    start = Offset(0f, centerY),
+                    end = Offset(size.width, centerY),
+                    strokeWidth = hairlinePx
+                )
+            }
 
             if (!active) return@Canvas
 

@@ -119,6 +119,19 @@ data class DensityResponse(
     @SerialName("lock_parity_preserved") val lockParityPreserved: Boolean = true
 )
 
+@Serializable
+data class RewriteRequest(
+    val text: String,
+    val mode: String = "seed_clean",
+    @SerialName("steering_constraints") val steeringConstraints: List<String> = emptyList()
+)
+
+@Serializable
+data class RewriteResponse(
+    val text: String,
+    @SerialName("lock_parity_preserved") val lockParityPreserved: Boolean = true
+)
+
 /**
  * Real OkHttp + `kotlinx.serialization.json` client for the Mac `:8443` drafting micro-pass
  * endpoints (`POST /v1/draft/transcribe`, `angles`, `synthesize`, `brush-swap`, `seam-heal`,
@@ -333,6 +346,28 @@ class DraftApiClient(
                 )
             ),
             parse = { body -> json.decodeFromString<DensityResponse>(body) }
+        )
+    }
+
+    /** 7. `POST /v1/draft/rewrite` — inline ✨ AI rewrite/clean/polish. */
+    suspend fun rewrite(
+        text: String,
+        mode: String = "seed_clean",
+        steeringConstraints: List<String> = emptyList()
+    ): RewriteResponse {
+        if (text.isBlank()) {
+            throw IOException("text must not be blank.")
+        }
+        return postJson(
+            path = "/v1/draft/rewrite",
+            requestBody = json.encodeToString(
+                RewriteRequest(
+                    text = text,
+                    mode = mode,
+                    steeringConstraints = steeringConstraints
+                )
+            ),
+            parse = { body -> json.decodeFromString<RewriteResponse>(body) }
         )
     }
 
