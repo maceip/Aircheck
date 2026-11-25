@@ -96,11 +96,13 @@ fun ClipReviewScreen(
     val playbackUri: Uri? = remember(clip?.finalSha, clip?.remoteFinalUrl, clip?.lipsyncSha, clip?.remoteLipsyncUrl) {
         val localFinal = casStore.fileForSha(clip?.finalSha, "mp4")
         val localLipsync = casStore.fileForSha(clip?.lipsyncSha, "mp4")
+        val remoteFinalUrl = clip?.remoteFinalUrl
+        val remoteLipsyncUrl = clip?.remoteLipsyncUrl
         when {
             localFinal != null -> Uri.fromFile(localFinal)
-            !clip?.remoteFinalUrl.isNullOrBlank() -> Uri.parse(clip!!.remoteFinalUrl)
+            !remoteFinalUrl.isNullOrBlank() -> Uri.parse(remoteFinalUrl)
             localLipsync != null -> Uri.fromFile(localLipsync)
-            !clip?.remoteLipsyncUrl.isNullOrBlank() -> Uri.parse(clip!!.remoteLipsyncUrl)
+            !remoteLipsyncUrl.isNullOrBlank() -> Uri.parse(remoteLipsyncUrl)
             else -> null
         }
     }
@@ -187,10 +189,11 @@ fun ClipReviewScreen(
                 }
             }
 
+            val clipError = clip?.errorMessage
             if (!errorMessage.isNullOrBlank()) {
                 StudioErrorBanner(message = errorMessage, onDismiss = onDismissError)
-            } else if (!clip?.errorMessage.isNullOrBlank()) {
-                StudioErrorBanner(message = clip!!.errorMessage!!, onDismiss = onDismissError)
+            } else if (!clipError.isNullOrBlank()) {
+                StudioErrorBanner(message = clipError, onDismiss = onDismissError)
             }
 
             // Full-height unobstructed OLED Video Stage bound to singleton AircheckPlayerController
