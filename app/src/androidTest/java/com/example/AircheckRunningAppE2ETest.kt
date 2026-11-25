@@ -94,6 +94,9 @@ class AircheckRunningAppE2ETest {
             app.container.localRepo.listSavedNewsroomOverlays().forEach {
                 app.container.localRepo.deleteNewsroomOverlay(it.id)
             }
+            app.container.localRepo.newsroomLooksOnce().forEach {
+                app.container.localRepo.deleteNewsroomLook(it.id)
+            }
             app.container.localRepo.saveCorePipelineSession(CorePipelineSession())
         }
 

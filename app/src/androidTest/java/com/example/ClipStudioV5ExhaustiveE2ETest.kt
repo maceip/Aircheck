@@ -1,7 +1,6 @@
 package com.example
 
 import android.Manifest
-import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -35,8 +34,6 @@ import com.example.graph.GraphContactRecord
 import com.example.graph.GraphPostRecord
 import com.example.ui.StudioViewModel
 import com.example.ui.draft.DraftDeckViewModel
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -54,11 +51,13 @@ import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.net.InetSocketAddress
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.PI
 import kotlin.math.sin
@@ -90,7 +89,7 @@ class ClipStudioV5ExhaustiveE2ETest {
     private val app: AircheckApplication
         get() = composeRule.activity.application as AircheckApplication
 
-    private var httpServer: HttpServer? = null
+    private var httpServer: LoopbackTestServer? = null
     private val rigTasks = ConcurrentHashMap<String, String>()
     private val rigTaskSeq = AtomicInteger(0)
 
@@ -104,7 +103,7 @@ class ClipStudioV5ExhaustiveE2ETest {
     @After
     fun tearDown() {
         runCatching { studioVm.playerController.pause() }
-        httpServer?.stop(0)
+        httpServer?.stop()
         httpServer = null
         // Restore default live rig URL cleanly for subsequent manual/automated sessions
         runBlocking {
@@ -191,7 +190,7 @@ class ClipStudioV5ExhaustiveE2ETest {
                 respondBytes(ex, 200, "image/jpeg", previewJpeg)
             }
         }
-        val rigUrl = "http://127.0.0.1:${server.address.port}"
+        val rigUrl = "http://127.0.0.1:${server.port}"
 
         // Clear all clips in Room & all graph posts -> Continue card MUST be strictly absent (Law 2)
         app.container.localGraphDatabase.clearAll()
@@ -206,10 +205,15 @@ class ClipStudioV5ExhaustiveE2ETest {
             composeRule.onAllNodesWithTag("cs_spark_root").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.runOnUiThread {
+            studioVm.testMacRigConnection(rigUrl)
             draftVm.probeRigHealth()
             draftVm.resetNewDraft()
-            studioVm.refreshLastCompletedVideo()
         }
+        composeRule.waitUntil(timeoutMillis = 8_000L) {
+            studioVm.uiState.value.rigHealth.resolvedUrl == rigUrl
+        }
+        runBlocking { clearAllRoomClips() }
+        composeRule.runOnUiThread { studioVm.refreshLastCompletedVideo() }
         composeRule.waitUntil(timeoutMillis = 8_000L) {
             studioVm.uiState.value.lastCompletedVideo == null &&
                 composeRule.onAllNodesWithTag("cs_continue_card").fetchSemanticsNodes().isEmpty()
@@ -418,7 +422,7 @@ class ClipStudioV5ExhaustiveE2ETest {
                 respondBytes(ex, 200, "image/jpeg", previewJpeg)
             }
         }
-        val rigUrl = "http://127.0.0.1:${server.address.port}"
+        val rigUrl = "http://127.0.0.1:${server.port}"
 
         runBlocking {
             app.container.profileStore.setPhoneOnlyVoiceMode(false)
@@ -510,10 +514,13 @@ class ClipStudioV5ExhaustiveE2ETest {
     @Test
     fun cutSequentialPipelineStateMachine_voicesEditsRevoicesRendersPlaysAndExportsEndToEnd() {
         val screenshotDir = File(app.getExternalFilesDir(null) ?: app.filesDir, "e2e_v5_screenshots").apply { mkdirs() }
-        val realMp4File = File(app.cacheDir, "exhaustive_v5_valid.mp4")
-        buildRealH264Mp4File(realMp4File, durationFrames = 27, fps = 15)
-        val realMp4Bytes = realMp4File.readBytes()
-        assertTrue("Generated H.264 MP4 must be non-empty", realMp4Bytes.size > 512)
+        val headMp4File = File(app.cacheDir, "exhaustive_v5_head.mp4")
+        val finalMp4File = File(app.cacheDir, "exhaustive_v5_final.mp4")
+        buildRealH264Mp4File(headMp4File, durationFrames = 27, fps = 15, accentRgb = Triple(58, 120, 210))
+        buildRealH264Mp4File(finalMp4File, durationFrames = 30, fps = 15, accentRgb = Triple(215, 25, 33))
+        val headMp4Bytes = headMp4File.readBytes()
+        val finalMp4Bytes = finalMp4File.readBytes()
+        assertTrue("Generated H.264 MP4s must be non-empty", headMp4Bytes.size > 512 && finalMp4Bytes.size > 512)
 
         val ttsCalls = AtomicInteger(0)
         val renderCalls = AtomicInteger(0)
@@ -579,15 +586,17 @@ class ClipStudioV5ExhaustiveE2ETest {
             }
             srv.createContext("/v1/renders/") { ex ->
                 val path = ex.requestURI.path
-                if (path.endsWith(".wav")) {
-                    val freq = if (path.contains("_1.wav")) 360.0 else 480.0
-                    respondBytes(ex, 200, "audio/wav", buildRealPcmWavBytes(freqHz = freq, durationMs = 2_400))
-                } else {
-                    respondBytes(ex, 200, "video/mp4", realMp4Bytes)
+                when {
+                    path.endsWith(".wav") -> {
+                        val freq = if (path.contains("_1.wav")) 360.0 else 480.0
+                        respondBytes(ex, 200, "audio/wav", buildRealPcmWavBytes(freqHz = freq, durationMs = 2_400))
+                    }
+                    path.contains("v5_head_") -> respondBytes(ex, 200, "video/mp4", headMp4Bytes)
+                    else -> respondBytes(ex, 200, "video/mp4", finalMp4Bytes)
                 }
             }
         }
-        val rigUrl = "http://127.0.0.1:${server.address.port}"
+        val rigUrl = "http://127.0.0.1:${server.port}"
 
         runBlocking {
             app.container.profileStore.setPhoneOnlyVoiceMode(false)
@@ -644,7 +653,16 @@ class ClipStudioV5ExhaustiveE2ETest {
             composeRule.onAllNodesWithTag("cs_cut_root").fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Stage B: Edit clause 0 inline -> verify amber "1 LINE NEEDS RE-VOICE" badge + "edited · voice not synced" + amber primary key
+        // Stage B: Tap "render talking head" -> runs Stage 3 & advances to "render the video"
+        composeRule.onNodeWithTag("cs_cut_primary").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000L) {
+            renderCalls.get() == 1 &&
+                studioVm.uiState.value.corePipelineSession.hasTalkingHead &&
+                !studioVm.uiState.value.isCoreStageBusy
+        }
+        composeRule.onNodeWithText("render the video").assertIsDisplayed()
+
+        // Stage C: Edit clause 0 inline -> verify amber "1 LINE NEEDS RE-VOICE" badge + "edited · voice not synced" + amber primary key
         composeRule.onNodeWithTag("cs_clause_0").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             composeRule.onAllNodesWithTag("cs_clause_edit_btn_0").fetchSemanticsNodes().isNotEmpty()
@@ -665,23 +683,16 @@ class ClipStudioV5ExhaustiveE2ETest {
         composeRule.onNodeWithText("re-voice 1 edited line").assertIsDisplayed()
         captureScreenshot(screenshotDir, "16_cut_dirty_revoice_v5.png")
 
-        // Stage C: Tap amber "re-voice 1 edited line" -> clears unsynced state & advances back to "render talking head"
+        // Stage D: Tap amber "re-voice 1 edited line" -> resyncs TTS + talking head, clears badge, & advances to "render the video"
         composeRule.onNodeWithTag("cs_cut_primary").performClick()
-        composeRule.waitUntil(timeoutMillis = 12_000L) {
+        composeRule.waitUntil(timeoutMillis = 18_000L) {
             ttsCalls.get() == 2 &&
+                renderCalls.get() >= 2 &&
                 studioVm.uiState.value.corePipelineSession.unsyncedClauseIndices.isEmpty() &&
-                !studioVm.uiState.value.isCoreStageBusy
-        }
-        assertTrue(composeRule.onAllNodesWithTag("cs_cut_badge").fetchSemanticsNodes().isEmpty())
-        composeRule.onNodeWithText("render talking head").assertIsDisplayed()
-
-        // Stage D: Tap "render talking head" -> runs Stage 3 & advances to "render the video"
-        composeRule.onNodeWithTag("cs_cut_primary").performClick()
-        composeRule.waitUntil(timeoutMillis = 15_000L) {
-            renderCalls.get() == 1 &&
                 studioVm.uiState.value.corePipelineSession.hasTalkingHead &&
                 !studioVm.uiState.value.isCoreStageBusy
         }
+        assertTrue(composeRule.onAllNodesWithTag("cs_cut_badge").fetchSemanticsNodes().isEmpty())
         composeRule.onNodeWithText("render the video").assertIsDisplayed()
 
         // Stage E: Tap "render the video" -> runs Stage 4 B-roll + card chop & advances to "export & share"
@@ -712,21 +723,45 @@ class ClipStudioV5ExhaustiveE2ETest {
         val finalClipId = checkNotNull(studioVm.uiState.value.corePipelineSession.finalClipId)
         composeRule.onNodeWithTag("cs_cut_primary").performClick()
 
-        val deadline = System.currentTimeMillis() + 12_000L
-        while (System.currentTimeMillis() < deadline && studioVm.uiState.value.exportState != ExportState.EXPORTED) {
-            Thread.sleep(150L)
+        // Pump Compose frames via waitUntil so LaunchedEffect(pendingShareIntent) actually runs and launches ChooserActivity
+        composeRule.waitUntil(timeoutMillis = 12_000L) {
+            studioVm.uiState.value.exportState == ExportState.EXPORTED &&
+                studioVm.uiState.value.pendingShareIntent == null
         }
         assertEquals(ExportState.EXPORTED, studioVm.uiState.value.exportState)
 
-        // Dismiss system share chooser if opened over MainActivity so Compose assertions can inspect "share again"
-        Thread.sleep(500L)
-        val uiAuto = InstrumentationRegistry.getInstrumentation().uiAutomation
-        if (composeRule.onAllNodesWithTag("cs_cut_root").fetchSemanticsNodes().isEmpty()) {
-            uiAuto.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            Thread.sleep(400L)
+        // Wait briefly for Android 17 `ChooserActivityLauncher` (`com.android.intentresolver`) to steal
+        // window focus, then close it cleanly via shell `am force-stop com.android.intentresolver` so
+        // MainActivity's task & ActivityScenario teardown remain untouched.
+        val chooserWaitDeadline = System.currentTimeMillis() + 2_500L
+        while (System.currentTimeMillis() < chooserWaitDeadline && composeRule.activity.hasWindowFocus()) {
+            Thread.sleep(50L)
+        }
+        val closeShareChooser = {
+            val pfd = InstrumentationRegistry.getInstrumentation().uiAutomation
+                .executeShellCommand("am force-stop com.android.intentresolver")
+            android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd).use { it.readBytes() }
+        }
+        if (!composeRule.activity.hasWindowFocus()) {
+            closeShareChooser()
+            val resumeDeadline = System.currentTimeMillis() + 4_000L
+            while (
+                System.currentTimeMillis() < resumeDeadline &&
+                (!composeRule.activity.hasWindowFocus() ||
+                    !composeRule.activity.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED))
+            ) {
+                Thread.sleep(100L)
+            }
         }
         composeRule.waitUntil(timeoutMillis = 8_000L) {
-            composeRule.onAllNodesWithText("share again").fetchSemanticsNodes().isNotEmpty()
+            if (!composeRule.activity.hasWindowFocus()) {
+                closeShareChooser()
+                false
+            } else {
+                runCatching {
+                    composeRule.onAllNodesWithText("share again").fetchSemanticsNodes().isNotEmpty()
+                }.getOrDefault(false)
+            }
         }
         val exportedClip = runBlocking { app.container.localRepo.getClipById(finalClipId) }
         assertNotNull(exportedClip)
@@ -734,18 +769,128 @@ class ClipStudioV5ExhaustiveE2ETest {
             "Exported clip must persist MediaStore content:// URI in Room",
             exportedClip!!.exportedUri?.startsWith("content://") == true
         )
+        Thread.sleep(400L)
+        composeRule.waitForIdle()
     }
 
     private suspend fun clearAllRoomClips() {
         val dao = app.container.database.clipDao()
         dao.listReadyClips(500).forEach { dao.deleteById(it.id) }
         studioVm.uiState.value.clipCards.forEach { dao.deleteById(it.id) }
+        app.container.database.openHelper.writableDatabase.execSQL("DELETE FROM clips")
+        app.container.database.invalidationTracker.refreshVersionsAsync()
     }
 
-    private fun startLoopbackServer(configure: (Int, HttpServer) -> Unit): HttpServer {
-        val srv = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        srv.executor = Executors.newCachedThreadPool()
-        val port = srv.address.port
+    private class LoopbackExchange(
+        val requestURI: java.net.URI,
+        val requestBody: java.io.ByteArrayInputStream
+    ) {
+        var statusCode: Int = 200
+        var contentType: String = "application/json; charset=utf-8"
+        var responseBytes: ByteArray = ByteArray(0)
+    }
+
+    private class LoopbackTestServer {
+        private val socket = ServerSocket(0, 32, InetAddress.getByName("127.0.0.1"))
+        val port: Int = socket.localPort
+        private val running = AtomicBoolean(true)
+        private val pool = Executors.newCachedThreadPool()
+        private val routes = ConcurrentHashMap<String, (LoopbackExchange) -> Unit>()
+
+        fun createContext(prefix: String, handler: (LoopbackExchange) -> Unit) {
+            routes[prefix] = handler
+        }
+
+        fun start() {
+            pool.execute {
+                while (running.get()) {
+                    val client = runCatching { socket.accept() }.getOrNull() ?: break
+                    pool.execute { handleClient(client) }
+                }
+            }
+        }
+
+        private fun handleClient(client: java.net.Socket) {
+            client.use { conn ->
+                val rawIn = conn.getInputStream()
+                val headerLineBytes = ByteArrayOutputStream()
+                var state = 0
+                while (true) {
+                    val b = rawIn.read()
+                    if (b < 0) return
+                    headerLineBytes.write(b)
+                    state = when {
+                        state == 0 && b == '\r'.code -> 1
+                        state == 1 && b == '\n'.code -> 2
+                        state == 2 && b == '\r'.code -> 3
+                        state == 3 && b == '\n'.code -> 4
+                        b == '\r'.code -> 1
+                        else -> 0
+                    }
+                    if (state == 4) break
+                }
+                val headerLines = headerLineBytes.toString(Charsets.UTF_8.name()).split("\r\n")
+                val requestLine = headerLines.firstOrNull().orEmpty()
+                val rawTarget = requestLine.split(" ").getOrNull(1) ?: "/"
+                val contentLength = headerLines
+                    .firstOrNull { it.lowercase().startsWith("content-length:") }
+                    ?.substringAfter(':')
+                    ?.trim()
+                    ?.toIntOrNull() ?: 0
+
+                val bodyBytes = ByteArray(contentLength)
+                var readTotal = 0
+                while (readTotal < contentLength) {
+                    val n = rawIn.read(bodyBytes, readTotal, contentLength - readTotal)
+                    if (n <= 0) break
+                    readTotal += n
+                }
+
+                val uri = java.net.URI.create(rawTarget)
+                val path = uri.path ?: "/"
+                val matchedKey = routes.keys
+                    .filter { key ->
+                        if (key.endsWith("/")) path.startsWith(key) else (path == key || path.startsWith("$key/") || path.startsWith(key))
+                    }
+                    .maxByOrNull { it.length }
+
+                val ex = LoopbackExchange(uri, java.io.ByteArrayInputStream(bodyBytes, 0, readTotal))
+                if (matchedKey != null) {
+                    routes[matchedKey]?.invoke(ex)
+                } else {
+                    ex.statusCode = 404
+                    ex.responseBytes = """{"error":"not_found"}""".toByteArray(Charsets.UTF_8)
+                }
+
+                val reason = when (ex.statusCode) {
+                    200 -> "OK"
+                    202 -> "Accepted"
+                    404 -> "Not Found"
+                    else -> "Status"
+                }
+                val respHeader = (
+                    "HTTP/1.1 ${ex.statusCode} $reason\r\n" +
+                        "Content-Type: ${ex.contentType}\r\n" +
+                        "Content-Length: ${ex.responseBytes.size}\r\n" +
+                        "Connection: close\r\n\r\n"
+                    ).toByteArray(Charsets.UTF_8)
+                val out = conn.getOutputStream()
+                out.write(respHeader)
+                out.write(ex.responseBytes)
+                out.flush()
+            }
+        }
+
+        fun stop() {
+            running.set(false)
+            runCatching { socket.close() }
+            pool.shutdownNow()
+        }
+    }
+
+    private fun startLoopbackServer(configure: (Int, LoopbackTestServer) -> Unit): LoopbackTestServer {
+        val srv = LoopbackTestServer()
+        val port = srv.port
         srv.createContext("/health") { ex ->
             respondJson(ex, 200, """{"status":"ok","lora_version":5,"render_bridge":true}""")
         }
@@ -767,7 +912,7 @@ class ClipStudioV5ExhaustiveE2ETest {
         return srv
     }
 
-    private fun respondMaybeAsync(ex: HttpExchange, payloadBytes: ByteArray) {
+    private fun respondMaybeAsync(ex: LoopbackExchange, payloadBytes: ByteArray) {
         if (ex.requestURI.query?.contains("async=1") == true) {
             val id = "task_${rigTaskSeq.incrementAndGet()}"
             rigTasks[id] = payloadBytes.toString(Charsets.UTF_8)
@@ -777,14 +922,14 @@ class ClipStudioV5ExhaustiveE2ETest {
         }
     }
 
-    private fun respondJson(ex: HttpExchange, statusCode: Int, json: String) {
+    private fun respondJson(ex: LoopbackExchange, statusCode: Int, json: String) {
         respondBytes(ex, statusCode, "application/json; charset=utf-8", json.toByteArray(Charsets.UTF_8))
     }
 
-    private fun respondBytes(ex: HttpExchange, statusCode: Int, contentType: String, bytes: ByteArray) {
-        ex.responseHeaders.add("Content-Type", contentType)
-        ex.sendResponseHeaders(statusCode, bytes.size.toLong())
-        ex.responseBody.use { it.write(bytes) }
+    private fun respondBytes(ex: LoopbackExchange, statusCode: Int, contentType: String, bytes: ByteArray) {
+        ex.statusCode = statusCode
+        ex.contentType = contentType
+        ex.responseBytes = bytes
     }
 
     private fun buildRealPreviewJpegBytes(): ByteArray {
@@ -830,17 +975,23 @@ class ClipStudioV5ExhaustiveE2ETest {
         return out.toByteArray()
     }
 
-    private fun buildRealH264Mp4File(outFile: File, durationFrames: Int = 27, fps: Int = 15) {
+    private fun buildRealH264Mp4File(
+        outFile: File,
+        durationFrames: Int = 27,
+        fps: Int = 15,
+        accentRgb: Triple<Int, Int, Int> = Triple(215, 25, 33)
+    ) {
         if (outFile.exists()) outFile.delete()
-        val width = 320
-        val height = 576
+        val width = 640
+        val height = 480
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, 400_000)
+            setInteger(MediaFormat.KEY_BIT_RATE, 500_000)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         }
-        val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        val encoder = runCatching { MediaCodec.createByCodecName("c2.android.avc.encoder") }
+            .getOrElse { MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC) }
         encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val inputSurface = encoder.createInputSurface()
         val muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -881,8 +1032,8 @@ class ClipStudioV5ExhaustiveE2ETest {
             for (frame in 0 until durationFrames) {
                 val canvas = inputSurface.lockCanvas(null)
                 canvas.drawColor(Color.rgb(20, 24, 34))
-                paint.color = Color.rgb(215, 25, 33)
-                canvas.drawCircle(160f, 180f + (frame * 6f), 42f, paint)
+                paint.color = Color.rgb(accentRgb.first, accentRgb.second, accentRgb.third)
+                canvas.drawCircle(320f, 180f + (frame * 5f), 48f, paint)
                 inputSurface.unlockCanvasAndPost(canvas)
                 drain(endOfStream = false)
                 Thread.sleep((1000L / fps).coerceAtLeast(15L))

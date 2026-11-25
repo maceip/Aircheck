@@ -14,7 +14,9 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -76,7 +78,23 @@ class AircheckPlayerController(
     fun acquirePlayer(): ExoPlayer {
         val existing = backingPlayer
         if (existing != null) return existing
-        return ExoPlayer.Builder(appContext)
+        val codecSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+            val codecs = MediaCodecSelector.DEFAULT.getDecoderInfos(
+                mimeType,
+                requiresSecureDecoder,
+                requiresTunnelingDecoder
+            )
+            val nonGoldfish = codecs.filterNot { it.name.startsWith("c2.goldfish.", ignoreCase = true) }
+            if (nonGoldfish.isNotEmpty()) {
+                nonGoldfish + codecs.filter { it.name.startsWith("c2.goldfish.", ignoreCase = true) }
+            } else {
+                codecs
+            }
+        }
+        val renderersFactory = DefaultRenderersFactory(appContext)
+            .setEnableDecoderFallback(true)
+            .setMediaCodecSelector(codecSelector)
+        return ExoPlayer.Builder(appContext, renderersFactory)
             .setMediaSourceFactory(DefaultMediaSourceFactory(cacheFactory))
             .setAudioAttributes(buildMediaAudioAttributes(), /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)
@@ -109,7 +127,7 @@ class AircheckPlayerController(
     fun prepareUri(uri: Uri, autoPlay: Boolean = false) {
         val player = acquirePlayer()
         val uriStr = uri.toString()
-        if (currentUriString != uriStr) {
+        if (currentUriString != uriStr || player.playbackState == Player.STATE_IDLE) {
             currentUriString = uriStr
             _durationMs.value = 0L
             player.setMediaItem(MediaItem.fromUri(uri))
@@ -120,7 +138,16 @@ class AircheckPlayerController(
 
     fun togglePlayPause() {
         val player = backingPlayer ?: return
-        if (player.isPlaying) player.pause() else player.play()
+        if (player.isPlaying) {
+            player.pause()
+        } else {
+            if (player.playbackState == Player.STATE_IDLE) {
+                player.prepare()
+            } else if (player.playbackState == Player.STATE_ENDED) {
+                player.seekToDefaultPosition()
+            }
+            player.play()
+        }
     }
 
     fun pause() {

@@ -200,10 +200,12 @@ fun CutScreen(
                     }
                     Text(
                         text = badgeText,
-                        style = ndot(11.sp, Cs.Amber),
+                        style = ndot(10.sp, Cs.Amber),
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
-                            .padding(horizontal = 4.dp)
+                            .weight(1f, fill = false)
+                            .padding(horizontal = 2.dp)
                             .testTag("cs_cut_badge")
                     )
                 }
@@ -508,6 +510,14 @@ private fun VideoMonitorPanel(
                         useController = false
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     }
+                },
+                update = { view ->
+                    if (view.player !== player) {
+                        view.player = player
+                    }
+                },
+                onRelease = { view ->
+                    view.player = null
                 },
                 modifier = Modifier
                     .fillMaxSize()
