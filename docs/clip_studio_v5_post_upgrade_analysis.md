@@ -86,10 +86,10 @@ Every row from Section 4 of `docs/clip_studio_v5_pre_update_review.md` was audit
 
 | Suite | Command | Result | Duration |
 |---|---|---|---|
-| **Python Mac-Rig Backend** | `cd sync-trainer/home-daemon && /Users/mac/.venv/bin/python -m pytest -q tests/test_drafting_passes.py tests/test_clip_studio_v4.py tests/test_clip_studio_v5_backend.py tests/test_core_pipeline_endpoints.py tests/test_talking_head_multibeat.py` | **68 passed, 0 failed** | `45.71s` |
+| **Python Mac-Rig Backend** | `cd sync-trainer/home-daemon && /Users/mac/.venv/bin/python -m pytest -q tests/test_drafting_passes.py tests/test_clip_studio_v4.py tests/test_clip_studio_v5_backend.py tests/test_core_pipeline_endpoints.py tests/test_talking_head_multibeat.py` | **69 passed, 0 failed** | `45.33s` |
 | **Node Remotion Worker** | `cd /Users/mac/Aircheck/backend/remotion-worker && npm test` | **19 passed, 0 failed** | `48.57s` |
 | **Android Unit + Robolectric Compose** | `ANDROID_SDK_ROOT="/opt/homebrew/share/android-commandlinetools" ANDROID_HOME="/opt/homebrew/share/android-commandlinetools" ./gradlew testDebugUnitTest :app:installDebug :app:installDebugAndroidTest --console=plain` | **128 passed, 0 failed** (`:app` 90, `:sync-trainer:android-worker` 11, `:core-verifier` 8, `:ui-clipper` 8, `:core-engine` 7, `:audio-edl` 4) | `36.0s` |
-| **Android 17 Emulator E2E (`API 37`, `emulator-5554`)** | `adb -s emulator-5554 shell am instrument -w -r -e class com.example.AircheckNewsroomAndVoiceCareE2ETest,com.example.ClipStudioV5ExhaustiveE2ETest,com.example.AircheckRunningAppE2ETest com.aistudio.aircheck.vqxkrm.test/androidx.test.runner.AndroidJUnitRunner` | **5 passed, 0 failed** (`AircheckNewsroomAndVoiceCareE2ETest`: 1/1; `ClipStudioV5ExhaustiveE2ETest`: 3/3; `AircheckRunningAppE2ETest`: 1/1) | `62.80s` |
+| **Physical Pixel 11 Pro XL E2E (`Android 17 / API 37`, `10.0.0.230:42823`)** | `adb -s 10.0.0.230:42823 shell am instrument -w -r -e class com.example.AircheckNewsroomAndVoiceCareE2ETest,com.example.ClipStudioV5ExhaustiveE2ETest,com.example.AircheckRunningAppE2ETest com.aistudio.aircheck.vqxkrm.test/androidx.test.runner.AndroidJUnitRunner` | **5 passed, 0 failed** (`AircheckNewsroomAndVoiceCareE2ETest`: 1/1 incl. real on-device Gemini Nano; `ClipStudioV5ExhaustiveE2ETest`: 3/3; `AircheckRunningAppE2ETest`: 1/1 incl. live OpenAI `gpt-image-1-mini` backdrop generation) | `~95s` |
 
 ### Captured Android 17 Verification Artifacts (`/Users/mac/.gemini/antigravity/brain/7beeef31-63d9-46bb-ba18-c384bc8087fd/`)
 - `01_spark_empty_v5.png` — `01 SPARK` first-run state with `TONE` pills, `76dp` hold-to-record key, `type it instead`, and Room-backed `Continue your last video` card.
@@ -114,9 +114,9 @@ Every row from Section 4 of `docs/clip_studio_v5_pre_update_review.md` was audit
 
 ## 6. Operational & Residual Risk Notes
 
-1. **Alibaba Bailian Monthly Token-Plan Quota Exhaustion (Live Runtime Mitigation Verified)**:
+1. **Alibaba Bailian Monthly Token-Plan Quota Exhaustion (Live Runtime & Backdrop Image Provider Mitigation Verified)**:
    - During live E2E testing on 2026-11-25, Alibaba DashScope (`bl`) began returning HTTP `429 insufficient_quota` / `Throttling.AllocationQuota` (`"Your token-plan 1-month quota has been exhausted. The quota will reset at 12-21 16:00:00 UTC."`).
    - Using `ota_server.py`'s built-in `POST /v1/llm/config` endpoint, live `:8443` text/JSON drafting stages (`draft.*`, `ai_assist`, `broll_planner`) were switched without daemon restart to `remote_openai` (`gpt-4.1-mini`) + `local_mlx` (`Qwen3-4B-Instruct-2507-4bit` on `:8080`).
-   - Studio backdrop generation (`POST /v1/newsroom/backdrop` in `studio_cut.py`) shells out exclusively to `bl image generate`; until Bailian quota resets or an OpenAI/local Flux image provider fallback is added to `generate_backdrop_plate`, new prompt-to-plate generation returns HTTP `502 backdrop_failed` (which the Android app surfaces honestly in `CsStatusLine` with zero fake success toast, while existing cached plates in `renders/plates/*.png` continue serving `200 OK`).
+   - Studio backdrop generation (`POST /v1/newsroom/backdrop` in `studio_cut.py`) was upgraded in `f4403ba` (`_generate_backdrop_via_openai`) so whenever `bl image generate` fails or hits quota while `OPENAI_API_KEY` is configured, it automatically generates real `1024×1536` / `1536×1024` studio backdrop PNGs via OpenAI `gpt-image-1-mini` (`200 OK`, verified live on Pixel 11 Pro XL in `AircheckRunningAppE2ETest`).
 2. **Android SDK/NDK Host Path Note**:
    - On this Mac host, `/opt/homebrew/share/android-commandlinetools` holds the complete Android 37 SDK + NDK `28.2.13676358` + CMake toolchain (`$HOME/Library/Android/sdk/ndk/28.2.13676358` contains an incomplete `.installer` stub); pass `ANDROID_SDK_ROOT="/opt/homebrew/share/android-commandlinetools" ANDROID_HOME="/opt/homebrew/share/android-commandlinetools"` when building JNI modules.
