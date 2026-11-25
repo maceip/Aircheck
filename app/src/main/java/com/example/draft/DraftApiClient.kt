@@ -2,6 +2,7 @@ package com.example.draft
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -19,6 +20,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.io.IOException
 import java.util.Base64
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 @Serializable
@@ -75,6 +77,7 @@ data class TranscribeResponse(
 data class AnglesRequest(
     @SerialName("seed_transcript") val seedTranscript: String,
     @SerialName("steering_constraints") val steeringConstraints: List<String> = emptyList(),
+    val tone: String? = null,
     @SerialName("llm_provider") val llmProvider: String? = null,
     @SerialName("llm_model") val llmModel: String? = null
 )
@@ -98,6 +101,7 @@ data class AngleDto(
 data class AnglesResponse(
     @SerialName("extracted_angles") val extractedAngles: List<AngleDto> = emptyList(),
     @SerialName("blindspots") val blindspots: List<AngleDto> = emptyList(),
+    val tone: String? = null,
     @SerialName("llm_meta") val llmMeta: LlmMetaDto? = null
 ) {
     fun toExtractedAngleChips(defaultSelected: Boolean = false): List<AngleChip> =
@@ -114,6 +118,7 @@ data class SynthesizeRequest(
     @SerialName("steering_constraints") val steeringConstraints: List<String> = emptyList(),
     val slot: Int? = null,
     @SerialName("existing_drafts") val existingDrafts: List<String> = emptyList(),
+    val tone: String? = null,
     @SerialName("llm_provider") val llmProvider: String? = null,
     @SerialName("llm_model") val llmModel: String? = null
 )
@@ -127,6 +132,7 @@ data class SynthesizedCandidateDto(
 @Serializable
 data class SynthesizeResponse(
     val candidates: List<SynthesizedCandidateDto> = emptyList(),
+    val tone: String? = null,
     @SerialName("llm_meta") val llmMeta: LlmMetaDto? = null
 )
 
@@ -136,6 +142,7 @@ data class BrushSwapRequest(
     @SerialName("steering_constraints") val steeringConstraints: List<String> = emptyList(),
     val nudge: String? = null,
     @SerialName("exclude_alternatives") val excludeAlternatives: List<String> = emptyList(),
+    val tone: String? = null,
     @SerialName("llm_provider") val llmProvider: String? = null,
     @SerialName("llm_model") val llmModel: String? = null
 )
@@ -144,6 +151,7 @@ data class BrushSwapRequest(
 data class BrushSwapResponse(
     val alternatives: List<String> = emptyList(),
     val nudge: String? = null,
+    val tone: String? = null,
     @SerialName("llm_meta") val llmMeta: LlmMetaDto? = null
 )
 
@@ -152,8 +160,25 @@ enum class BrushNudge(val wire: String, val label: String) {
     SIMPLER("simpler", "simpler"),
     SHARPER("sharper", "sharper"),
     LESS_FORMAL("less_formal", "less formal"),
-    MORE("more", "3 more")
+    MORE("more", "3 more");
+
+    companion object {
+        fun fromUiOrWire(raw: String): BrushNudge = when (raw.trim().lowercase()) {
+            "punchier", "sharper" -> SHARPER
+            "plainer", "simpler" -> SIMPLER
+            "less_formal", "less formal" -> LESS_FORMAL
+            "more", "3 more" -> MORE
+            else -> MORE
+        }
+    }
 }
+
+@Serializable
+data class ShotSpecDto(
+    val type: String = "face",
+    val prompt: String = "",
+    val id: String? = null
+)
 
 @Serializable
 data class ArcRequest(
@@ -161,8 +186,10 @@ data class ArcRequest(
     @SerialName("steering_constraints") val steeringConstraints: List<String> = emptyList(),
     @SerialName("selected_angles") val selectedAngles: List<String> = emptyList(),
     @SerialName("target_sec") val targetSec: Int = 60,
+    val tone: String? = null,
     @SerialName("reroll_index") val rerollIndex: Int? = null,
     @SerialName("existing_beats") val existingBeats: List<String>? = null,
+    @SerialName("existing_beat_shots") val existingBeatShots: List<List<ShotSpecDto>>? = null,
     @SerialName("llm_provider") val llmProvider: String? = null,
     @SerialName("llm_model") val llmModel: String? = null
 )
@@ -170,15 +197,83 @@ data class ArcRequest(
 @Serializable
 data class ArcBeatDto(
     val label: String,
-    @SerialName("start_sec") val startSec: Int,
-    @SerialName("end_sec") val endSec: Int,
-    val text: String
-)
+    @SerialName("start_sec") val startSec: Int = 0,
+    @SerialName("end_sec") val endSec: Int = 0,
+    val text: String,
+    val id: String? = null,
+    val window: String? = null,
+    val shots: List<ShotSpecDto> = emptyList()
+) {
+    fun toArcBeat(
+        beatIndex: Int,
+        shotIdFactory: (beatIndex: Int, shotIndex: Int, type: ShotType) -> String = { bIdx, sIdx, t ->
+            "shot_b${bIdx}_s${sIdx}_${t.wireValue}_" + UUID.randomUUID().toString().replace("-", "").take(8)
+        }
+    ): ArcBeat {
+        val (resolvedStart, resolvedEnd) = resolveWindowSeconds(startSec, endSec, window, beatIndex)
+        val resolvedShots = if (shots.isNotEmpty()) {
+            shots.mapIndexed { sIdx, dto ->
+                val parsedType = ShotType.fromWire(dto.type)
+                val resolvedId = dto.id?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: shotIdFactory(beatIndex, sIdx, parsedType)
+                ShotSpec(
+                    id = resolvedId,
+                    type = parsedType,
+                    prompt = dto.prompt.trim().ifBlank { text.trim().take(72) }
+                )
+            }
+        } else {
+            ShotType.defaultTypesForBeat(beatIndex).mapIndexed { sIdx, defaultType ->
+                ShotSpec(
+                    id = shotIdFactory(beatIndex, sIdx, defaultType),
+                    type = defaultType,
+                    prompt = text.trim().take(72)
+                )
+            }
+        }
+        val cleanWindow = window?.trim()?.takeIf { it.isNotEmpty() } ?: "${resolvedStart}-${resolvedEnd}s"
+        return ArcBeat(
+            label = label,
+            startSec = resolvedStart,
+            endSec = resolvedEnd,
+            text = text,
+            shots = resolvedShots,
+            id = id?.trim()?.takeIf { it.isNotEmpty() } ?: "beat_$beatIndex",
+            window = cleanWindow
+        )
+    }
+
+    companion object {
+        private val WINDOW_REGEX = Regex("(\\d+)\\s*[-–]\\s*(\\d+)")
+        private val DEFAULT_WINDOWS = listOf(0 to 8, 8 to 28, 28 to 48, 48 to 60)
+
+        internal fun resolveWindowSeconds(
+            startSec: Int,
+            endSec: Int,
+            window: String?,
+            beatIndex: Int
+        ): Pair<Int, Int> {
+            if (endSec > startSec || startSec > 0) {
+                return startSec to endSec.coerceAtLeast(startSec)
+            }
+            if (!window.isNullOrBlank()) {
+                val match = WINDOW_REGEX.find(window)
+                if (match != null) {
+                    val s = match.groupValues[1].toIntOrNull() ?: 0
+                    val e = match.groupValues[2].toIntOrNull() ?: s
+                    return s to e.coerceAtLeast(s)
+                }
+            }
+            return DEFAULT_WINDOWS[beatIndex.coerceAtLeast(0) % DEFAULT_WINDOWS.size]
+        }
+    }
+}
 
 @Serializable
 data class ArcResponse(
-    @SerialName("target_sec") val targetSec: Int,
-    @SerialName("word_budget") val wordBudget: Int,
+    @SerialName("target_sec") val targetSec: Int = 60,
+    @SerialName("word_budget") val wordBudget: Int = 150,
+    val tone: String? = null,
     val beats: List<ArcBeatDto> = emptyList(),
     @SerialName("llm_meta") val llmMeta: LlmMetaDto? = null
 )
@@ -190,16 +285,68 @@ data class SynthesizeScriptRequest(
     @SerialName("steering_constraints") val steeringConstraints: List<String> = emptyList(),
     @SerialName("arc_beats") val arcBeats: List<String> = emptyList(),
     @SerialName("target_sec") val targetSec: Int = 60,
+    val tone: String? = null,
     @SerialName("llm_provider") val llmProvider: String? = null,
     @SerialName("llm_model") val llmModel: String? = null
 )
 
 @Serializable
 data class SynthesizeScriptResponse(
-    @SerialName("target_sec") val targetSec: Int,
-    @SerialName("word_budget") val wordBudget: Int,
+    @SerialName("target_sec") val targetSec: Int = 60,
+    @SerialName("word_budget") val wordBudget: Int = 150,
+    val tone: String? = null,
     val candidates: List<SynthesizedCandidateDto> = emptyList(),
     @SerialName("llm_meta") val llmMeta: LlmMetaDto? = null
+)
+
+@Serializable
+data class FollowupRequest(
+    @SerialName("last_title") val lastTitle: String,
+    @SerialName("last_transcript") val lastTranscript: String,
+    @SerialName("top_reply") val topReply: String? = null,
+    val angle: String = "overview",
+    @SerialName("target_sec") val targetSec: Int = 60,
+    val tone: String? = null,
+    @SerialName("llm_provider") val llmProvider: String? = null,
+    @SerialName("llm_model") val llmModel: String? = null
+)
+
+@Serializable
+data class FollowupDirectionDto(
+    val id: String,
+    val theme: String,
+    val words: String,
+    val beats: List<ArcBeatDto> = emptyList()
+)
+
+@Serializable
+data class FollowupResponse(
+    val angle: String = "overview",
+    @SerialName("target_sec") val targetSec: Int = 60,
+    @SerialName("word_budget") val wordBudget: Int = 150,
+    val beats: List<ArcBeatDto> = emptyList(),
+    @SerialName("answer_beats") val answerBeats: List<ArcBeatDto> = emptyList(),
+    val directions: List<FollowupDirectionDto> = emptyList(),
+    @SerialName("llm_meta") val llmMeta: LlmMetaDto? = null
+)
+
+@Serializable
+data class ShotPreviewRequest(
+    @SerialName("shot_type") val shotType: String,
+    val prompt: String = "",
+    val headline: String? = null,
+    @SerialName("photo_jpeg_base64") val photoJpegBase64: String? = null,
+    @SerialName("plate_id") val plateId: String? = null,
+    @SerialName("generate_backdrop") val generateBackdrop: Boolean = false
+)
+
+@Serializable
+data class ShotPreviewResponse(
+    @SerialName("preview_id") val previewId: String,
+    @SerialName("preview_url") val previewUrl: String,
+    @SerialName("shot_type") val shotType: String = "face",
+    val width: Int = 180,
+    val height: Int = 252
 )
 
 @Serializable
@@ -285,6 +432,30 @@ class DraftApiClient(
     @Volatile
     private var cachedBaseUrl: String? = null
 
+    /** Default tone sent when no explicit `tone` parameter or [DraftToneContext] is supplied. */
+    @Volatile
+    var activeTone: DraftTone = DraftTone.HOT_TAKE
+
+    private suspend fun resolveWireTone(explicitTone: String?): String {
+        val clean = normalizeWireOptional(explicitTone)
+        if (clean != null) return DraftTone.fromWire(clean).wireValue
+        val fromCtx = coroutineContext[DraftToneContext]?.tone
+        return (fromCtx ?: activeTone).wireValue
+    }
+
+    private suspend fun resolveExistingBeatShots(
+        explicitShots: List<List<ShotSpecDto>>?,
+        rerollIndex: Int?
+    ): List<List<ShotSpecDto>>? {
+        if (explicitShots != null) return explicitShots
+        if (rerollIndex == null) return null
+        val fromCtx = coroutineContext[ExistingBeatShotsContext]?.beatShots ?: return null
+        if (fromCtx.isEmpty()) return null
+        return fromCtx.map { row ->
+            row.map { ShotSpecDto(type = it.type.wireValue, prompt = it.prompt) }
+        }
+    }
+
     /**
      * Resolves the active `:8443` base URL via fast `/health` probe:
      * tries [usbLoopbackUrl] (`http://127.0.0.1:8443`) first, falling back to [configuredRigUrl].
@@ -351,18 +522,21 @@ class DraftApiClient(
         seedTranscript: String,
         steeringConstraints: List<String> = emptyList(),
         llmProvider: String? = null,
-        llmModel: String? = null
+        llmModel: String? = null,
+        tone: String? = null
     ): AnglesResponse {
         val cleanSeed = seedTranscript.trim()
         if (cleanSeed.isEmpty()) {
             throw IOException("seed_transcript must not be blank.")
         }
+        val wireTone = resolveWireTone(tone)
         return postJson(
             path = "/v1/draft/angles",
             requestBody = json.encodeToString(
                 AnglesRequest(
                     seedTranscript = cleanSeed,
                     steeringConstraints = steeringConstraints,
+                    tone = wireTone,
                     llmProvider = normalizeWireOptional(llmProvider),
                     llmModel = normalizeWireOptional(llmModel)
                 )
@@ -379,7 +553,8 @@ class DraftApiClient(
         slot: Int? = null,
         existingDrafts: List<String> = emptyList(),
         llmProvider: String? = null,
-        llmModel: String? = null
+        llmModel: String? = null,
+        tone: String? = null
     ): SynthesizeResponse {
         val cleanSeed = seedTranscript.trim()
         if (cleanSeed.isEmpty()) {
@@ -388,6 +563,7 @@ class DraftApiClient(
         if (slot != null && slot !in 0..2) {
             throw IllegalArgumentException("slot must be null or in 0..2, got $slot")
         }
+        val wireTone = resolveWireTone(tone)
         return postJson(
             path = "/v1/draft/synthesize",
             requestBody = json.encodeToString(
@@ -397,6 +573,7 @@ class DraftApiClient(
                     steeringConstraints = steeringConstraints,
                     slot = slot,
                     existingDrafts = existingDrafts,
+                    tone = wireTone,
                     llmProvider = normalizeWireOptional(llmProvider),
                     llmModel = normalizeWireOptional(llmModel)
                 )
@@ -405,7 +582,7 @@ class DraftApiClient(
         )
     }
 
-    /** `POST /v1/draft/arc`: 4-beat outline, or a single-beat reroll when [rerollIndex] is set. */
+    /** `POST /v1/draft/arc`: 4-beat outline + shot plan, or a single-beat reroll when [rerollIndex] is set. */
     suspend fun arc(
         seedTranscript: String,
         steeringConstraints: List<String>,
@@ -414,10 +591,14 @@ class DraftApiClient(
         rerollIndex: Int? = null,
         existingBeats: List<String>? = null,
         llmProvider: String? = null,
-        llmModel: String? = null
+        llmModel: String? = null,
+        tone: String? = null,
+        existingBeatShots: List<List<ShotSpecDto>>? = null
     ): ArcResponse {
         val cleanSeed = seedTranscript.trim()
         if (cleanSeed.isEmpty()) throw IOException("seed_transcript must not be blank.")
+        val wireTone = resolveWireTone(tone)
+        val wireShots = resolveExistingBeatShots(existingBeatShots, rerollIndex)
         return postJson(
             path = "/v1/draft/arc",
             requestBody = json.encodeToString(
@@ -426,8 +607,68 @@ class DraftApiClient(
                     steeringConstraints = steeringConstraints,
                     selectedAngles = selectedAngles,
                     targetSec = targetSec,
+                    tone = wireTone,
                     rerollIndex = rerollIndex,
                     existingBeats = existingBeats,
+                    existingBeatShots = wireShots,
+                    llmProvider = normalizeWireOptional(llmProvider),
+                    llmModel = normalizeWireOptional(llmModel)
+                )
+            ),
+            parse = { body -> json.decodeFromString<ArcResponse>(body) }
+        )
+    }
+
+    /** Alias for [arc] proposing a full 4-beat outline + shot plan. */
+    suspend fun proposeArc(
+        seedTranscript: String,
+        steeringConstraints: List<String> = emptyList(),
+        selectedAngles: List<String> = emptyList(),
+        targetSec: Int = 60,
+        tone: DraftTone? = null,
+        llmProvider: String? = null,
+        llmModel: String? = null
+    ): ArcResponse = arc(
+        seedTranscript = seedTranscript,
+        steeringConstraints = steeringConstraints,
+        selectedAngles = selectedAngles,
+        targetSec = targetSec,
+        rerollIndex = null,
+        existingBeats = null,
+        llmProvider = llmProvider,
+        llmModel = llmModel,
+        tone = tone?.wireValue
+    )
+
+    /** `POST /v1/draft/reroll-beat`: rewrites a single beat and its shot plan while keeping all others. */
+    suspend fun rerollBeat(
+        seedTranscript: String,
+        rerollIndex: Int,
+        existingBeats: List<String>,
+        steeringConstraints: List<String> = emptyList(),
+        selectedAngles: List<String> = emptyList(),
+        targetSec: Int = 60,
+        existingBeatShots: List<List<ShotSpecDto>>? = null,
+        tone: DraftTone? = null,
+        llmProvider: String? = null,
+        llmModel: String? = null
+    ): ArcResponse {
+        val cleanSeed = seedTranscript.trim()
+        if (cleanSeed.isEmpty()) throw IOException("seed_transcript must not be blank.")
+        val wireTone = resolveWireTone(tone?.wireValue)
+        val wireShots = resolveExistingBeatShots(existingBeatShots, rerollIndex)
+        return postJson(
+            path = "/v1/draft/reroll-beat",
+            requestBody = json.encodeToString(
+                ArcRequest(
+                    seedTranscript = cleanSeed,
+                    steeringConstraints = steeringConstraints,
+                    selectedAngles = selectedAngles,
+                    targetSec = targetSec,
+                    tone = wireTone,
+                    rerollIndex = rerollIndex,
+                    existingBeats = existingBeats,
+                    existingBeatShots = wireShots,
                     llmProvider = normalizeWireOptional(llmProvider),
                     llmModel = normalizeWireOptional(llmModel)
                 )
@@ -444,10 +685,12 @@ class DraftApiClient(
         arcBeats: List<String>,
         targetSec: Int = 60,
         llmProvider: String? = null,
-        llmModel: String? = null
+        llmModel: String? = null,
+        tone: String? = null
     ): SynthesizeScriptResponse {
         val cleanSeed = seedTranscript.trim()
         if (cleanSeed.isEmpty()) throw IOException("seed_transcript must not be blank.")
+        val wireTone = resolveWireTone(tone)
         return postJson(
             path = "/v1/draft/synthesize-script",
             requestBody = json.encodeToString(
@@ -457,6 +700,7 @@ class DraftApiClient(
                     steeringConstraints = steeringConstraints,
                     arcBeats = arcBeats,
                     targetSec = targetSec,
+                    tone = wireTone,
                     llmProvider = normalizeWireOptional(llmProvider),
                     llmModel = normalizeWireOptional(llmModel)
                 )
@@ -465,6 +709,27 @@ class DraftApiClient(
         )
     }
 
+    /** Alias for [synthesizeScript] with typed [DraftTone]. */
+    suspend fun writeVideoScript(
+        seedTranscript: String,
+        selectedAngles: List<String> = emptyList(),
+        steeringConstraints: List<String> = emptyList(),
+        arcBeats: List<String> = emptyList(),
+        targetSec: Int = 60,
+        tone: DraftTone? = null,
+        llmProvider: String? = null,
+        llmModel: String? = null
+    ): SynthesizeScriptResponse = synthesizeScript(
+        seedTranscript = seedTranscript,
+        selectedAngles = selectedAngles,
+        steeringConstraints = steeringConstraints,
+        arcBeats = arcBeats,
+        targetSec = targetSec,
+        llmProvider = llmProvider,
+        llmModel = llmModel,
+        tone = tone?.wireValue
+    )
+
     /** 4. `POST /v1/draft/brush-swap`. */
     suspend fun brushSwap(
         markedText: String,
@@ -472,11 +737,13 @@ class DraftApiClient(
         nudge: BrushNudge? = null,
         excludeAlternatives: List<String> = emptyList(),
         llmProvider: String? = null,
-        llmModel: String? = null
+        llmModel: String? = null,
+        tone: String? = null
     ): BrushSwapResponse {
         if (markedText.isBlank()) {
             throw IOException("marked_text must not be blank.")
         }
+        val wireTone = resolveWireTone(tone)
         return postJson(
             path = "/v1/draft/brush-swap",
             requestBody = json.encodeToString(
@@ -485,12 +752,114 @@ class DraftApiClient(
                     steeringConstraints = steeringConstraints,
                     nudge = nudge?.wire,
                     excludeAlternatives = excludeAlternatives,
+                    tone = wireTone,
                     llmProvider = normalizeWireOptional(llmProvider),
                     llmModel = normalizeWireOptional(llmModel)
                 )
             ),
             parse = { body -> json.decodeFromString<BrushSwapResponse>(body) }
         )
+    }
+
+    /** Alias for [brushSwap] when applying an explicit [BrushNudge] with optional [DraftTone]. */
+    suspend fun brushNudge(
+        markedText: String,
+        nudge: BrushNudge,
+        steeringConstraints: List<String> = emptyList(),
+        excludeAlternatives: List<String> = emptyList(),
+        tone: DraftTone? = null,
+        llmProvider: String? = null,
+        llmModel: String? = null
+    ): BrushSwapResponse = brushSwap(
+        markedText = markedText,
+        steeringConstraints = steeringConstraints,
+        nudge = nudge,
+        excludeAlternatives = excludeAlternatives,
+        llmProvider = llmProvider,
+        llmModel = llmModel,
+        tone = tone?.wireValue
+    )
+
+    /** `POST /v1/draft/followup`: LLM-authored follow-up outline & directions for the user's last video. */
+    suspend fun followup(
+        lastTitle: String,
+        lastTranscript: String,
+        topReply: String? = null,
+        angle: String = "overview",
+        targetSec: Int = 60,
+        tone: String? = null,
+        llmProvider: String? = null,
+        llmModel: String? = null
+    ): FollowupResponse {
+        val cleanTitle = lastTitle.trim()
+        val cleanTranscript = lastTranscript.trim().ifBlank { cleanTitle }
+        if (cleanTitle.isEmpty() && cleanTranscript.isEmpty()) {
+            throw IOException("last_title or last_transcript must not be blank.")
+        }
+        val normalizedAngle = angle.trim().lowercase().replace(Regex("[\\s-]+"), "_").ifBlank { "overview" }
+        val wireTone = resolveWireTone(tone)
+        return postJson(
+            path = "/v1/draft/followup",
+            requestBody = json.encodeToString(
+                FollowupRequest(
+                    lastTitle = cleanTitle.ifBlank { cleanTranscript.take(40) },
+                    lastTranscript = cleanTranscript,
+                    topReply = normalizeWireOptional(topReply),
+                    angle = normalizedAngle,
+                    targetSec = targetSec,
+                    tone = wireTone,
+                    llmProvider = normalizeWireOptional(llmProvider),
+                    llmModel = normalizeWireOptional(llmModel)
+                )
+            ),
+            parse = { body -> json.decodeFromString<FollowupResponse>(body) }
+        )
+    }
+
+    /** `POST /v1/studio/shot-preview`: renders and caches a real 180x252 JPEG preview frame on the rig. */
+    suspend fun requestShotPreview(
+        shotType: String,
+        prompt: String,
+        headline: String? = null,
+        photoJpegBase64: String? = null,
+        plateId: String? = null,
+        generateBackdrop: Boolean = false
+    ): ShotPreviewResponse {
+        val cleanType = ShotType.fromWire(shotType).wireValue
+        return postJson(
+            path = "/v1/studio/shot-preview",
+            requestBody = json.encodeToString(
+                ShotPreviewRequest(
+                    shotType = cleanType,
+                    prompt = prompt.trim(),
+                    headline = normalizeWireOptional(headline),
+                    photoJpegBase64 = normalizeWireOptional(photoJpegBase64),
+                    plateId = normalizeWireOptional(plateId),
+                    generateBackdrop = generateBackdrop
+                )
+            ),
+            parse = { body -> json.decodeFromString<ShotPreviewResponse>(body) }
+        )
+    }
+
+    /** Downloads raw binary bytes (such as `/v1/renders/shotprev_<hash>.jpg`) from the active rig. */
+    suspend fun downloadPreviewBytes(previewUrlOrPath: String): ByteArray = withContext(Dispatchers.IO) {
+        val trimmed = previewUrlOrPath.trim()
+        if (trimmed.isEmpty()) throw IOException("Preview URL must not be blank.")
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            return@withContext executeGetBytes(trimmed)
+        }
+        val path = if (trimmed.startsWith("/")) trimmed else "/$trimmed"
+        val baseUrl = resolveActiveBaseUrl(forceRefresh = false)
+        try {
+            executeGetBytes("$baseUrl$path")
+        } catch (e: HttpStatusException) {
+            throw e
+        } catch (e: IOException) {
+            val refreshed = resolveActiveBaseUrl(forceRefresh = true)
+            if (refreshed == baseUrl) throw e
+            executeGetBytes("$refreshed$path")
+        }
     }
 
     /** 5. `POST /v1/draft/seam-heal`. */
@@ -686,6 +1055,32 @@ class DraftApiClient(
             } catch (e: Exception) {
                 throw IOException("Failed to parse response from GET $path: ${e.message}", e)
             }
+        }
+    }
+
+    private fun executeGetBytes(fullUrl: String): ByteArray {
+        val request = Request.Builder()
+            .url(fullUrl)
+            .get()
+            .build()
+        okHttpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val rawBody = response.body?.string().orEmpty()
+                val errInfo = parseServerErrorInfo(rawBody)
+                throw HttpStatusException(
+                    statusCode = response.code,
+                    message = "GET $fullUrl failed (HTTP ${response.code})" +
+                        if (errInfo.detail.isNotBlank()) ": ${errInfo.detail}" else "",
+                    provider = errInfo.provider,
+                    stage = errInfo.stage,
+                    errorCode = errInfo.errorCode
+                )
+            }
+            val bytes = response.body?.bytes() ?: ByteArray(0)
+            if (bytes.isEmpty()) {
+                throw IOException("GET $fullUrl returned 0 bytes.")
+            }
+            return bytes
         }
     }
 

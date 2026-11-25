@@ -87,6 +87,13 @@ data class BackdropPlateResult(
     val prompt: String
 )
 
+data class ShotPreviewAssetResult(
+    val previewId: String,
+    val previewUrl: String,
+    val localFilePath: String,
+    val shotType: String
+)
+
 data class GeneratedOverlayBriefResult(
     val kind: OverlayObjectKind,
     val headline: String,
@@ -201,4 +208,20 @@ interface MacRigRenderGateway {
         userRequest: String,
         enableBrollPopups: Boolean = true
     ): RemotionInstallResult
+
+    /** `POST /v1/ai-assist` (`mode = "polish_headline"`): rewrites/polishes the on-screen title. */
+    suspend fun polishHeadline(
+        rigBaseUrl: String,
+        currentHeadline: String,
+        storyContext: String = ""
+    ): String = throw UnsupportedOperationException("polishHeadline not implemented")
+
+    /** `POST /v1/studio/shot-preview` + download JPEG into CAS for immediate SPARK shot thumbnails. */
+    suspend fun generateAndCacheShotPreview(
+        rigBaseUrl: String,
+        shotType: String,
+        prompt: String,
+        headline: String = "",
+        photoSha: String? = null
+    ): ShotPreviewAssetResult = throw UnsupportedOperationException("generateAndCacheShotPreview not implemented")
 }

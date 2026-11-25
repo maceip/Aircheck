@@ -847,15 +847,86 @@ class DirectMacRigGateway(
             }
             bodyStr
         }
-        val json = JSONObject(rawBody)
-        RemotionInstallResult(
-            installed = json.optBoolean("remotion_enabled", false) ||
-                json.optBoolean("remotion_installed", false) ||
-                json.optString("status") == "installed",
-            remotionVersion = json.optNullableString("remotion_version"),
-            packageProviderId = json.optNullableString("package_provider_id") ?: "mac_rig_remotion",
-            userRequest = json.optNullableString("user_request") ?: cleanRequest,
-            enableBrollPopups = json.optBoolean("enable_broll_popups", enableBrollPopups)
+        JSONObject(rawBody).let { json ->
+            RemotionInstallResult(
+                installed = json.optBoolean("remotion_enabled", false) ||
+                    json.optBoolean("remotion_installed", false) ||
+                    json.optString("status") == "installed",
+                remotionVersion = json.optNullableString("remotion_version"),
+                packageProviderId = json.optNullableString("package_provider_id") ?: "mac_rig_remotion",
+                userRequest = json.optNullableString("user_request") ?: cleanRequest,
+                enableBrollPopups = json.optBoolean("enable_broll_popups", enableBrollPopups)
+            )
+        }
+    }
+
+    override suspend fun polishHeadline(
+        rigBaseUrl: String,
+        currentHeadline: String,
+        storyContext: String
+    ): String = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val cleanHeadline = currentHeadline.trim()
+        val cleanContext = storyContext.trim()
+        require(cleanHeadline.isNotEmpty() || cleanContext.isNotEmpty()) {
+            "Provide a current headline or story context to refresh the title."
+        }
+        val payload = JSONObject()
+            .put("mode", "polish_headline")
+            .put("text", cleanHeadline)
+            .put("context", cleanContext)
+
+        val json = postRigJson(
+            url = "$baseUrl/v1/ai-assist",
+            body = payload,
+            label = "AI headline refresh",
+            readTimeoutSec = 60L
+        )
+        json.optNullableString("text")
+            ?: json.optNullableString("headline")
+            ?: throw IllegalStateException("Server /v1/ai-assist returned an empty headline.")
+    }
+
+    override suspend fun generateAndCacheShotPreview(
+        rigBaseUrl: String,
+        shotType: String,
+        prompt: String,
+        headline: String,
+        photoSha: String?
+    ): ShotPreviewAssetResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val photoJpegBase64: String? = photoSha
+            ?.takeIf { it.isNotBlank() }
+            ?.let { sha -> casStore.fileForSha(sha, "jpg") }
+            ?.let { file -> Base64.getEncoder().encodeToString(file.readBytes()) }
+
+        val payload = JSONObject()
+            .put("shot_type", shotType.trim().lowercase())
+            .put("prompt", prompt.trim())
+        if (headline.isNotBlank()) {
+            payload.put("headline", headline.trim())
+        }
+        if (!photoJpegBase64.isNullOrBlank()) {
+            payload.put("photo_jpeg_base64", photoJpegBase64)
+        }
+
+        val json = postRigJson(
+            url = "$baseUrl/v1/studio/shot-preview",
+            body = payload,
+            label = "Shot preview",
+            readTimeoutSec = 45L
+        )
+        val previewId = json.optNullableString("preview_id")
+            ?: throw IllegalStateException("Server /v1/studio/shot-preview missing preview_id.")
+        val rawUrl = json.optNullableString("preview_url")
+            ?: throw IllegalStateException("Server /v1/studio/shot-preview missing preview_url.")
+        val resolvedUrl = resolveAbsoluteUrl(baseUrl, rawUrl)
+        val stored = downloadRemoteAssetToCas(resolvedUrl, "jpg")
+        ShotPreviewAssetResult(
+            previewId = previewId,
+            previewUrl = resolvedUrl,
+            localFilePath = stored.file.absolutePath,
+            shotType = json.optNullableString("shot_type") ?: shotType.trim().lowercase()
         )
     }
 
