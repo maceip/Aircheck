@@ -819,7 +819,7 @@ fun CsTopBar(
             .height(56.dp)
             .padding(start = 8.dp, end = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         stageNames.forEachIndexed { idx, name ->
             val stageNum = idx + 1
@@ -831,7 +831,7 @@ fun CsTopBar(
                         .defaultMinSize(minWidth = 40.dp)
                         .neumorphicSurface(role = KeyRole.DOWN, pressed = true, radius = 12.dp, enabled = true)
                         .clip(RoundedCornerShape(12.dp))
-                        .padding(horizontal = 12.dp)
+                        .padding(horizontal = 10.dp)
                         .testTag("cs_crumb_$stageNum"),
                     contentAlignment = Alignment.Center
                 ) {
@@ -847,10 +847,10 @@ fun CsTopBar(
                 Box(
                     modifier = Modifier
                         .height(44.dp)
-                        .defaultMinSize(minWidth = 40.dp)
+                        .defaultMinSize(minWidth = 34.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .clickable(role = Role.Tab) { onNavigate(stageNum) }
-                        .padding(horizontal = 6.dp)
+                        .padding(horizontal = 4.dp)
                         .testTag("cs_crumb_$stageNum"),
                     contentAlignment = Alignment.Center
                 ) {
@@ -865,7 +865,7 @@ fun CsTopBar(
         }
         Row(
             modifier = Modifier.weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
             verticalAlignment = Alignment.CenterVertically,
             content = trailing
         )

@@ -1227,7 +1227,7 @@ class StudioViewModel internal constructor(
             id = NewsroomLook(name = "x").id,
             name = source.name.take(40) + "_COPY",
             isDefault = false,
-            createdAtMillis = System.currentTimeMillis()
+            createdAtMillis = maxOf(System.currentTimeMillis(), source.createdAtMillis + 1L)
         )
         _uiState.update { it.copy(newsroomLooks = listOf(copy) + it.newsroomLooks) }
         viewModelScope.launch {

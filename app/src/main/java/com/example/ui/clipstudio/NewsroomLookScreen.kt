@@ -184,9 +184,11 @@ fun NewsroomLookScreen(
                 CsIconKey(
                     icon = Icons.Sharp.ContentCopy,
                     contentDescription = "Duplicate look",
-                    enabled = looks.isNotEmpty() || persisted != null,
+                    enabled = !isLookBusy,
                     onClick = {
-                        val sourceId = persisted?.id ?: vm.createNewsroomLook(draft.name)
+                        val sourceId = persisted?.id ?: vm.createNewsroomLook(draft.name).also { id ->
+                            vm.updateNewsroomLook(draft.copy(id = id, isDefault = looks.isEmpty()))
+                        }
                         if (persisted != null && draft != persisted) {
                             vm.updateNewsroomLook(draft)
                         }

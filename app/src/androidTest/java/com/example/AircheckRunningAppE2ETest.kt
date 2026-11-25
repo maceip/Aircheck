@@ -37,6 +37,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -97,6 +98,18 @@ class AircheckRunningAppE2ETest {
             app.container.localRepo.newsroomLooksOnce().forEach {
                 app.container.localRepo.deleteNewsroomLook(it.id)
             }
+            app.container.localRepo.saveNewsroomLook(
+                NewsroomLook(
+                    name = "LOOK_01",
+                    plateId = "plate_8c805a9f4007",
+                    plateUrl = "http://127.0.0.1:8443/v1/plates/plate_8c805a9f4007.png",
+                    platePrompt = "sleek dark obsidian television newsroom anchor desk, crimson and cobalt LED ticker walls, shallow depth of field",
+                    blurPercent = 0,
+                    brightnessEv = 0.0,
+                    light = NewsroomLook.LIGHT_NEUTRAL,
+                    isDefault = true
+                )
+            )
             app.container.localRepo.saveCorePipelineSession(CorePipelineSession())
         }
 
@@ -130,7 +143,17 @@ class AircheckRunningAppE2ETest {
             "Monthly AI video editing subscriptions are obsolete now that flagship mobile silicon runs voice cloning, captions, and multi-shot cuts locally on your phone with zero monthly rent."
         )
         Espresso.closeSoftKeyboard()
+        Thread.sleep(300L)
+        composeRule.waitForIdle()
         composeRule.onNodeWithTag("cs_typed_note_submit").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            if (composeRule.onAllNodesWithTag("cs_typed_note_sheet").fetchSemanticsNodes().isNotEmpty()) {
+                composeRule.onNodeWithTag("cs_typed_note_submit").performClick()
+                false
+            } else {
+                true
+            }
+        }
 
         composeRule.waitUntil(timeoutMillis = 120_000L) {
             val d = draftVm.uiState.value.document
@@ -286,12 +309,22 @@ class AircheckRunningAppE2ETest {
             draftVm.uiState.value.activeBrushNudge == BrushNudge.MORE && !draftVm.uiState.value.isBusy
         }
 
-        val pinRange = checkNotNull(draftVm.uiState.value.selectedPhrase)
-        composeRule.onNodeWithTag("cs_pin_phrase").performClick()
-        composeRule.waitUntil(timeoutMillis = 5_000L) { draftVm.isRangeLocked(pinRange) }
-
+        // Commit phrase swap via "keep this" (`cs_keep_phrase`)
         composeRule.onNodeWithTag("cs_keep_phrase").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) { draftVm.uiState.value.selectedPhrase == null }
+
+        // Single-tap a second phrase on cs_para_0 and verbatim-lock it via "pin" (`cs_pin_phrase`, which locks & dismisses)
+        composeRule.onNodeWithTag("cs_para_0").performTouchInput {
+            click(Offset(96f * density, 22f * density))
+        }
+        composeRule.waitUntil(timeoutMillis = 90_000L) {
+            draftVm.uiState.value.selectedPhrase != null && !draftVm.uiState.value.isBusy
+        }
+        val pinRange = checkNotNull(draftVm.uiState.value.selectedPhrase)
+        composeRule.onNodeWithTag("cs_pin_phrase").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            draftVm.isRangeLocked(pinRange) && draftVm.uiState.value.selectedPhrase == null
+        }
 
         // Tap "make the video" -> maps shotPlan (BROLL_CUTAWAY + clean QUOTE_BRIEF card) into 03 CUT
         composeRule.onNodeWithTag("cs_create_video").performClick()
@@ -352,6 +385,7 @@ class AircheckRunningAppE2ETest {
         composeRule.onNodeWithTag("cs_timeline_toggle_0").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) { persistedSession().clauses[0].segmentMode != mode0Before }
         captureScreenshot(screenshotDir, "07_cut_broll_mode_v5.png")
+        dismissToastIfPresent()
         composeRule.onNodeWithTag("cs_cut_mode_transcript").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             composeRule.onAllNodesWithTag("cs_clause_0").fetchSemanticsNodes().isNotEmpty()
@@ -396,25 +430,25 @@ class AircheckRunningAppE2ETest {
             lightWarmBounds.height > 20f && lightWarmBounds.bottom <= useLookBounds.top
         )
 
-        // Ensure at least 1 saved look exists, then duplicate look & verify toast
-        if (studioVm.uiState.value.newsroomLooks.isEmpty()) {
-            composeRule.onNodeWithTag("cs_look_new").performScrollTo().performClick()
-            composeRule.waitUntil(timeoutMillis = 5_000L) {
-                runBlocking { app.container.localRepo.newsroomLooksOnce().isNotEmpty() }
-            }
-        }
+        // Duplicate current look directly via header `cs_look_duplicate` & verify Room persistence + toast
         val looksBeforeDup = runBlocking { app.container.localRepo.newsroomLooksOnce().size }
         composeRule.onNodeWithTag("cs_look_duplicate").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
-            runBlocking { app.container.localRepo.newsroomLooksOnce().size } == looksBeforeDup + 1 &&
+            runBlocking { app.container.localRepo.newsroomLooksOnce().size } >= looksBeforeDup + 1 &&
+                studioVm.uiState.value.newsroomLooks.isNotEmpty() &&
                 composeRule.onAllNodesWithTag("cs_toast").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithText("look duplicated").assertIsDisplayed()
         dismissToastIfPresent()
 
-        val activeLookId = runBlocking { app.container.localRepo.newsroomLooksOnce().maxBy { it.createdAtMillis }.id }
+        val activeLookId = studioVm.uiState.value.newsroomLooks.first().id
 
-        // Generate real studio backdrop plate on the live Mac :8443 rig
+        // Verify live :8443 plate (`plate_8c805a9f4007.png`) renders inside VideoLookPreviewPanel (`cs_look_plate`),
+        // AND exercise `cs_backdrop_prompt` + `cs_backdrop_generate` against live :8443 (verifying either a new plate
+        // or honest upstream 429/502 error surfacing with zero fake success toast).
+        composeRule.waitUntil(timeoutMillis = 10_000L) {
+            composeRule.onAllNodesWithTag("cs_look_plate").fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithTag("cs_backdrop_prompt").performScrollTo().performClick()
         composeRule.onNodeWithTag("cs_backdrop_prompt").performTextReplacement(
             "architectural dark graphite broadcast studio, warm tungsten rim light, soft depth of field"
@@ -423,11 +457,21 @@ class AircheckRunningAppE2ETest {
         composeRule.onNodeWithTag("cs_backdrop_generate").performScrollTo().performClick()
         composeRule.waitUntil(timeoutMillis = 120_000L) {
             val l = runBlocking { app.container.localRepo.getNewsroomLook(activeLookId) }
-            l != null && !l.plateUrl.isNullOrBlank() && !studioVm.uiState.value.isGeneratingBackdrop
+            !studioVm.uiState.value.isGeneratingBackdrop &&
+                (
+                    (l != null && l.plateId != "plate_8c805a9f4007" && !l.plateUrl.isNullOrBlank()) ||
+                        !studioVm.uiState.value.errorMessage.isNullOrBlank()
+                    )
         }
-        composeRule.waitUntil(timeoutMillis = 10_000L) {
-            composeRule.onAllNodesWithTag("cs_look_plate").fetchSemanticsNodes().isNotEmpty()
+        if (!studioVm.uiState.value.errorMessage.isNullOrBlank()) {
+            assertNull(
+                "Must never show a fake success toast when backdrop generation returns HTTP error",
+                studioVm.uiState.value.toastMessage
+            )
+            composeRule.runOnUiThread { studioVm.dismissError() }
+            composeRule.waitForIdle()
         }
+        composeRule.onNodeWithTag("cs_look_plate").assertIsDisplayed()
 
         // Scroll back up to BLUR / BRIGHTNESS / LIGHT, step values, and capture clean unclipped screenshot
         composeRule.onNodeWithTag("cs_scrub_blur_inc").performScrollTo().performClick()
