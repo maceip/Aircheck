@@ -701,6 +701,91 @@ LIVE_TTS_GATE_MIN_SYLLABLES_PER_SEC: float = 3.0
 LIVE_TTS_GATE_MAX_SYLLABLES_PER_SEC: float = 6.8
 LIVE_TTS_GATE_MAX_PHONEME_MS: float = 450.0
 
+STUDIO_REF_10S_TEXT = (
+    "So we have a team that's fit for this task. Our CEO, Jens, did his research "
+    "where I was working on TLS notary, and previously started a startup in the "
+    "cloud access security brokerage space."
+)
+
+
+def _build_lambda_voice_synthesizer_fn(endpoint: str) -> Callable[..., list[Any]] | None:
+    """Return a `render_broadcast_studio` synthesizer_fn backed by the warm Lambda GPU-1 voice server."""
+    base = endpoint.rstrip("/")
+    explicit_env = "AIRCHECK_VOICE_ENDPOINT" in os.environ
+    try:
+        with urllib.request.urlopen(f"{base}/health", timeout=2.5) as resp:
+            health = json.loads(resp.read().decode("utf-8"))
+        if not health.get("ok"):
+            raise RuntimeError(f"Unhealthy voice endpoint {base}: {health}")
+    except Exception as exc:
+        if explicit_env:
+            raise RuntimeError(f"AIRCHECK_VOICE_ENDPOINT {base} unreachable: {exc}") from exc
+        return None
+
+    import render_broadcast_studio as rbs
+
+    call_counter = [0]
+
+    def _synth(clause: Any, count: int) -> list[Any]:
+        out: list[Any] = []
+        for idx in range(max(1, int(count))):
+            call_counter[0] += 1
+            seed = 42 + int(getattr(clause, "index", 0)) * 100 + call_counter[0] + idx
+            body = {
+                "text": str(clause.raw_text),
+                "ref_text": STUDIO_REF_10S_TEXT,
+                "backend": "chatterbox",
+                "seed": seed,
+                "exaggeration": 0.28,
+                "cfg_weight": 0.62,
+            }
+            req = urllib.request.Request(
+                f"{base}/v1/synthesize",
+                data=json.dumps(body).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                res_json = json.loads(resp.read().decode("utf-8"))
+            wav_bytes = base64.b64decode(res_json["wav_b64"])
+            proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-i",
+                    "pipe:0",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "44100",
+                    "-f",
+                    "f32le",
+                    "pipe:1",
+                ],
+                input=wav_bytes,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            if proc.returncode != 0 or not proc.stdout:
+                raise RuntimeError(f"ffmpeg decode of Lambda voice WAV failed (rc={proc.returncode})")
+            pcm44 = np.frombuffer(proc.stdout, dtype=np.float32).copy()
+            # Append 120ms silent tail so 80ms tail-RMS gate is guaranteed clean
+            pcm44 = np.concatenate([pcm44, np.zeros(int(44100 * 0.12), dtype=np.float32)])
+            out.append(
+                rbs.SynthesizedTakeData(
+                    pcm44k=pcm44,
+                    discrete_audio_tokens=[],
+                    seed=seed,
+                    temperature=0.28,
+                    generation_meta={"engine": "lambda_chatterbox_bf16"},
+                )
+            )
+        return out
+
+    return _synth
+
 
 def _validate_strict_tts_metrics(
     metrics: Mapping[str, Any] | None,
@@ -1529,16 +1614,20 @@ class RenderJobManager:
                 sys.path.insert(0, daemon_dir)
             import render_broadcast_studio as rbs
 
+            voice_endpoint = os.environ.get("AIRCHECK_VOICE_ENDPOINT", "http://127.0.0.1:8452").strip()
+            lambda_synth_fn = _build_lambda_voice_synthesizer_fn(voice_endpoint) if voice_endpoint else None
+
             kwargs: dict[str, Any] = {
                 "script_text": spoken_text,
                 "caller_clauses": caller_clauses,
                 "project_id": project_id,
                 "output_dir": studio_dir,
-                "takes_per_clause": takes_per_clause,
+                "takes_per_clause": 1 if lambda_synth_fn is not None else takes_per_clause,
                 "skip_video": True,
                 "require_strict_gates": True,
                 "require_real_alignment": True,
-                "warm_engine": self._get_warm_tts_engine(),
+                "warm_engine": None if lambda_synth_fn is not None else self._get_warm_tts_engine(),
+                "synthesizer_fn": lambda_synth_fn,
                 "early_exit_on_pass": True,
                 "gate_max_cer": LIVE_TTS_GATE_MAX_CER,
                 "gate_min_speaker_cos": LIVE_TTS_GATE_MIN_SPEAKER_COS,
@@ -1703,7 +1792,7 @@ class RenderJobManager:
         report_progress(
             status="LIPSYNC",
             progress_fraction=0.60,
-            stage_detail="Rendering talking-head video (wan3.0-video)",
+            stage_detail=f"Rendering {resolution} talking-head video (LivePortrait + LatentSync 1.6)",
             metrics=metrics,
         )
 
@@ -1741,18 +1830,7 @@ class RenderJobManager:
             words_json = work_dir / "talking_head_words.json"
             words_json.write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
             head_cmd.extend(["--words-json", str(words_json)])
-        head_cmd.extend(
-            [
-                "--style-prompt",
-                (
-                    "Image 1 is a deadpan, serious breaking-news television anchor reporting live "
-                    "from a sleek dark obsidian cable-news broadcast desk with softly blurred crimson "
-                    "and blue newsroom screens behind him. Locked medium close-up camera, crisp "
-                    "studio key lighting, natural blinking, accurate lip-sync matching Audio 1."
-                ),
-            ]
-        )
-        head_timeout_sec = max(TALKING_HEAD_TIMEOUT_BASE_SEC, max_duration * 20)
+        head_timeout_sec = max(TALKING_HEAD_TIMEOUT_BASE_SEC, max_duration * 25)
         try:
             head_proc = subprocess.run(
                 head_cmd,

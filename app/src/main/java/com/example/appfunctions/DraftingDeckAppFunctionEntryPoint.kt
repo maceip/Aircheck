@@ -296,7 +296,7 @@ abstract class DraftingDeckAppFunctionEntryPoint : AppFunctionService() {
                 rigBaseUrl = health.resolvedUrl,
                 project = project,
                 photoSha = null,
-                resolution = "720P",
+                resolution = "1080P",
                 ratio = "9:16",
                 maxDurationSec = project.totalActiveSeconds.coerceIn(5, 10)
             )

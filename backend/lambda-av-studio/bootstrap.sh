@@ -40,7 +40,7 @@ uv pip install --python "$ROOT/.venvs/video/bin/python" \
   face-alignment==1.4.1 "huggingface-hub[cli,hf_transfer]>=0.30.2" \
   numpy==1.26.4 kornia==0.8.0 insightface==0.7.3 onnxruntime-gpu==1.21.0 \
   DeepCache==0.1.1 soundfile scipy==1.13.1 scikit-image==0.24.0 \
-  albumentations==1.4.10 pykalman==0.9.7 tyro==0.8.5 pyyaml rich tqdm \
+  albumentations==1.4.10 albucore==0.0.13 pykalman==0.9.7 tyro==0.8.5 pyyaml rich tqdm \
   fastapi uvicorn python-multipart
 
 echo "[4/5] Downloading LatentSync 1.6, LivePortrait, SD-VAE, and InsightFace weights..."
@@ -89,8 +89,12 @@ if [ ! -x "$ROOT/.venvs/voice/bin/python" ]; then
 fi
 uv pip install --python "$ROOT/.venvs/voice/bin/python" \
   --extra-index-url https://download.pytorch.org/whl/cu124 \
+  "numpy<2.0" setuptools wheel cython
+uv pip install --python "$ROOT/.venvs/voice/bin/python" \
+  --no-build-isolation \
+  --extra-index-url https://download.pytorch.org/whl/cu124 \
   torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 \
-  f5-tts chatterbox-tts "huggingface-hub[cli,hf_transfer]" \
+  "pyarrow<19.0.0" f5-tts chatterbox-tts "huggingface-hub[cli,hf_transfer]" \
   soundfile scipy librosa fastapi uvicorn python-multipart
 
 "$ROOT/.venvs/voice/bin/python" - <<'PY'

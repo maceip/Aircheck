@@ -116,6 +116,12 @@ def restore_high_freq_camera_detail(
         shutil.rmtree(raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
 
+    # Restrict detail transfer strictly to the interior portrait region (zero border ripple)
+    yy = np.linspace(-1.0, 1.0, h, dtype=np.float32)[:, None]
+    xx = np.linspace(-1.0, 1.0, w, dtype=np.float32)[None, :]
+    radial = np.sqrt((xx / 0.62) ** 2 + ((yy + 0.06) / 0.58) ** 2)
+    interior_mask = np.clip(1.0 - np.maximum(0.0, radial - 0.65) / 0.30, 0.0, 1.0)[..., None]
+
     # First warp src_hf from source_img -> frames[0] to align normalized lip/head baseline
     src_gray = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2GRAY)
     flow_s2r = dis.calc(ref_gray, src_gray, None)
@@ -151,8 +157,13 @@ def restore_high_freq_camera_detail(
         frm_f = frm.astype(np.float32)
         # Attenuate HF transfer where semantic appearance changes (e.g. closed eyelid during blink)
         photometric_diff = np.mean(np.abs(frm_f - warped_ref), axis=2, keepdims=True)
-        gate = np.clip(1.0 - (photometric_diff - 10.0) / 18.0, 0.0, 1.0)
-        enhanced = np.clip(frm_f + strength * gate * warped_hf, 0.0, 255.0).astype(np.uint8)
+        gate = np.clip(1.0 - (photometric_diff - 10.0) / 18.0, 0.0, 1.0) * interior_mask
+        enhanced_f = np.clip(frm_f + strength * gate * warped_hf, 0.0, 255.0)
+        # Feather outermost 20px border back to untouched source portrait to eliminate any paste-back edge seam
+        bx = np.minimum(np.arange(w, dtype=np.float32), np.arange(w - 1, -1, -1, dtype=np.float32))[None, :]
+        by = np.minimum(np.arange(h, dtype=np.float32), np.arange(h - 1, -1, -1, dtype=np.float32))[:, None]
+        b_alpha = np.clip(np.minimum(bx, by) / 20.0, 0.0, 1.0)[..., None]
+        enhanced = (b_alpha * enhanced_f + (1.0 - b_alpha) * src_f).astype(np.uint8)
         cv2.imwrite(str(raw_dir / f"f_{idx:05d}.png"), enhanced)
 
     _run(
@@ -215,10 +226,10 @@ def run_liveportrait_driving(
     work_dir: Path,
     *,
     max_dim: int = 1920,
-    driving_multiplier: float = 0.38,
+    driving_multiplier: float = 0.30,
     driving_template: str = "d0.mp4",
 ) -> Path:
-    """Run KwaiVGI/LivePortrait in pose+blink mode and apply 1080p high-frequency detail transfer."""
+    """Run KwaiVGI/LivePortrait in locked-gaze pose mode and apply 1080p high-frequency detail transfer."""
     lp_out_dir = work_dir / "lp_out"
     lp_out_dir.mkdir(parents=True, exist_ok=True)
     driving_path = LIVEPORTRAIT_DIR / "assets" / "examples" / "driving" / driving_template
@@ -241,7 +252,7 @@ def run_liveportrait_driving(
         "--driving-multiplier",
         str(driving_multiplier),
         "--animation-region",
-        "all",
+        "pose",
         "--flag-normalize-lip",
         "--flag-pasteback",
         "--flag-stitching",
@@ -271,6 +282,9 @@ def run_liveportrait_driving(
 
 class TalkingHeadEngine:
     def __init__(self, device: str = "cuda:0") -> None:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
         self.device = device
         os.chdir(str(LATENTSYNC_DIR))
         cfg_path = LATENTSYNC_DIR / "configs" / "unet" / "stage2_512.yaml"

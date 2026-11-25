@@ -489,7 +489,7 @@ class CoreStoryPipelineCoordinator(
                         rigBaseUrl = health.resolvedUrl,
                         project = cleanHeadProject,
                         photoSha = photoSha,
-                        resolution = "720P",
+                        resolution = "1080P",
                         ratio = "9:16",
                         maxDurationSec = targetMaxSec,
                         words = session.alignedWords,

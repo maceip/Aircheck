@@ -19,10 +19,13 @@ import base64
 import json
 import logging
 import math
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 import warnings
 import wave
 from pathlib import Path
@@ -35,6 +38,7 @@ LOGGER = logging.getLogger("voicestudio.generate_talking_head")
 DEFAULT_AVATAR = Path("/Users/mac/Downloads/clone/images/avatar_ref.jpg")
 DEFAULT_WHISPER_MODEL = Path("/Users/mac/models/ggml-medium-q5_0.bin")
 DEFAULT_BL_BIN = Path("/Users/mac/.local/bin/bl")
+DEFAULT_VIDEO_ENDPOINT = "http://127.0.0.1:8451"
 
 VALID_RESOLUTIONS = ("720P", "1080P")
 VALID_RATIOS = ("9:16", "16:9", "1:1")
@@ -787,13 +791,60 @@ def _beat_transcript_slice(
     return full_transcript if total_beats == 1 else ""
 
 
+def _invoke_lambda_video_endpoint(
+    endpoint: str,
+    *,
+    avatar_path: Path,
+    master_wav: Path,
+    output_mp4: Path,
+    width: int,
+    height: int,
+    seed: int,
+    timeout_sec: int,
+) -> dict[str, Any]:
+    url = f"{endpoint.rstrip('/')}/v1/render_talking_head"
+    payload = {
+        "avatar_b64": base64.b64encode(avatar_path.read_bytes()).decode("ascii"),
+        "avatar_ext": avatar_path.suffix.lower() or ".jpg",
+        "voice_wav_b64": base64.b64encode(master_wav.read_bytes()).decode("ascii"),
+        "width": int(width),
+        "height": int(height),
+        "motion_mode": "liveportrait_hf",
+        "inference_steps": 20,
+        "guidance_scale": 1.5,
+        "seed": int(seed),
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode("utf-8", errors="replace")[:600]
+        raise RuntimeError(f"Lambda video endpoint HTTP {exc.code}: {err_body}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Lambda video endpoint {url} failed: {exc}") from exc
+
+    mp4_b64 = str(body.get("mp4_b64") or "").strip()
+    if not mp4_b64:
+        raise RuntimeError("Lambda video endpoint returned empty mp4_b64")
+    output_mp4.parent.mkdir(parents=True, exist_ok=True)
+    output_mp4.write_bytes(base64.b64decode(mp4_b64))
+    body.pop("mp4_b64", None)
+    return body
+
+
 def generate_talking_head(
     voice_input: Path,
     avatar_path: Path,
     output_mp4: Path,
     *,
     transcript: str | None = None,
-    resolution: str = "720P",
+    resolution: str = "1080P",
     ratio: str = "9:16",
     max_duration: int = 10,
     style_prompt: str | None = None,
@@ -801,6 +852,7 @@ def generate_talking_head(
     dry_run: bool = False,
     replace_audio_with_input: bool = True,
     bl_bin: Path = DEFAULT_BL_BIN,
+    video_endpoint: str | None = None,
     whisper_model: Path = DEFAULT_WHISPER_MODEL,
     clauses: Sequence[Mapping[str, Any]] | None = None,
     words: Sequence[Mapping[str, Any]] | None = None,
@@ -815,14 +867,97 @@ def generate_talking_head(
         raise FileNotFoundError(f"Voice input not found: {voice_input}")
     if not avatar_path.exists():
         raise FileNotFoundError(f"Avatar image not found: {avatar_path}")
-    if not bl_bin.exists():
+
+    eff_endpoint = (
+        video_endpoint
+        if video_endpoint is not None
+        else os.environ.get("AIRCHECK_VIDEO_ENDPOINT", DEFAULT_VIDEO_ENDPOINT)
+    ).strip()
+    use_lambda_endpoint = (not dry_run) and (bl_bin == DEFAULT_BL_BIN) and bool(eff_endpoint)
+
+    if not use_lambda_endpoint and not bl_bin.exists():
         found = shutil.which("bl")
         if not found:
-            raise RuntimeError("Bailian CLI `bl` not found on PATH or at /Users/mac/.local/bin/bl")
+            raise RuntimeError("No video endpoint configured and `bl` CLI not found.")
         bl_bin = Path(found)
 
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
     raw_video_mp4 = output_mp4.with_name(f"{output_mp4.stem}_raw_wan.mp4")
+
+    if use_lambda_endpoint:
+        full_transcript = (transcript or "").strip()
+        with tempfile.TemporaryDirectory(prefix="aircheck_head_") as tmp_str:
+            tmp_dir = Path(tmp_str)
+            master_wav = tmp_dir / "master_voice.wav"
+            _, total_ms = _prepare_canonical_master_wav(
+                voice_input,
+                master_wav,
+                max_duration_sec=max_duration,
+            )
+            if not full_transcript and whisper_model.is_file():
+                wav16 = tmp_dir / "full_16k.wav"
+                _run_subprocess(
+                    [
+                        "ffmpeg", "-y", "-i", str(master_wav),
+                        "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav16),
+                    ],
+                    timeout=FFMPEG_TIMEOUT_SEC,
+                    label="ffmpeg full 16k whisper",
+                )
+                full_transcript = transcribe_offline_whisper(wav16, whisper_model, tmp_dir / "w_full")
+
+            remote_meta = _invoke_lambda_video_endpoint(
+                eff_endpoint,
+                avatar_path=avatar_path,
+                master_wav=master_wav,
+                output_mp4=output_mp4,
+                width=target_w,
+                height=target_h,
+                seed=seed,
+                timeout_sec=bl_timeout_sec,
+            )
+            qa_target = output_mp4
+            result_lambda: dict[str, Any] = {
+                "voice_input": str(voice_input),
+                "avatar_path": str(avatar_path),
+                "transcript": full_transcript,
+                "duration_sec": round(total_ms / 1000.0, 3),
+                "duration_ms": total_ms,
+                "resolution": norm_resolution,
+                "ratio": norm_ratio,
+                "beat_count": 1,
+                "beats": [
+                    {
+                        "index": 0,
+                        "start_ms": 0,
+                        "end_ms": total_ms,
+                        "duration_ms": total_ms,
+                        "transcript": full_transcript,
+                    }
+                ],
+                "dry_run": False,
+                "engine": "liveportrait_hf+latentsync_1.6_512",
+                "identity_qa": remote_meta.get("identity_qa"),
+                "output_mp4": str(output_mp4),
+                "output_bytes": output_mp4.stat().st_size,
+            }
+            if replace_audio_with_input:
+                orig_audio_mp4 = output_mp4.with_name(f"{output_mp4.stem}_exact_input_voice.mp4")
+                shutil.copy2(output_mp4, orig_audio_mp4)
+                qa_target = orig_audio_mp4
+                result_lambda["exact_input_voice_mp4"] = str(orig_audio_mp4)
+
+            qa = verify_av_sync_ffprobe(
+                qa_target,
+                expected_audio_ms=total_ms,
+                expected_width=target_w,
+                expected_height=target_h,
+            )
+            result_lambda["ffprobe_qa"] = qa
+            result_lambda["av_sync_drift_ms"] = qa["av_sync_drift_ms"]
+            result_lambda["video_duration_ms"] = qa["video_duration_ms"]
+            result_lambda["audio_duration_ms"] = qa["audio_duration_ms"]
+            return result_lambda
 
     mime_img = "image/png" if avatar_path.suffix.lower() == ".png" else "image/jpeg"
     img_b64 = base64.b64encode(avatar_path.read_bytes()).decode("ascii")

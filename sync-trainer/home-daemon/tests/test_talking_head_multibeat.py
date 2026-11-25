@@ -1144,3 +1144,81 @@ def test_opposite_sign_start_time_drift_is_rejected_by_both_verifiers(
 
     with pytest.raises(RuntimeError, match="160.00ms exceeds 120.0ms"):
         ota_server._probe_av_sync_metrics(mp4_path)
+
+
+def test_generate_talking_head_lambda_1080p_endpoint_single_pass(tmp_path: Path) -> None:
+    import http.server
+
+    seen_reqs: list[dict[str, Any]] = []
+
+    class _FakeLambdaVideoHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = json.loads(raw.decode("utf-8"))
+            seen_reqs.append(
+                {
+                    "width": body["width"],
+                    "height": body["height"],
+                    "motion_mode": body["motion_mode"],
+                    "seed": body["seed"],
+                }
+            )
+            wav_in = tmp_path / "srv_in.wav"
+            wav_in.write_bytes(base64.b64decode(body["voice_wav_b64"]))
+            mp4_out = tmp_path / "srv_out.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", f"color=c=black:s={body['width']}x{body['height']}:r=25:d=4.000",
+                    "-i", str(wav_in),
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-ar", "48000", "-ac", "1", "-t", "4.000",
+                    str(mp4_out),
+                ],
+                check=True,
+                timeout=30,
+            )
+            resp = {
+                "mp4_b64": base64.b64encode(mp4_out.read_bytes()).decode("ascii"),
+                "identity_qa": {"csim_mean": 0.9775, "csim_min": 0.9593},
+            }
+            payload = json.dumps(resp).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, fmt: str, *args: Any) -> None:
+            return
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeLambdaVideoHandler)
+    port = httpd.server_address[1]
+    th = threading.Thread(target=httpd.serve_forever, daemon=True)
+    th.start()
+    try:
+        wav = tmp_path / "voice4s.wav"
+        sf.write(str(wav), _make_speech_wave_with_pauses(4.0, f0_hz=205.0), 44100, subtype="PCM_16")
+        avatar = tmp_path / "avatar.jpg"
+        avatar.write_bytes(b"\xff\xd8\xff\xe0AVATAR1080\xff\xd9")
+        out_mp4 = tmp_path / "lambda_1080p.mp4"
+
+        res = gth.generate_talking_head(
+            voice_input=wav,
+            avatar_path=avatar,
+            output_mp4=out_mp4,
+            resolution="1080P",
+            ratio="9:16",
+            max_duration=15,
+            video_endpoint=f"http://127.0.0.1:{port}",
+            seed=99,
+        )
+        assert res["engine"] == "liveportrait_hf+latentsync_1.6_512"
+        assert res["resolution"] == "1080P"
+        assert res["beat_count"] == 1
+        assert res["identity_qa"]["csim_mean"] == 0.9775
+        assert seen_reqs == [{"width": 1080, "height": 1920, "motion_mode": "liveportrait_hf", "seed": 99}]
+        assert Path(res["exact_input_voice_mp4"]).is_file()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

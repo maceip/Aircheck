@@ -133,7 +133,7 @@ interface MacRigRenderGateway {
         rigBaseUrl: String,
         project: ScriptProject,
         photoSha: String?,
-        resolution: String = "720P",
+        resolution: String = "1080P",
         ratio: String = "9:16",
         maxDurationSec: Int = 10,
         words: List<AlignedWord> = emptyList(),
