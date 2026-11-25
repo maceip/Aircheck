@@ -44,6 +44,7 @@ from typing import Any, Callable, Sequence
 
 from llm_router import (
     ALL_PROVIDERS,
+    ALL_STAGES,
     LOCAL_PROVIDERS,
     STAGE_DEFAULT_MAX_TOKENS,
     LlmProviderError,
@@ -163,9 +164,85 @@ _UNICODE_PUNCT_MAP: dict[str, str] = {
 
 BRUSH_NUDGE_DIRECTIVES: dict[str, str] = {
     "simpler": "Use shorter, plainer, more common words than the original span.",
+    "plainer": "Use shorter, plainer, more common words than the original span.",
     "sharper": "Make the phrasing more pointed, vivid, and assertive than the original span.",
+    "punchier": "Make the phrasing more pointed, punchy, and assertive than the original span.",
     "less_formal": "Make the phrasing casual and conversational, like talking to a friend.",
     "more": "Offer three fresh options unlike any earlier ones.",
+}
+
+DEFAULT_DRAFT_TONE = "hot_take"
+VALID_DRAFT_TONES: tuple[str, ...] = (
+    "direct",
+    "hot_take",
+    "story",
+    "explainer",
+    "shitpost",
+    "solarpunk",
+)
+DRAFT_TONE_DIRECTIVES: dict[str, str] = {
+    "direct": (
+        "Adopt a direct, matter-of-fact editorial voice. State concrete claims and evidence "
+        "plainly without theatrical buildup."
+    ),
+    "hot_take": (
+        "Adopt a bold, opinionated hot-take voice. Lead with a sharp, contrarian verdict that "
+        "challenges conventional wisdom and back it immediately with concrete receipts."
+    ),
+    "story": (
+        "Adopt a chronological, first-person story voice grounded in a concrete real moment, "
+        "what happened first, what went wrong or changed, and the practical lesson."
+    ),
+    "explainer": (
+        "Adopt a clear, structured explainer voice. Break down the exact mechanism step by step, "
+        "why each component matters, and the concrete real-world effect."
+    ),
+    "shitpost": (
+        "Adopt a deadpan, irreverent shitpost voice. Keep lines clipped, blunt, and wryly comedic "
+        "while staying strictly anchored in the real facts of the topic."
+    ),
+    "solarpunk": (
+        "Adopt a constructive, builder-optimistic solarpunk voice emphasizing user agency, "
+        "local/open tools, practical craft, and a tangibly better path forward."
+    ),
+}
+
+VALID_SHOT_TYPES: tuple[str, ...] = ("face", "pip", "broll", "card")
+DEFAULT_BEAT_SHOT_TYPES: tuple[tuple[str, ...], ...] = (
+    ("face", "pip"),
+    ("pip", "broll", "broll"),
+    ("broll", "pip"),
+    ("face", "card"),
+)
+VALID_FOLLOWUP_ANGLES: tuple[str, ...] = (
+    "overview",
+    "answer",
+    "part_2",
+    "update",
+    "shitpost",
+    "solarpunk",
+)
+FOLLOWUP_ANGLE_GUIDANCE: dict[str, str] = {
+    "answer": (
+        "Directly answer the audience's top reply question (or the sharpest follow-up question "
+        "raised by the previous video) with concrete specifics."
+    ),
+    "part_2": (
+        "Continue the previous video into Part 2: pick up where the last payoff left off, "
+        "go one layer deeper into the mechanism or next consequence, and land a new takeaway."
+    ),
+    "update": (
+        "Deliver a concrete post-publish status update: what changed since the last video, "
+        "what held up or broke in real usage, and the updated conclusion."
+    ),
+    "shitpost": (
+        "Take a deadpan, irreverent, comedic shitpost spin on the previous video's core claim "
+        "with short, blunt lines grounded in the real topic."
+    ),
+    "solarpunk": (
+        "Take a constructive, optimistic solarpunk counter-spin on the previous video focused "
+        "on local ownership, open tools, and practical builder agency."
+    ),
 }
 
 ARC_DEFAULT_TARGET_SEC = 60
@@ -686,6 +763,114 @@ def _format_steering_block(steering_constraints: Sequence[str]) -> str:
     return f"\nUSER STEERING CONSTRAINTS (MUST OBEY):\n{bullet_lines}\n"
 
 
+def normalize_draft_tone(
+    raw_tone: Any, *, default_tone: str = DEFAULT_DRAFT_TONE
+) -> tuple[str, bool]:
+    """Validates and normalizes optional ``tone`` parameter into ``VALID_DRAFT_TONES``.
+
+    Returns ``(normalized_tone, was_explicitly_provided)``.
+    """
+    if raw_tone is None:
+        return default_tone, False
+    if isinstance(raw_tone, bool) or not isinstance(raw_tone, str):
+        raise ValueError(f"tone must be one of {list(VALID_DRAFT_TONES)}, got {raw_tone!r}")
+    cleaned = raw_tone.strip()
+    if not cleaned:
+        return default_tone, False
+    norm = re.sub(r"[\s-]+", "_", cleaned.lower())
+    if norm not in DRAFT_TONE_DIRECTIVES:
+        raise ValueError(f"tone must be one of {list(VALID_DRAFT_TONES)}, got {raw_tone!r}")
+    return norm, True
+
+
+def _format_tone_block(tone: str) -> str:
+    directive = DRAFT_TONE_DIRECTIVES.get(tone, DRAFT_TONE_DIRECTIVES[DEFAULT_DRAFT_TONE])
+    return f"\nSELECTED TONE ({tone}):\n- {directive}\n"
+
+
+def normalize_shot_type(raw_type: Any) -> str:
+    """Normalizes LLM or client shot type strings into ``('face', 'pip', 'broll', 'card')``."""
+    token = re.sub(r"[\s-]+", "_", str(raw_type or "").strip().lower())
+    if token in ("face", "talking_head", "head", "anchor", "speaker", "camera"):
+        return "face"
+    if token in ("pip", "corner_head", "corner", "picture_in_picture", "cutaway_pip"):
+        return "pip"
+    if token in ("broll", "b_roll", "cutaway", "visual", "footage", "clip", "still"):
+        return "broll"
+    if token in (
+        "card",
+        "quote",
+        "stat",
+        "quote_card",
+        "stat_card",
+        "number_card",
+        "graphic",
+        "overlay",
+    ):
+        return "card"
+    return "broll"
+
+
+def _normalize_beat_shots(
+    raw_shots: Any,
+    *,
+    beat_index: int,
+    beat_text: str,
+    require_explicit: bool,
+) -> list[dict[str, str]]:
+    fallback_cue = sanitize_plain_ascii(beat_text, strip_throat_clearing=False, max_chars=96)
+    if isinstance(raw_shots, list):
+        parsed_shots: list[dict[str, str]] = []
+        for entry in raw_shots:
+            if isinstance(entry, dict):
+                raw_t = entry.get("type") if entry.get("type") is not None else entry.get("shot_type")
+                shot_type = normalize_shot_type(raw_t)
+                raw_cue = str(
+                    entry.get("prompt")
+                    or entry.get("cue")
+                    or entry.get("caption")
+                    or entry.get("headline")
+                    or ""
+                )
+                cue = sanitize_plain_ascii(raw_cue, strip_throat_clearing=False, max_chars=120)
+                if not cue:
+                    cue = fallback_cue
+                parsed_shots.append({"type": shot_type, "prompt": cue})
+            elif isinstance(entry, str) and entry.strip():
+                parsed_shots.append(
+                    {"type": normalize_shot_type(entry), "prompt": fallback_cue}
+                )
+            if len(parsed_shots) >= 3:
+                break
+        if parsed_shots:
+            return parsed_shots
+
+    if require_explicit:
+        raise RuntimeError(f"AI response beat {beat_index} missing non-empty shots list")
+
+    default_types = DEFAULT_BEAT_SHOT_TYPES[beat_index % len(DEFAULT_BEAT_SHOT_TYPES)]
+    return [{"type": st, "prompt": fallback_cue} for st in default_types]
+
+
+def _build_beat_dict(
+    idx: int,
+    label: str,
+    start_sec: int,
+    end_sec: int,
+    text: str,
+    shots: list[dict[str, str]],
+) -> dict[str, Any]:
+    return {
+        "id": f"beat_{idx}",
+        "label": label,
+        "start_sec": start_sec,
+        "end_sec": end_sec,
+        "window": f"{start_sec}-{end_sec}s",
+        "text": text,
+        "shots": shots,
+    }
+
+
 def _extract_llm_overrides(payload: dict[str, Any]) -> tuple[str | None, str | None]:
     raw_provider = payload.get("llm_provider")
     if raw_provider is not None:
@@ -751,6 +936,10 @@ class DraftPassEngine:
             self._llm_router = None
         self._transcribe_runner = transcribe_runner
 
+    @property
+    def llm_router(self) -> LlmRouter | None:
+        return self._llm_router
+
     def _call_llm(
         self,
         system_prompt: str,
@@ -789,19 +978,25 @@ class DraftPassEngine:
             }
 
         assert self._llm_router is not None
+        router_stage = stage if stage in ALL_STAGES else "draft.arc"
         complete_kwargs: dict[str, Any] = {
             "llm_provider": llm_provider,
             "llm_model": llm_model,
-            "max_tokens": max_tokens or STAGE_DEFAULT_MAX_TOKENS.get(stage, 1024),
+            "max_tokens": max_tokens or STAGE_DEFAULT_MAX_TOKENS.get(router_stage, 1024),
         }
         if self._llm_timeout_sec is not None:
             complete_kwargs["timeout_sec"] = self._llm_timeout_sec
-        res = self._llm_router.complete(
-            stage,
-            system_prompt,
-            user_prompt,
-            **complete_kwargs,
-        )
+        try:
+            res = self._llm_router.complete(
+                router_stage,
+                system_prompt,
+                user_prompt,
+                **complete_kwargs,
+            )
+        except LlmProviderError as exc:
+            if router_stage != stage:
+                exc.stage = stage
+            raise
         return res.text, res.llm_meta
 
     # 1. POST /v1/draft/transcribe
@@ -849,6 +1044,7 @@ class DraftPassEngine:
         if not isinstance(payload, dict):
             raise ValueError("Angles request body must be a JSON object")
         llm_provider, llm_model = _extract_llm_overrides(payload)
+        tone, tone_explicit = normalize_draft_tone(payload.get("tone"))
         seed_raw = payload.get("seed_transcript")
         if not isinstance(seed_raw, str) or not seed_raw.strip():
             raise ValueError("seed_transcript must be a non-empty string")
@@ -862,13 +1058,16 @@ class DraftPassEngine:
         )
         user_prompt = (
             f"SEED TRANSCRIPT:\n{seed}\n"
+            f"{_format_tone_block(tone)}"
             f"{_format_steering_block(steering)}\n"
             "Extract:\n"
-            "1. extracted_angles: 2 to 3 concrete claims directly parsed from SEED TRANSCRIPT. "
+            "1. extracted_angles: 2 to 3 concrete claims directly parsed from SEED TRANSCRIPT, "
+            f"framed in the requested {tone} tone. "
             "Each item has id ('ex_1', 'ex_2', 'ex_3'), label (2 to 5 words), and preview "
             "(one crisp plain-ASCII concrete argument sentence).\n"
             "2. blindspots: exactly 3 structural blindspots ABSENT from SEED TRANSCRIPT "
-            "(for example: concrete failure mode, latency/cost receipt, inverted premise). "
+            "(for example: concrete failure mode, latency/cost receipt, inverted premise), "
+            f"framed to sharpen a {tone} video. "
             "Each item has id ('bs_1', 'bs_2', 'bs_3'), label (2 to 5 words), and preview "
             "(one crisp plain-ASCII concrete argument this angle injects).\n\n"
             "Return STRICT JSON ONLY with this exact schema:\n"
@@ -904,11 +1103,14 @@ class DraftPassEngine:
                 blindspots = self._normalize_angle_items(
                     parsed.get("blindspots"), prefix="bs", min_count=3, max_count=3
                 )
-                return {
+                out_res: dict[str, Any] = {
                     "extracted_angles": extracted,
                     "blindspots": blindspots,
                     "llm_meta": last_meta,
                 }
+                if tone_explicit:
+                    out_res["tone"] = tone
+                return out_res
             except RuntimeError as exc:
                 last_err = exc
         raise LlmProviderError(
@@ -919,16 +1121,56 @@ class DraftPassEngine:
             status_code=502,
         )
 
-    # 2b. POST /v1/draft/arc
-    def arc(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Proposes a 4-beat spoken arc (HOOK / DETAIL / SHIFT / PAYOFF) sized to ``target_sec``.
+    def _parse_four_beat_outline(
+        self,
+        raw_beats: Any,
+        windows: Sequence[tuple[int, int]],
+        *,
+        require_explicit_shots: bool,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(raw_beats, list):
+            raise RuntimeError("AI outline response missing beats list")
+        parsed_entries: list[tuple[str, Any]] = []
+        for entry in raw_beats:
+            if isinstance(entry, dict):
+                raw_txt = entry.get("text") or entry.get("spoken_text") or entry.get("line") or ""
+                txt = sanitize_plain_ascii(str(raw_txt), strip_throat_clearing=True)
+                if txt:
+                    parsed_entries.append((txt, entry.get("shots")))
+            elif isinstance(entry, str):
+                txt = sanitize_plain_ascii(entry, strip_throat_clearing=True)
+                if txt:
+                    parsed_entries.append((txt, None))
+            if len(parsed_entries) >= len(ARC_BEAT_LABELS):
+                break
+        if len(parsed_entries) < len(ARC_BEAT_LABELS):
+            raise RuntimeError(
+                f"AI outline returned {len(parsed_entries)} beats, expected {len(ARC_BEAT_LABELS)}"
+            )
+        out_beats: list[dict[str, Any]] = []
+        for idx, (label, (lo, hi), (txt, raw_shots)) in enumerate(
+            zip(ARC_BEAT_LABELS, windows, parsed_entries[: len(ARC_BEAT_LABELS)])
+        ):
+            shots = _normalize_beat_shots(
+                raw_shots,
+                beat_index=idx,
+                beat_text=txt,
+                require_explicit=require_explicit_shots,
+            )
+            out_beats.append(_build_beat_dict(idx, label, lo, hi, txt, shots))
+        return out_beats
 
-        With ``reroll_index`` + ``existing_beats`` only that one beat is rewritten; every other
-        beat is returned verbatim.
+    # 2b. POST /v1/draft/arc (& /v1/draft/reroll-beat)
+    def arc(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Proposes a 4-beat spoken arc (HOOK / DETAIL / SHIFT / PAYOFF) + shot plan sized to ``target_sec``.
+
+        With ``reroll_index`` + ``existing_beats`` only that one beat (and its shots) is rewritten;
+        every other beat is returned verbatim.
         """
         if not isinstance(payload, dict):
             raise ValueError("Arc request body must be a JSON object")
         llm_provider, llm_model = _extract_llm_overrides(payload)
+        tone, _ = normalize_draft_tone(payload.get("tone"))
         seed_raw = payload.get("seed_transcript")
         if not isinstance(seed_raw, str) or not seed_raw.strip():
             raise ValueError("seed_transcript must be a non-empty string")
@@ -946,8 +1188,11 @@ class DraftPassEngine:
 
         reroll_raw = payload.get("reroll_index")
         existing: list[str] = []
+        existing_shots: list[list[dict[str, str]] | None] = []
         reroll_index: int | None = None
         if reroll_raw is not None:
+            if isinstance(reroll_raw, bool):
+                raise ValueError("reroll_index must be an integer")
             try:
                 reroll_index = int(reroll_raw)
             except (TypeError, ValueError) as exc:
@@ -957,12 +1202,51 @@ class DraftPassEngine:
                 raise ValueError(
                     f"existing_beats must list exactly {len(ARC_BEAT_LABELS)} beat texts when rerolling"
                 )
-            existing = [sanitize_plain_ascii(str(t or ""), strip_throat_clearing=False) for t in raw_existing]
+            raw_existing_shots = payload.get("existing_beat_shots")
+            if raw_existing_shots is not None and (
+                not isinstance(raw_existing_shots, list)
+                or len(raw_existing_shots) != len(ARC_BEAT_LABELS)
+            ):
+                raise ValueError(
+                    f"existing_beat_shots must list {len(ARC_BEAT_LABELS)} shot lists when provided"
+                )
+            for idx, item in enumerate(raw_existing):
+                if isinstance(item, dict):
+                    txt = sanitize_plain_ascii(
+                        str(item.get("text") or ""), strip_throat_clearing=False
+                    )
+                    item_shots_raw = item.get("shots")
+                else:
+                    txt = sanitize_plain_ascii(str(item or ""), strip_throat_clearing=False)
+                    item_shots_raw = (
+                        raw_existing_shots[idx] if isinstance(raw_existing_shots, list) else None
+                    )
+                existing.append(txt)
+                if item_shots_raw is not None:
+                    existing_shots.append(
+                        _normalize_beat_shots(
+                            item_shots_raw,
+                            beat_index=idx,
+                            beat_text=txt or ARC_BEAT_LABELS[idx],
+                            require_explicit=False,
+                        )
+                    )
+                else:
+                    existing_shots.append(None)
             if not 0 <= reroll_index < len(ARC_BEAT_LABELS):
                 raise ValueError("reroll_index out of range")
 
+        shot_plan_instructions = (
+            "SHOT PLAN REQUIREMENT (derived directly from the idea):\n"
+            "Include 'shots' (1 to 3 items) on each beat. Allowed shot 'type' values:\n"
+            "- 'face': full talking head on camera (prompt: brief camera/delivery cue)\n"
+            "- 'pip': corner talking head over full-frame B-roll (prompt: concrete visual scene)\n"
+            "- 'broll': full-frame B-roll visual cutaway (prompt: concrete visual scene/object)\n"
+            "- 'card': quote, metric, or key claim card (prompt: concise card text or figure)\n"
+        )
         system_prompt = (
-            "You outline short spoken-video scripts as a fixed 4-beat arc for a solo creator.\n"
+            "You outline short spoken-video scripts as a fixed 4-beat arc with a concrete shot plan "
+            "for a solo creator.\n"
             + STYLE_CONSTRAINTS_SYSTEM_BLOCK
         )
         angle_block = ("SELECTED ANGLES TO COVER: " + " | ".join(angles) + "\n") if angles else ""
@@ -972,20 +1256,34 @@ class DraftPassEngine:
         )
         if reroll_index is None:
             user_prompt = (
-                f"SEED VOICE NOTE:\n{seed}\n{angle_block}{_format_steering_block(steering)}\n"
+                f"SEED VOICE NOTE:\n{seed}\n"
+                f"{_format_tone_block(tone)}"
+                f"{angle_block}{_format_steering_block(steering)}\n"
                 f"Target runtime {target_sec}s (about {word_budget} spoken words total).\n"
-                f"Write ONE plain-ASCII sentence (6 to 14 words) for each beat:\n{beat_spec}\n\n"
-                'Return STRICT JSON ONLY: {"beats":["hook","detail","shift","payoff"]}'
+                f"Write ONE plain-ASCII sentence (6 to 14 words) in the {tone} tone for each beat, "
+                f"together with 1 to 3 concrete visual shots per beat:\n{beat_spec}\n\n"
+                f"{shot_plan_instructions}\n"
+                "Return STRICT JSON ONLY:\n"
+                '{"beats":['
+                '{"label":"HOOK","text":"...","shots":[{"type":"face","prompt":"..."},{"type":"pip","prompt":"..."}]},'
+                '{"label":"DETAIL","text":"...","shots":[{"type":"pip","prompt":"..."},{"type":"broll","prompt":"..."}]},'
+                '{"label":"SHIFT","text":"...","shots":[{"type":"broll","prompt":"..."},{"type":"pip","prompt":"..."}]},'
+                '{"label":"PAYOFF","text":"...","shots":[{"type":"face","prompt":"..."},{"type":"card","prompt":"..."}]}'
+                "]}"
             )
         else:
             label = ARC_BEAT_LABELS[reroll_index]
             current = "\n".join(f"{ARC_BEAT_LABELS[i]}: {t}" for i, t in enumerate(existing))
             user_prompt = (
-                f"SEED VOICE NOTE:\n{seed}\n{angle_block}{_format_steering_block(steering)}\n"
+                f"SEED VOICE NOTE:\n{seed}\n"
+                f"{_format_tone_block(tone)}"
+                f"{angle_block}{_format_steering_block(steering)}\n"
                 f"CURRENT ARC:\n{current}\n"
-                f"Rewrite ONLY the {label} beat ({ARC_BEAT_PURPOSE[label]}) as one new plain-ASCII "
-                f"sentence (6 to 14 words) that differs clearly from: {existing[reroll_index]}\n\n"
-                'Return STRICT JSON ONLY: {"beat":"..."}'
+                f"Rewrite ONLY the {label} beat ({ARC_BEAT_PURPOSE[label]}) in the {tone} tone as one new "
+                f"plain-ASCII sentence (6 to 14 words) that differs clearly from: {existing[reroll_index]}\n"
+                f"Also propose 1 to 3 concrete shots for this rewritten {label} beat.\n"
+                f"{shot_plan_instructions}\n"
+                'Return STRICT JSON ONLY: {"beat":"...","shots":[{"type":"broll","prompt":"..."}]}'
             )
 
         stage = "draft.arc"
@@ -994,44 +1292,66 @@ class DraftPassEngine:
         for attempt in range(2):
             prompt = user_prompt
             if attempt > 0:
-                prompt += "\nCORRECTION: Return the exact JSON schema with non-empty sentences."
+                prompt += (
+                    "\nCORRECTION: Return the exact JSON schema with non-empty beat text AND "
+                    "non-empty 'shots' list (1 to 3 items with 'type' in face|pip|broll|card and 'prompt')."
+                )
             content, last_meta = self._call_llm(
                 system_prompt,
                 prompt,
                 stage=stage,
                 llm_provider=llm_provider,
                 llm_model=llm_model,
-                max_tokens=1024,
+                max_tokens=1280,
             )
             try:
                 if reroll_index is None:
                     parsed = _extract_first_json_object(content, required_keys=("beats",))
-                    raw_beats = parsed.get("beats")
-                    if not isinstance(raw_beats, list):
-                        raise RuntimeError("AI arc response missing beats list")
-                    texts = [
-                        sanitize_plain_ascii(str(b), strip_throat_clearing=True)
-                        for b in raw_beats
-                        if isinstance(b, str)
-                    ]
-                    texts = [t for t in texts if t]
-                    if len(texts) < len(ARC_BEAT_LABELS):
-                        raise RuntimeError(f"AI arc returned {len(texts)} beats, expected 4")
-                    texts = texts[: len(ARC_BEAT_LABELS)]
+                    beats_out = self._parse_four_beat_outline(
+                        parsed.get("beats"),
+                        windows,
+                        require_explicit_shots=(attempt == 0),
+                    )
                 else:
                     parsed = _extract_first_json_object(content, required_keys=("beat",))
-                    new_text = sanitize_plain_ascii(str(parsed.get("beat") or ""), strip_throat_clearing=True)
+                    raw_beat_val = parsed.get("beat")
+                    raw_reroll_shots = parsed.get("shots")
+                    if isinstance(raw_beat_val, dict):
+                        new_text = sanitize_plain_ascii(
+                            str(raw_beat_val.get("text") or ""), strip_throat_clearing=True
+                        )
+                        if raw_reroll_shots is None:
+                            raw_reroll_shots = raw_beat_val.get("shots")
+                    else:
+                        new_text = sanitize_plain_ascii(
+                            str(raw_beat_val or ""), strip_throat_clearing=True
+                        )
                     if not new_text:
                         raise RuntimeError("AI arc reroll returned an empty beat")
-                    texts = list(existing)
-                    texts[reroll_index] = new_text
+                    new_shots = _normalize_beat_shots(
+                        raw_reroll_shots,
+                        beat_index=reroll_index,
+                        beat_text=new_text,
+                        require_explicit=(attempt == 0),
+                    )
+                    beats_out = []
+                    for idx, (lbl, (lo, hi)) in enumerate(zip(ARC_BEAT_LABELS, windows)):
+                        if idx == reroll_index:
+                            beats_out.append(_build_beat_dict(idx, lbl, lo, hi, new_text, new_shots))
+                        else:
+                            kept_txt = existing[idx]
+                            kept_shots = existing_shots[idx] or _normalize_beat_shots(
+                                None,
+                                beat_index=idx,
+                                beat_text=kept_txt or lbl,
+                                require_explicit=False,
+                            )
+                            beats_out.append(_build_beat_dict(idx, lbl, lo, hi, kept_txt, kept_shots))
                 return {
                     "target_sec": target_sec,
                     "word_budget": word_budget,
-                    "beats": [
-                        {"label": label, "start_sec": lo, "end_sec": hi, "text": text}
-                        for label, (lo, hi), text in zip(ARC_BEAT_LABELS, windows, texts)
-                    ],
+                    "tone": tone,
+                    "beats": beats_out,
                     "llm_meta": last_meta,
                 }
             except RuntimeError as exc:
@@ -1040,6 +1360,225 @@ class DraftPassEngine:
             str(last_err or "Arc pass failed to return a valid 4-beat arc."),
             provider=last_meta["provider"],
             stage=stage,
+            model=last_meta.get("model"),
+            status_code=502,
+        )
+
+    # 2c. POST /v1/draft/reroll-beat
+    def reroll_beat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Dedicated single-beat reroll entry point delegating to ``arc`` with ``reroll_index``."""
+        if not isinstance(payload, dict):
+            raise ValueError("Reroll-beat request body must be a JSON object")
+        merged = dict(payload)
+        if merged.get("reroll_index") is None and merged.get("beat_index") is not None:
+            merged["reroll_index"] = merged["beat_index"]
+        if merged.get("reroll_index") is None:
+            raise ValueError("reroll_index is required for reroll-beat")
+        return self.arc(merged)
+
+    # 2d. POST /v1/draft/followup
+    def followup(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Generates real LLM-authored 4-beat follow-up outlines (+ overview directions) from the user's last video."""
+        if not isinstance(payload, dict):
+            raise ValueError("Followup request body must be a JSON object")
+        llm_provider, llm_model = _extract_llm_overrides(payload)
+
+        raw_title = payload.get("last_title")
+        if not isinstance(raw_title, str) or not raw_title.strip():
+            raise ValueError("last_title must be a non-empty string")
+        last_title = sanitize_plain_ascii(raw_title.strip(), strip_throat_clearing=False, max_chars=160)
+
+        raw_transcript = payload.get("last_transcript")
+        if not isinstance(raw_transcript, str) or not raw_transcript.strip():
+            raise ValueError("last_transcript must be a non-empty string")
+        last_transcript = raw_transcript.strip()
+
+        raw_reply = payload.get("top_reply")
+        if raw_reply is not None and not isinstance(raw_reply, str):
+            raise ValueError("top_reply must be a string when provided")
+        top_reply = sanitize_plain_ascii(str(raw_reply or "").strip(), strip_throat_clearing=False, max_chars=240)
+
+        raw_angle = payload.get("angle")
+        if raw_angle is None or (isinstance(raw_angle, str) and not raw_angle.strip()):
+            angle = "overview"
+        elif isinstance(raw_angle, str):
+            angle = re.sub(r"[\s-]+", "_", raw_angle.strip().lower())
+        else:
+            raise ValueError(f"angle must be one of {list(VALID_FOLLOWUP_ANGLES)}")
+        if angle not in VALID_FOLLOWUP_ANGLES:
+            raise ValueError(f"angle must be one of {list(VALID_FOLLOWUP_ANGLES)}, got {raw_angle!r}")
+
+        default_tone = angle if angle in ("shitpost", "solarpunk") else DEFAULT_DRAFT_TONE
+        tone, _ = normalize_draft_tone(payload.get("tone"), default_tone=default_tone)
+
+        try:
+            target_sec = int(payload.get("target_sec") or ARC_DEFAULT_TARGET_SEC)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("target_sec must be an integer") from exc
+        if not 15 <= target_sec <= 180:
+            raise ValueError("target_sec must be between 15 and 180")
+        word_budget = int(round(target_sec * ARC_SPEAKING_WORDS_PER_SEC))
+        windows = _arc_windows(target_sec)
+
+        beat_spec = "\n".join(
+            f"- {lbl} ({lo}-{hi}s): {ARC_BEAT_PURPOSE[lbl]}"
+            for lbl, (lo, hi) in zip(ARC_BEAT_LABELS, windows)
+        )
+        reply_block = f"MOST ASKED IN REPLIES: {top_reply}\n" if top_reply else ""
+        shot_instructions = (
+            "Each beat MUST include 'shots': 1 to 3 objects "
+            '{"type":"face"|"pip"|"broll"|"card","prompt":"concise visual or card cue"} '
+            "grounded in this follow-up topic."
+        )
+        system_prompt = (
+            "You draft concrete 4-beat follow-up video outlines (HOOK, DETAIL, SHIFT, PAYOFF) "
+            "grounded directly in a creator's last published video and audience replies.\n"
+            + STYLE_CONSTRAINTS_SYSTEM_BLOCK
+        )
+
+        if angle == "overview":
+            user_prompt = (
+                f"LAST VIDEO TITLE: {last_title}\n"
+                f"LAST VIDEO TRANSCRIPT:\n{last_transcript}\n"
+                f"{reply_block}"
+                f"{_format_tone_block(tone)}\n"
+                f"Target follow-up runtime: {target_sec}s (~{word_budget} words).\n"
+                f"Beats structure:\n{beat_spec}\n"
+                f"{shot_instructions}\n\n"
+                "Generate:\n"
+                "1. 'answer_beats': 4 follow-up beats answering the audience reply question "
+                "(or sharpest unspoken question from the last video) in plain ASCII (6 to 16 words per beat).\n"
+                "2. 'directions': exactly 2 alternative themed follow-up split-panel directions:\n"
+                "   - id='shitpost', theme='SHITPOST', words='<short 4 to 6 word opening hook>', plus 4 'beats' in deadpan shitpost style\n"
+                "   - id='solarpunk', theme='SOLARPUNK', words='<short 4 to 6 word opening hook>', plus 4 'beats' in constructive solarpunk style\n\n"
+                "Return STRICT JSON ONLY:\n"
+                '{"answer_beats":[{"label":"HOOK","text":"...","shots":[{"type":"face","prompt":"..."}]}],'
+                '"directions":['
+                '{"id":"shitpost","theme":"SHITPOST","words":"...","beats":[{"label":"HOOK","text":"...","shots":[{"type":"pip","prompt":"..."}]}]},'
+                '{"id":"solarpunk","theme":"SOLARPUNK","words":"...","beats":[{"label":"HOOK","text":"...","shots":[{"type":"broll","prompt":"..."}]}]}'
+                "]}"
+            )
+            max_tok = 2048
+        else:
+            guidance = FOLLOWUP_ANGLE_GUIDANCE[angle]
+            user_prompt = (
+                f"LAST VIDEO TITLE: {last_title}\n"
+                f"LAST VIDEO TRANSCRIPT:\n{last_transcript}\n"
+                f"{reply_block}"
+                f"FOLLOW-UP ANGLE ({angle}): {guidance}\n"
+                f"{_format_tone_block(tone)}\n"
+                f"Target follow-up runtime: {target_sec}s (~{word_budget} words).\n"
+                f"Write ONE plain-ASCII sentence (6 to 16 words) + 1 to 3 concrete shots for each beat:\n"
+                f"{beat_spec}\n"
+                f"{shot_instructions}\n\n"
+                "Return STRICT JSON ONLY:\n"
+                '{"beats":['
+                '{"label":"HOOK","text":"...","shots":[{"type":"face","prompt":"..."},{"type":"pip","prompt":"..."}]},'
+                '{"label":"DETAIL","text":"...","shots":[{"type":"pip","prompt":"..."},{"type":"broll","prompt":"..."}]},'
+                '{"label":"SHIFT","text":"...","shots":[{"type":"broll","prompt":"..."},{"type":"pip","prompt":"..."}]},'
+                '{"label":"PAYOFF","text":"...","shots":[{"type":"face","prompt":"..."},{"type":"card","prompt":"..."}]}'
+                "]}"
+            )
+            max_tok = 1280
+
+        stage = "drafting"
+        last_err: Exception | None = None
+        last_meta: dict[str, Any] = {
+            "provider": llm_provider or "unknown",
+            "model": llm_model or self._llm_model,
+            "is_local": False,
+        }
+        for attempt in range(2):
+            prompt = user_prompt
+            if attempt > 0:
+                prompt += (
+                    "\nCORRECTION: Return complete STRICT JSON matching every required key, "
+                    "4 non-empty beats per outline, and 1 to 3 shots per beat."
+                )
+            content, last_meta = self._call_llm(
+                system_prompt,
+                prompt,
+                stage=stage,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                max_tokens=max_tok,
+            )
+            try:
+                if angle == "overview":
+                    parsed = _extract_first_json_object(content, required_keys=("directions",))
+                    raw_ans = parsed.get("answer_beats") or parsed.get("beats")
+                    answer_beats = self._parse_four_beat_outline(
+                        raw_ans, windows, require_explicit_shots=(attempt == 0)
+                    )
+                    raw_dirs = parsed.get("directions")
+                    if not isinstance(raw_dirs, list):
+                        raise RuntimeError("AI followup overview missing directions list")
+                    by_dir_id: dict[str, dict[str, Any]] = {}
+                    for entry in raw_dirs:
+                        if not isinstance(entry, dict):
+                            continue
+                        raw_id = re.sub(
+                            r"[\s-]+",
+                            "_",
+                            str(entry.get("id") or entry.get("theme") or "").strip().lower(),
+                        )
+                        if raw_id not in ("shitpost", "solarpunk") or raw_id in by_dir_id:
+                            continue
+                        words_raw = str(entry.get("words") or entry.get("hook") or "").strip()
+                        words_clean = sanitize_plain_ascii(
+                            words_raw, strip_throat_clearing=True, max_chars=72
+                        )
+                        if not words_clean:
+                            raise RuntimeError(f"AI followup direction '{raw_id}' missing words hook")
+                        dir_beats = self._parse_four_beat_outline(
+                            entry.get("beats"),
+                            windows,
+                            require_explicit_shots=(attempt == 0),
+                        )
+                        by_dir_id[raw_id] = {
+                            "id": raw_id,
+                            "theme": raw_id.upper(),
+                            "words": words_clean,
+                            "beats": dir_beats,
+                        }
+                    if "shitpost" not in by_dir_id or "solarpunk" not in by_dir_id:
+                        raise RuntimeError(
+                            "AI followup overview must include both 'shitpost' and 'solarpunk' directions"
+                        )
+                    directions_out = [by_dir_id["shitpost"], by_dir_id["solarpunk"]]
+                    return {
+                        "angle": "overview",
+                        "target_sec": target_sec,
+                        "word_budget": word_budget,
+                        "tone": tone,
+                        "beats": answer_beats,
+                        "answer_beats": answer_beats,
+                        "directions": directions_out,
+                        "llm_meta": last_meta,
+                    }
+                else:
+                    parsed = _extract_first_json_object(content, required_keys=("beats",))
+                    beats_out = self._parse_four_beat_outline(
+                        parsed.get("beats"),
+                        windows,
+                        require_explicit_shots=(attempt == 0),
+                    )
+                    return {
+                        "angle": angle,
+                        "target_sec": target_sec,
+                        "word_budget": word_budget,
+                        "tone": tone,
+                        "beats": beats_out,
+                        "answer_beats": beats_out if angle == "answer" else [],
+                        "directions": [],
+                        "llm_meta": last_meta,
+                    }
+            except RuntimeError as exc:
+                last_err = exc
+        raise LlmProviderError(
+            str(last_err or "Followup pass failed to return valid follow-up beats."),
+            provider=last_meta["provider"],
+            stage="draft.followup",
             model=last_meta.get("model"),
             status_code=502,
         )
@@ -1085,6 +1624,7 @@ class DraftPassEngine:
         if not isinstance(payload, dict):
             raise ValueError("Synthesize request body must be a JSON object")
         llm_provider, llm_model = _extract_llm_overrides(payload)
+        tone, tone_explicit = normalize_draft_tone(payload.get("tone"))
         seed_raw = payload.get("seed_transcript")
         if not isinstance(seed_raw, str) or not seed_raw.strip():
             raise ValueError("seed_transcript must be a non-empty string")
@@ -1119,10 +1659,11 @@ class DraftPassEngine:
         if slot is None:
             user_prompt = (
                 f"SEED TRANSCRIPT:\n{seed}\n"
+                f"{_format_tone_block(tone)}"
                 f"{angles_block}"
                 f"{_format_steering_block(steering)}"
                 f"{existing_block}\n"
-                "Write exactly 3 distinct plain-ASCII drafts (each <= 280 characters):\n"
+                f"Write exactly 3 distinct plain-ASCII drafts (each <= 280 characters) in the {tone} tone:\n"
                 "- Slot 0 posture_label='DIRECT': direct plain-spoken thesis stated plainly.\n"
                 "- Slot 1 posture_label='RECEIPT': concrete mechanism, operational cost, latency, or verifiable proof.\n"
                 "- Slot 2 posture_label='CONTRARIAN': challenge the default premise or name the concrete failure mode.\n"
@@ -1143,11 +1684,13 @@ class DraftPassEngine:
             }[target_posture]
             user_prompt = (
                 f"SEED TRANSCRIPT:\n{seed}\n"
+                f"{_format_tone_block(tone)}"
                 f"{angles_block}"
                 f"{_format_steering_block(steering)}"
                 f"{existing_block}\n"
-                f"Write exactly 1 fresh plain-ASCII draft (<= 280 characters) for posture_label='{target_posture}' "
-                f"({posture_guidance}). It MUST take a distinct angle and phrasing different from all EXISTING DRAFTS.\n\n"
+                f"Write exactly 1 fresh plain-ASCII draft (<= 280 characters) in the {tone} tone "
+                f"for posture_label='{target_posture}' ({posture_guidance}). "
+                "It MUST take a distinct angle and phrasing different from all EXISTING DRAFTS.\n\n"
                 "Return STRICT JSON ONLY:\n"
                 f'{{"candidates":[{{"posture_label":"{target_posture}","text":"..."}}]}}'
             )
@@ -1223,7 +1766,10 @@ class DraftPassEngine:
                             "AI synthesize slot refresh repeated an existing draft verbatim"
                         )
 
-                return {"candidates": out_candidates, "llm_meta": last_meta}
+                synth_res: dict[str, Any] = {"candidates": out_candidates, "llm_meta": last_meta}
+                if tone_explicit:
+                    synth_res["tone"] = tone
+                return synth_res
             except RuntimeError as exc:
                 last_err = exc
         raise LlmProviderError(
@@ -1244,6 +1790,7 @@ class DraftPassEngine:
         if not isinstance(payload, dict):
             raise ValueError("Synthesize-script request body must be a JSON object")
         llm_provider, llm_model = _extract_llm_overrides(payload)
+        tone, _ = normalize_draft_tone(payload.get("tone"))
         seed_raw = payload.get("seed_transcript")
         if not isinstance(seed_raw, str) or not seed_raw.strip():
             raise ValueError("seed_transcript must be a non-empty string")
@@ -1271,12 +1818,15 @@ class DraftPassEngine:
             ) + "\n"
         angle_block = ("ANGLES TO COVER: " + " | ".join(angles) + "\n") if angles else ""
         user_prompt = (
-            f"SEED VOICE NOTE:\n{seed}\n{arc_block}{angle_block}{_format_steering_block(steering)}\n"
-            f"Write 3 distinct versions of a {target_sec}s script, each about {word_budget} spoken words, "
-            f"each exactly {beat_count} paragraphs (one per beat):\n"
-            "- posture_label='DIRECT': states the argument plainly.\n"
-            "- posture_label='PUNCHY': short hard-hitting sentences.\n"
-            "- posture_label='STORY': told through a concrete moment.\n\n"
+            f"SEED VOICE NOTE:\n{seed}\n"
+            f"{_format_tone_block(tone)}"
+            f"{arc_block}{angle_block}{_format_steering_block(steering)}\n"
+            f"Write 3 distinct versions of a {target_sec}s script in the {tone} tone, "
+            f"each about {word_budget} spoken words, each exactly {beat_count} paragraphs (one per beat). "
+            f"All 3 versions MUST genuinely embody the {tone} tone while differing in pacing:\n"
+            f"- posture_label='DIRECT': states the {tone} argument plainly.\n"
+            f"- posture_label='PUNCHY': short hard-hitting {tone} sentences.\n"
+            f"- posture_label='STORY': delivers the {tone} point through a concrete moment.\n\n"
             "Return STRICT JSON ONLY:\n"
             '{"versions":[{"posture_label":"DIRECT","paragraphs":["..."]},'
             '{"posture_label":"PUNCHY","paragraphs":["..."]},'
@@ -1350,6 +1900,7 @@ class DraftPassEngine:
                 return {
                     "target_sec": target_sec,
                     "word_budget": word_budget,
+                    "tone": tone,
                     "candidates": out,
                     "llm_meta": last_meta,
                 }
@@ -1363,11 +1914,16 @@ class DraftPassEngine:
             status_code=502,
         )
 
+    def script(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Alias for ``synthesize_script``."""
+        return self.synthesize_script(payload)
+
     # 4. POST /v1/draft/brush-swap
     def brush_swap(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Brush-swap request body must be a JSON object")
         llm_provider, llm_model = _extract_llm_overrides(payload)
+        tone, tone_explicit = normalize_draft_tone(payload.get("tone"))
         marked_raw = payload.get("marked_text")
         if not isinstance(marked_raw, str) or not marked_raw.strip():
             raise ValueError("marked_text must be a non-empty string")
@@ -1404,11 +1960,12 @@ class DraftPassEngine:
         user_prompt = (
             f"MARKED DRAFT:\n{marked_text}\n"
             f"TARGET SPAN TO REPLACE: {target_span}\n"
+            f"{_format_tone_block(tone)}"
             f"{_format_steering_block(steering)}\n"
             f"{nudge_block}"
-            f"Return {want_count} distinct, terse, plain-spoken ASCII replacement phrases for ONLY the "
-            "<replace>...</replace> span (not the full sentence). Option 1 must be the strongest "
-            "terse plain-spoken replacement; later options must be distinct alternatives. "
+            f"Return {want_count} distinct, terse, plain-spoken ASCII replacement phrases in the {tone} "
+            "tone for ONLY the <replace>...</replace> span (not the full sentence). Option 1 must be the "
+            "strongest terse plain-spoken replacement; later options must be distinct alternatives. "
             "No option should simply repeat the original target span.\n\n"
             "Return STRICT JSON ONLY: "
             + ('{"alternatives":["opt1","opt2","opt3"]}' if want_count == 3 else '{"alternatives":["opt1","opt2"]}')
@@ -1483,6 +2040,8 @@ class DraftPassEngine:
                 }
                 if nudge:
                     result["nudge"] = nudge
+                if tone_explicit:
+                    result["tone"] = tone
                 return result
             except RuntimeError as exc:
                 last_err = exc
@@ -1493,6 +2052,14 @@ class DraftPassEngine:
             model=last_meta.get("model"),
             status_code=502,
         )
+
+    def brush_nudge(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Dedicated brush-nudge entry point delegating to ``brush_swap``."""
+        if not isinstance(payload, dict):
+            raise ValueError("Brush-nudge request body must be a JSON object")
+        if not str(payload.get("nudge") or "").strip():
+            raise ValueError("nudge is required for brush_nudge")
+        return self.brush_swap(payload)
 
     # 5. POST /v1/draft/seam-heal
     def seam_heal(self, payload: dict[str, Any]) -> dict[str, Any]:
