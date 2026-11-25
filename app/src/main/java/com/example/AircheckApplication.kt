@@ -112,7 +112,8 @@ class AircheckContainer(context: Context) {
             DraftApiClient(
                 configuredRigUrl = url,
                 usbLoopbackUrl = usbUrl,
-                okHttpClient = okHttpClient
+                okHttpClient = okHttpClient,
+                lanFallbackUrl = if (url.startsWith("https://")) DEFAULT_MAC_RIG_LAN_URL else null
             )
         }
     }

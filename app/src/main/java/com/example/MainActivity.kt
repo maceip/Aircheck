@@ -56,6 +56,7 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) {
             applyIncomingHandoffOrAppFunctionIntent(intent)
         }
+        consumeStagedRigEndpointFile()
 
         setContent {
             AircheckApp(
@@ -65,10 +66,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        consumeStagedRigEndpointFile()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         applyIncomingHandoffOrAppFunctionIntent(intent)
+        consumeStagedRigEndpointFile()
+    }
+
+    private fun consumeStagedRigEndpointFile() {
+        val dir = getExternalFilesDir(null) ?: return
+        val marker = java.io.File(dir, RIG_ENDPOINT_BOOTSTRAP_FILE)
+        if (!marker.isFile) return
+        val candidate = runCatching { marker.readText(Charsets.UTF_8).trim() }.getOrDefault("")
+        runCatching { marker.delete() }
+        if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+            activityStudioViewModel.saveTailscaleRigUrl(candidate)
+            activityStudioViewModel.showToast("studio rig synced")
+        }
     }
 
     override fun onHandoffActivityDataRequested(
@@ -96,6 +115,7 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_HANDOFF_STAGE: String = "com.example.extra.HANDOFF_STAGE"
         const val EXTRA_HANDOFF_SEED_TEXT: String = "com.example.extra.HANDOFF_SEED_TEXT"
+        const val RIG_ENDPOINT_BOOTSTRAP_FILE: String = "rig_endpoint.txt"
     }
 }
 

@@ -412,7 +412,8 @@ class DraftApiClient(
     private val configuredRigUrl: String = DEFAULT_RIG_LAN_URL,
     private val usbLoopbackUrl: String = DEFAULT_RIG_USB_URL,
     private val okHttpClient: OkHttpClient = defaultOkHttpClient(),
-    private val healthProbeTimeoutMs: Long = DEFAULT_HEALTH_PROBE_TIMEOUT_MS
+    private val healthProbeTimeoutMs: Long = DEFAULT_HEALTH_PROBE_TIMEOUT_MS,
+    private val lanFallbackUrl: String? = null
 ) {
 
     private val json = Json {
@@ -1121,8 +1122,17 @@ class DraftApiClient(
 
     private fun buildCandidateBaseUrls(): List<String> {
         val ordered = LinkedHashSet<String>()
-        normalizeBaseUrlOrNull(usbLoopbackUrl)?.let { ordered += it }
-        normalizeBaseUrlOrNull(configuredRigUrl)?.let { ordered += it }
+        val configured = normalizeBaseUrlOrNull(configuredRigUrl)
+        val usb = normalizeBaseUrlOrNull(usbLoopbackUrl)
+        val skipDefaultUsb = usb == DEFAULT_RIG_USB_URL &&
+            configured != null &&
+            (configured.startsWith("http://127.0.0.1:") || configured.startsWith("http://localhost:")) &&
+            configured != DEFAULT_RIG_USB_URL
+        if (!skipDefaultUsb && usb != null) {
+            ordered += usb
+        }
+        configured?.let { ordered += it }
+        lanFallbackUrl?.let { normalizeBaseUrlOrNull(it) }?.let { ordered += it }
         return ordered.toList()
     }
 

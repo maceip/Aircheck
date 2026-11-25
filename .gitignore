@@ -21,3 +21,5 @@ node_modules/
 backend/*/lib/
 backend/*/dist/
 __pycache__/
+/aircheck-rig
+/.aircheck-rig/
