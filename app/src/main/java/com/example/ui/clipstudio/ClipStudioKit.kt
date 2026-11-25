@@ -1,5 +1,8 @@
 package com.example.ui.clipstudio
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,6 +19,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -26,6 +31,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -41,6 +47,8 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -60,32 +68,52 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.data.BreakingNewsStyle
+import kotlin.math.roundToInt
 
 // =============================================================================
-// Clip Studio v4 tokens (from Clip Studio Android v4 design handoff)
+// Clip Studio v5 tokens (soft neumorphic graphite on #141417 body, sunken #000 panels)
 // =============================================================================
 
 object Cs {
+    // v5 core surfaces
+    val Body = Color(0xFF141417)
+    val Raised = Color(0xFF1C1C21)
+    val Pressed = Color(0xFF17171B)
+    val Sheet = Color(0xFF1A1A1F)
+    val SunkenTrack = Color(0xFF101013)
+    val SunkenPanel = Color(0xFF000000)
+    val BusyFill = Color(0xFF26262C)
+
+    // Dividers & subtle rows
     val Black = Color(0xFF000000)
-    val Surface = Color(0xFF0A0A0D)
-    val Video = Color(0xFF0D0D10)
-    val Panel = Color(0xFF121215)
-    val Raised = Color(0xFF18181C)
-    val Sheet = Color(0xFF111113)
-    val Well = Color(0xFF070709)
-    val WellEdge = Color(0xFF1C1C22)
+    val Surface = Color(0xFF141417)
+    val Video = Color(0xFF000000)
+    val Panel = Color(0xFF141417)
+    val Well = Color(0xFF101013)
+    val WellEdge = Color(0xFF222228)
+    val RowDivider = Color(0xFF1A1A1E)
+    val ClauseDivider = Color(0xFF111114)
+    val ActiveClauseBg = Color(0xFF0A0A0D)
+    val BrollRow = Color(0xFF0D0D10)
     val Hairline = Color(0xFF2C2C32)
     val Pinned = Color(0xFF1E1E24)
     val Track = Color(0xFF1A1A1E)
+
+    // Ink & accents
     val Ink = Color(0xFFEBEBEF)
+    val InkSub = Color(0xFFC8C8CE)
     val InkBright = Color(0xFFF2F2F5)
     val White = Color(0xFFFFFFFF)
     val Muted = Color(0xFF8E8E96)
     val Dim = Color(0xFF4A4A52)
     val Pip = Color(0xFF5A5A66)
     val Red = Color(0xFFD71921)
+    val Voice = Color(0xFFD9381E)
+    val VoiceHi = Color(0xFFFF6B52)
     val Amber = Color(0xFFE6A100)
     val AmberBright = Color(0xFFFFB800)
+    val RepairFill = Color(0xFF2E2310)
+    val RepairHi = Color(0xFF6B5021)
 }
 
 val GeistFamily = FontFamily(
@@ -96,7 +124,9 @@ val GeistFamily = FontFamily(
 
 val GeistMonoFamily = FontFamily(
     Font(R.font.geist_mono, FontWeight.Normal, variationSettings = FontVariation.Settings(FontVariation.weight(400))),
-    Font(R.font.geist_mono, FontWeight.Medium, variationSettings = FontVariation.Settings(FontVariation.weight(500)))
+    Font(R.font.geist_mono, FontWeight.Medium, variationSettings = FontVariation.Settings(FontVariation.weight(500))),
+    Font(R.font.geist_mono, FontWeight.SemiBold, variationSettings = FontVariation.Settings(FontVariation.weight(600))),
+    Font(R.font.geist_mono, FontWeight.Bold, variationSettings = FontVariation.Settings(FontVariation.weight(700)))
 )
 
 val NdotFamily = FontFamily(Font(R.font.ndot47))
@@ -111,71 +141,162 @@ fun mono(size: TextUnit, color: Color = Cs.Ink, weight: FontWeight = FontWeight.
         fontFeatureSettings = "tnum, zero"
     )
 
-fun sans(size: TextUnit, color: Color = Cs.Ink, lineHeight: TextUnit = TextUnit.Unspecified, weight: FontWeight = FontWeight.Normal) =
-    TextStyle(fontFamily = GeistFamily, fontSize = size, lineHeight = lineHeight, fontWeight = weight, color = color)
+fun sans(
+    size: TextUnit,
+    color: Color = Cs.Ink,
+    lineHeight: TextUnit = TextUnit.Unspecified,
+    weight: FontWeight = FontWeight.Normal
+) = TextStyle(fontFamily = GeistFamily, fontSize = size, lineHeight = lineHeight, fontWeight = weight, color = color)
 
 fun ndot(size: TextUnit, color: Color = Cs.Ink) = TextStyle(fontFamily = NdotFamily, fontSize = size, color = color)
 
-val SectionLabelStyle = mono(10.sp, Cs.Muted, FontWeight.Medium, 0.06f)
+val SectionLabelStyle = mono(11.sp, Cs.Muted, FontWeight.Medium, 0.06f)
 
 // =============================================================================
-// Bevelled hardware keys
+// Soft neumorphic keys & sunken surfaces (v5)
 // =============================================================================
 
-/** Key colour roles: fill, top highlight, side, bottom lip, text. */
-enum class KeyRole(val fill: Color, val hi: Color, val side: Color, val lip: Color, val text: Color) {
-    STD(Color(0xFF25252B), Color(0xFF43434E), Color(0xFF2E2E36), Color(0xFF050507), Color(0xFFF2F2F5)),
-    COMMIT(Color(0xFFEBEBEF), Color(0xFFFFFFFF), Color(0xFFC9C9D1), Color(0xFF9E9EA8), Color(0xFF000000)),
-    VOICE(Color(0xFFD9381E), Color(0xFFFF6B52), Color(0xFFB02D17), Color(0xFF7A1B0C), Color(0xFFFFFFFF)),
-    REPAIR(Color(0xFF2E2310), Color(0xFF6B5021), Color(0xFFC88A14), Color(0xFF120D05), Color(0xFFFFB800)),
-    ACTIVE(Color(0xFFD4D4DC), Color(0xFFFFFFFF), Color(0xFFB4B4BE), Color(0xFF787882), Color(0xFF000000))
+enum class KeyRole(val fill: Color, val hi: Color, val border: Color, val text: Color) {
+    STD(Cs.Raised, Color(0x0AFFFFFF), Color(0x09FFFFFF), Cs.Ink),
+    DOWN(Cs.Pressed, Color(0x09FFFFFF), Color(0x59000000), Cs.White),
+    COMMIT(Cs.Ink, Cs.White, Color(0x26FFFFFF), Cs.Black),
+    VOICE(Cs.Voice, Cs.VoiceHi, Color(0x33FF6B52), Cs.White),
+    REPAIR(Cs.RepairFill, Cs.RepairHi, Color(0x406B5021), Cs.AmberBright),
+    ACTIVE(Cs.Ink, Cs.White, Color(0x26FFFFFF), Cs.Black)
 }
 
-private fun Modifier.keyBevel(role: KeyRole, pressed: Boolean, radius: Dp, enabled: Boolean, pip: Boolean = false): Modifier =
-    drawBehind {
-        val r = radius.toPx()
-        val px = 1.dp.toPx()
-        val lip = if (pressed) px else 2 * px
-        val fill = if (enabled) role.fill else role.fill.copy(alpha = 0.7f)
-        drawRoundRect(role.lip, cornerRadius = CornerRadius(r, r))
+fun Modifier.neumorphicSurface(
+    role: KeyRole,
+    pressed: Boolean = false,
+    radius: Dp = 14.dp,
+    enabled: Boolean = true,
+    accentBarColor: Color? = null
+): Modifier = drawBehind {
+    val r = radius.toPx()
+    val corner = CornerRadius(r, r)
+    val isSunken = pressed || role == KeyRole.DOWN
+    val effectiveRole = if (pressed && role == KeyRole.STD) KeyRole.DOWN else role
+    val fill = if (enabled) effectiveRole.fill else effectiveRole.fill.copy(alpha = 0.55f)
+
+    if (!isSunken) {
+        // Outer top-left soft highlight & bottom-right ambient shadow
         drawRoundRect(
-            role.side,
-            size = Size(size.width, size.height - lip),
-            cornerRadius = CornerRadius(r, r)
+            color = Color.White.copy(alpha = if (enabled) 0.04f else 0.015f),
+            topLeft = Offset((-1.5).dp.toPx(), (-1.5).dp.toPx()),
+            size = size,
+            cornerRadius = corner
         )
         drawRoundRect(
-            if (pressed) role.side else role.hi,
-            size = Size(size.width, (r + px).coerceAtMost(size.height - lip)),
-            cornerRadius = CornerRadius(r, r),
-            topLeft = Offset.Zero
+            color = Color.Black.copy(alpha = if (enabled) 0.55f else 0.25f),
+            topLeft = Offset(2.5.dp.toPx(), 3.5.dp.toPx()),
+            size = size,
+            cornerRadius = corner
         )
-        drawRoundRect(
-            fill,
-            topLeft = Offset(px, px),
-            size = Size(size.width - 2 * px, size.height - lip - px),
-            cornerRadius = CornerRadius((r - px).coerceAtLeast(0f), (r - px).coerceAtLeast(0f))
-        )
-        if (pip) {
-            val pipSize = 3.dp.toPx()
-            val inset = 5.dp.toPx()
-            drawRect(
-                color = if (role == KeyRole.ACTIVE) Cs.Dim else Cs.Pip,
-                topLeft = Offset(size.width - inset - pipSize, inset),
-                size = Size(pipSize, pipSize)
-            )
-        }
     }
 
-/** A tappable bevelled key. Disabled keys keep their footprint but dim text and ignore taps. */
+    drawRoundRect(color = fill, cornerRadius = corner)
+
+    if (isSunken) {
+        // Inner dark top-left & subtle bottom-right light rim
+        val sw = 1.5.dp.toPx()
+        drawRoundRect(
+            color = Color.Black.copy(alpha = 0.65f),
+            topLeft = Offset(sw / 2f, sw / 2f),
+            size = Size((size.width - sw).coerceAtLeast(0f), (size.height - sw).coerceAtLeast(0f)),
+            cornerRadius = CornerRadius((r - sw / 2f).coerceAtLeast(0f)),
+            style = Stroke(width = sw)
+        )
+        drawLine(
+            color = Color.White.copy(alpha = 0.035f),
+            start = Offset(r * 0.5f, size.height - 0.75.dp.toPx()),
+            end = Offset((size.width - r * 0.5f).coerceAtLeast(r * 0.5f), size.height - 0.75.dp.toPx()),
+            strokeWidth = 1.dp.toPx()
+        )
+    } else {
+        if (role == KeyRole.COMMIT || role == KeyRole.VOICE || role == KeyRole.REPAIR || role == KeyRole.ACTIVE) {
+            val inset = (r * 0.45f).coerceAtMost(14.dp.toPx())
+            drawLine(
+                color = if (enabled) effectiveRole.hi else effectiveRole.hi.copy(alpha = 0.35f),
+                start = Offset(inset, 1.dp.toPx()),
+                end = Offset((size.width - inset).coerceAtLeast(inset), 1.dp.toPx()),
+                strokeWidth = 1.dp.toPx()
+            )
+        }
+        drawRoundRect(
+            color = effectiveRole.border,
+            cornerRadius = corner,
+            style = Stroke(width = 1.dp.toPx())
+        )
+    }
+
+    if (accentBarColor != null) {
+        val barW = 3.dp.toPx()
+        val vInset = (size.height * 0.24f).coerceAtLeast(6.dp.toPx())
+        drawRoundRect(
+            color = accentBarColor,
+            topLeft = Offset(4.dp.toPx(), vInset),
+            size = Size(barW, (size.height - 2f * vInset).coerceAtLeast(6f)),
+            cornerRadius = CornerRadius(barW / 2f, barW / 2f)
+        )
+    }
+}
+
+/** Sunken black panel (#000000, radius 18dp) for outlines, scripts, video monitors, and inputs. */
+fun Modifier.sunkenPanel(radius: Dp = 18.dp, fill: Color = Cs.SunkenPanel): Modifier =
+    clip(RoundedCornerShape(radius))
+        .background(fill)
+        .drawBehind {
+            val r = radius.toPx()
+            val sw = 1.5.dp.toPx()
+            drawRoundRect(
+                color = Color.Black.copy(alpha = 0.85f),
+                topLeft = Offset(sw / 2f, sw / 2f),
+                size = Size((size.width - sw).coerceAtLeast(0f), (size.height - sw).coerceAtLeast(0f)),
+                cornerRadius = CornerRadius((r - sw / 2f).coerceAtLeast(0f)),
+                style = Stroke(width = sw)
+            )
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.035f),
+                cornerRadius = CornerRadius(r, r),
+                style = Stroke(width = 1.dp.toPx())
+            )
+        }
+
+/** Raised card / sheet container (#1A1A1F). */
+fun Modifier.raisedCard(radius: Dp = 20.dp): Modifier =
+    drawBehind {
+        val r = radius.toPx()
+        val corner = CornerRadius(r, r)
+        drawRoundRect(
+            color = Color.White.copy(alpha = 0.04f),
+            topLeft = Offset((-2).dp.toPx(), (-2).dp.toPx()),
+            size = size,
+            cornerRadius = corner
+        )
+        drawRoundRect(
+            color = Color.Black.copy(alpha = 0.65f),
+            topLeft = Offset(3.dp.toPx(), 5.dp.toPx()),
+            size = size,
+            cornerRadius = corner
+        )
+        drawRoundRect(color = Cs.Sheet, cornerRadius = corner)
+        drawRoundRect(
+            color = Color.White.copy(alpha = 0.035f),
+            cornerRadius = corner,
+            style = Stroke(width = 1.dp.toPx())
+        )
+    }.clip(RoundedCornerShape(radius))
+
+/** Soft neumorphic tappable key. */
 @Composable
 fun CsKey(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     role: KeyRole = KeyRole.STD,
     enabled: Boolean = true,
-    radius: Dp = 4.dp,
+    radius: Dp = 14.dp,
     pip: Boolean = false,
-    horizontalPadding: Dp = 12.dp,
+    horizontalPadding: Dp = 14.dp,
     contentAlignment: Arrangement.Horizontal = Arrangement.Center,
     textColor: Color? = null,
     content: @Composable RowScope.(Color) -> Unit
@@ -184,8 +305,8 @@ fun CsKey(
     val pressed by interaction.collectIsPressedAsState()
     Row(
         modifier = modifier
-            .offset(y = if (pressed) 1.dp else 0.dp)
-            .keyBevel(role, pressed, radius, enabled, pip = pip)
+            .offset(y = if (pressed && enabled) 1.dp else 0.dp)
+            .neumorphicSurface(role = role, pressed = pressed && enabled, radius = radius, enabled = enabled)
             .clip(RoundedCornerShape(radius))
             .clickable(
                 interactionSource = interaction,
@@ -198,7 +319,8 @@ fun CsKey(
         horizontalArrangement = contentAlignment,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        val tint = (textColor ?: role.text).let { if (enabled) it else Cs.Dim }
+        val baseTint = textColor ?: if (pressed && role == KeyRole.STD) Cs.White else role.text
+        val tint = if (enabled) baseTint else Cs.Dim
         content(tint)
     }
 }
@@ -211,11 +333,12 @@ fun CsKeyLabel(
     modifier: Modifier = Modifier,
     role: KeyRole = KeyRole.STD,
     enabled: Boolean = true,
-    size: TextUnit = 12.sp,
+    radius: Dp = 14.dp,
+    size: TextUnit = 13.sp,
     weight: FontWeight = FontWeight.Normal,
     textColor: Color? = null,
     pip: Boolean = false,
-    horizontalPadding: Dp = 10.dp,
+    horizontalPadding: Dp = 12.dp,
     contentAlignment: Arrangement.Horizontal? = null,
     trailingArrow: Boolean = false
 ) {
@@ -224,6 +347,7 @@ fun CsKeyLabel(
         modifier = modifier,
         role = role,
         enabled = enabled,
+        radius = radius,
         pip = pip,
         horizontalPadding = horizontalPadding,
         textColor = textColor,
@@ -231,13 +355,165 @@ fun CsKeyLabel(
     ) { tint ->
         Text(
             label,
-            style = mono(size, tint, weight, 0.02f),
+            style = mono(size, tint, weight),
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis,
-            modifier = if (trailingArrow) Modifier.weight(1f, fill = false).padding(end = 4.dp) else Modifier
+            modifier = if (trailingArrow) Modifier.weight(1f, fill = false).padding(end = 6.dp) else Modifier
         )
-        if (trailingArrow) Text("->", style = mono(size, tint, weight), maxLines = 1, softWrap = false)
+        if (trailingArrow) Text("→", style = mono(size, tint, weight), maxLines = 1, softWrap = false)
+    }
+}
+
+/** 44x44dp (or custom size) square/round icon utility key. */
+@Composable
+fun CsIconKey(
+    icon: ImageVector,
+    contentDescription: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    active: Boolean = false,
+    size: Dp = 44.dp,
+    radius: Dp = 12.dp,
+    iconSize: Dp = 22.dp,
+    tintOverride: Color? = null
+) {
+    val role = if (active) KeyRole.DOWN else KeyRole.STD
+    CsKey(
+        onClick = onClick,
+        modifier = modifier.size(size),
+        role = role,
+        enabled = enabled,
+        radius = radius,
+        horizontalPadding = 0.dp
+    ) { tint ->
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = if (enabled) (tintOverride ?: tint) else Cs.Dim,
+            modifier = Modifier.size(iconSize)
+        )
+    }
+}
+
+/** 44dp rounded pill (radius 22dp) with commit-style active fill (#EBEBEF on black). */
+@Composable
+fun CsPill(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    accentBarColor: Color? = null,
+    enabled: Boolean = true,
+    height: Dp = 44.dp
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val role = if (selected) KeyRole.COMMIT else KeyRole.STD
+    Row(
+        modifier = modifier
+            .height(height)
+            .offset(y = if (pressed && enabled) 1.dp else 0.dp)
+            .neumorphicSurface(
+                role = role,
+                pressed = pressed && enabled,
+                radius = height / 2,
+                enabled = enabled,
+                accentBarColor = if (!selected) accentBarColor else null
+            )
+            .clip(RoundedCornerShape(height / 2))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick
+            )
+            .padding(
+                start = if (!selected && accentBarColor != null) 14.dp else 13.dp,
+                end = 14.dp
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        val fg = if (!enabled) Cs.Dim else role.text
+        if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        Text(
+            text = label,
+            style = mono(13.sp, fg, if (selected) FontWeight.Medium else FontWeight.Normal),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** Sunken #101013 segmented track (radius 16dp, 5dp padding, 5dp gap). */
+@Composable
+fun CsSegmentedRow(
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .sunkenPanel(radius = 16.dp, fill = Cs.SunkenTrack)
+            .padding(5.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        content = content
+    )
+}
+
+/** Individual segment inside [CsSegmentedRow]. Active segment is raised (#1C1C21); inactive is bare (#8E8E96). */
+@Composable
+fun RowScope.CsSegment(
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    height: Dp = 44.dp,
+    enabled: Boolean = true,
+    content: @Composable RowScope.(Color) -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    Row(
+        modifier = modifier
+            .weight(1f)
+            .height(height)
+            .then(
+                if (selected) {
+                    Modifier.neumorphicSurface(role = KeyRole.STD, radius = 12.dp, enabled = enabled)
+                } else {
+                    Modifier
+                }
+            )
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Tab,
+                onClick = onClick
+            )
+            .padding(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val tint = when {
+            !enabled -> Cs.Dim
+            selected -> Cs.Ink
+            else -> Cs.Muted
+        }
+        content(tint)
     }
 }
 
@@ -254,6 +530,7 @@ fun CsHoldKey(
     role: KeyRole = KeyRole.VOICE,
     enabled: Boolean = true,
     held: Boolean = false,
+    radius: Dp = 18.dp,
     size: TextUnit = 11.sp
 ) {
     val press by rememberUpdatedState(onPress)
@@ -261,7 +538,8 @@ fun CsHoldKey(
     Row(
         modifier = modifier
             .offset(y = if (held) 1.dp else 0.dp)
-            .keyBevel(role, held, 4.dp, enabled)
+            .neumorphicSurface(role = role, pressed = held, radius = radius, enabled = enabled)
+            .clip(RoundedCornerShape(radius))
             .semantics {
                 this.role = Role.Button
                 onClick(label = label) {
@@ -278,13 +556,13 @@ fun CsHoldKey(
                     release()
                 }
             }
-            .padding(horizontal = 6.dp),
+            .padding(horizontal = 10.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             label,
-            style = mono(size, if (enabled) role.text else Cs.Dim, tracking = 0.02f),
+            style = mono(size, if (enabled) role.text else Cs.Dim),
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis
@@ -292,26 +570,368 @@ fun CsHoldKey(
     }
 }
 
-/** Pill chip; [on] uses the ACTIVE key role. Only [outlined] tone rules show the 4dp square glyph. */
+/** 92x64dp press-and-hold dock voice key (`mic` icon over 11sp mono label). */
+@Composable
+fun CsVoiceDockKey(
+    label: String,
+    icon: ImageVector,
+    held: Boolean,
+    enabled: Boolean,
+    onPress: () -> Unit,
+    onRelease: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val press by rememberUpdatedState(onPress)
+    val release by rememberUpdatedState(onRelease)
+    Column(
+        modifier = modifier
+            .width(92.dp)
+            .height(64.dp)
+            .offset(y = if (held) 1.dp else 0.dp)
+            .neumorphicSurface(role = KeyRole.VOICE, pressed = held, radius = 18.dp, enabled = enabled)
+            .clip(RoundedCornerShape(18.dp))
+            .semantics(mergeDescendants = true) {
+                this.role = Role.Button
+                onClick(label = label) {
+                    if (held) release() else press()
+                    true
+                }
+            }
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    press()
+                    waitForUpOrCancellation()
+                    release()
+                }
+            }
+            .padding(horizontal = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)
+    ) {
+        val fg = if (enabled) Cs.White else Cs.Dim
+        Icon(imageVector = icon, contentDescription = null, tint = fg, modifier = Modifier.size(24.dp))
+        Text(
+            text = label,
+            style = mono(11.sp, fg),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** 92x64dp secondary dock key (e.g. `pin`, `new idea`, `cancel`). */
+@Composable
+fun CsDockSideKey(
+    label: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    active: Boolean = false,
+    enabled: Boolean = true
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val role = if (active) KeyRole.DOWN else KeyRole.STD
+    Column(
+        modifier = modifier
+            .width(92.dp)
+            .height(64.dp)
+            .offset(y = if (pressed && enabled) 1.dp else 0.dp)
+            .neumorphicSurface(role = role, pressed = pressed && enabled, radius = 18.dp, enabled = enabled)
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick
+            )
+            .padding(horizontal = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)
+    ) {
+        val fg = when {
+            !enabled -> Cs.Dim
+            active -> Cs.White
+            else -> Cs.Ink
+        }
+        Icon(imageVector = icon, contentDescription = null, tint = fg, modifier = Modifier.size(22.dp))
+        Text(
+            text = label,
+            style = mono(11.sp, fg),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/**
+ * Sunken 64dp progress box shown in place of the primary dock key while a real job runs.
+ * Animates width linearly in 80ms (zero springs). Shows percentage only when a real fraction is known.
+ */
+@Composable
+fun CsBusyBox(
+    label: String,
+    progressFraction: Float?,
+    modifier: Modifier = Modifier
+) {
+    val targetFraction = (progressFraction ?: 0f).coerceIn(0f, 1f)
+    val animatedFraction by animateFloatAsState(
+        targetValue = targetFraction,
+        animationSpec = tween(durationMillis = 80, easing = LinearEasing),
+        label = "busy_progress"
+    )
+    Box(
+        modifier = modifier
+            .height(64.dp)
+            .neumorphicSurface(role = KeyRole.DOWN, pressed = true, radius = 18.dp, enabled = true)
+            .clip(RoundedCornerShape(18.dp))
+            .testTag("cs_busy_box"),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        if (progressFraction != null && animatedFraction > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(animatedFraction)
+                    .background(Cs.BusyFill)
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = label,
+                style = mono(14.sp, Cs.White, FontWeight.Medium),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (progressFraction != null) {
+                Text(
+                    text = "${(targetFraction * 100f).roundToInt()}%",
+                    style = mono(14.sp, Cs.White, FontWeight.Medium),
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Standard v5 bottom dock: at most two keys (optional 92x64 leading key + flex-1 64dp primary commit key),
+ * replaced in place by [CsBusyBox] while a real job runs.
+ */
+@Composable
+fun CsDock(
+    primaryLabel: String,
+    onPrimaryClick: () -> Unit,
+    primaryTag: String,
+    modifier: Modifier = Modifier,
+    leading: (@Composable RowScope.() -> Unit)? = null,
+    primaryTrailingIcon: ImageVector? = null,
+    primaryLeadingIcon: ImageVector? = null,
+    primaryRole: KeyRole = KeyRole.COMMIT,
+    primaryEnabled: Boolean = true,
+    isBusy: Boolean = false,
+    busyLabel: String? = null,
+    busyFraction: Float? = null
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, top = 14.dp, end = 12.dp, bottom = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        leading?.invoke(this)
+        if (isBusy) {
+            CsBusyBox(
+                label = busyLabel ?: "working…",
+                progressFraction = busyFraction,
+                modifier = Modifier.weight(1f)
+            )
+        } else {
+            CsKey(
+                onClick = onPrimaryClick,
+                role = primaryRole,
+                enabled = primaryEnabled,
+                radius = 18.dp,
+                horizontalPadding = 20.dp,
+                contentAlignment = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(64.dp)
+                    .testTag(primaryTag)
+            ) { tint ->
+                if (primaryLeadingIcon != null) {
+                    Icon(
+                        imageVector = primaryLeadingIcon,
+                        contentDescription = null,
+                        tint = tint,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Text(
+                    text = primaryLabel,
+                    style = mono(15.sp, tint, FontWeight.Medium),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (primaryTrailingIcon != null) {
+                    Icon(
+                        imageVector = primaryTrailingIcon,
+                        contentDescription = null,
+                        tint = tint,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Consistent 56dp v5 top bar across 01 SPARK, 02 SCRIPT, and 03 CUT:
+ * active stage is a 44dp sunken segment in Ndot 13sp; other stages are bare 40dp targets in Geist Mono 500 13sp.
+ */
+@Composable
+fun CsTopBar(
+    activeStage: Int,
+    onNavigate: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    trailing: @Composable RowScope.() -> Unit = {}
+) {
+    val stageNames = listOf("SPARK", "SCRIPT", "CUT")
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .padding(start = 8.dp, end = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        stageNames.forEachIndexed { idx, name ->
+            val stageNum = idx + 1
+            val isActive = stageNum == activeStage
+            if (isActive) {
+                Box(
+                    modifier = Modifier
+                        .height(44.dp)
+                        .defaultMinSize(minWidth = 40.dp)
+                        .neumorphicSurface(role = KeyRole.DOWN, pressed = true, radius = 12.dp, enabled = true)
+                        .clip(RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp)
+                        .testTag("cs_crumb_$stageNum"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "%02d %s".format(stageNum, name),
+                        style = ndot(13.sp, Cs.White),
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            } else {
+                val color = if (stageNum < activeStage) Cs.Ink else Cs.Dim
+                Box(
+                    modifier = Modifier
+                        .height(44.dp)
+                        .defaultMinSize(minWidth = 40.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(role = Role.Tab) { onNavigate(stageNum) }
+                        .padding(horizontal = 6.dp)
+                        .testTag("cs_crumb_$stageNum"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "%02d".format(stageNum),
+                        style = mono(13.sp, color, FontWeight.Medium),
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        trailing()
+    }
+}
+
+/** Global 48dp #EBEBEF toast sitting 112dp above the bottom edge with an "ok" dismiss key. */
+@Composable
+fun BoxScope.CsToastOverlay(
+    message: String?,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (message.isNullOrBlank()) return
+    Row(
+        modifier = modifier
+            .align(Alignment.BottomCenter)
+            .padding(start = 12.dp, end = 12.dp, bottom = 112.dp)
+            .fillMaxWidth()
+            .height(48.dp)
+            .neumorphicSurface(role = KeyRole.COMMIT, radius = 14.dp, enabled = true)
+            .clip(RoundedCornerShape(14.dp))
+            .padding(start = 16.dp, end = 6.dp)
+            .testTag("cs_toast"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = message,
+            style = mono(13.sp, Cs.Black),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Box(
+            modifier = Modifier
+                .height(36.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(role = Role.Button, onClick = onDismiss)
+                .padding(horizontal = 12.dp)
+                .testTag("cs_toast_ok"),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("ok", style = mono(13.sp, Cs.Black, FontWeight.Medium), maxLines = 1)
+        }
+    }
+}
+
+// =============================================================================
+// Preserved cross-screen primitives (NewsroomStudioScreen & legacy helpers)
+// =============================================================================
+
 @Composable
 fun CsChip(
     label: String,
     on: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
-    height: Dp = 34.dp,
-    size: TextUnit = 12.sp,
-    horizontalPadding: Dp = 12.dp,
+    height: Dp = 44.dp,
+    size: TextUnit = 13.sp,
+    horizontalPadding: Dp = 14.dp,
     outlined: Boolean = false
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val role = if (on) KeyRole.ACTIVE else KeyRole.STD
+    val role = if (on) KeyRole.COMMIT else KeyRole.STD
     Row(
         modifier = modifier
             .height(height)
             .offset(y = if (pressed) 1.dp else 0.dp)
-            .keyBevel(role, pressed, height / 2, true)
+            .neumorphicSurface(role = role, pressed = pressed, radius = height / 2, enabled = true)
             .then(if (outlined) Modifier.border(1.dp, Cs.White, RoundedCornerShape(height / 2)) else Modifier)
             .clip(RoundedCornerShape(height / 2))
             .toggleable(value = on, interactionSource = interaction, indication = null, role = Role.Checkbox) { onToggle() }
@@ -322,23 +942,18 @@ fun CsChip(
         if (outlined) {
             Box(Modifier.size(4.dp).background(role.text))
         }
-        Text(label, style = mono(size, role.text, tracking = 0.02f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(label, style = mono(size, role.text), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
-/** Accent color for a [BreakingNewsStyle] using Clip Studio v4 broadcast tokens. */
 fun breakingAccentColor(style: BreakingNewsStyle): Color = when (style) {
     BreakingNewsStyle.BREAKING -> Cs.Red
     BreakingNewsStyle.DEVELOPING -> Cs.AmberBright
-    BreakingNewsStyle.EXCLUSIVE -> Cs.White
+    BreakingNewsStyle.EXCLUSIVE -> Cs.Ink
     BreakingNewsStyle.ALERT_STAT -> Cs.Red
     BreakingNewsStyle.CLEAN -> Cs.Muted
 }
 
-/**
- * Broadcast breaking-news style chip with hardware bevel, left accent tally bar, and live indicator
- * dot. Uses strictly 1 text label inside the chip to honor the label density rule.
- */
 @Composable
 fun CsBreakingChip(
     style: BreakingNewsStyle,
@@ -346,144 +961,41 @@ fun CsBreakingChip(
     onSelect: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
     val accent = breakingAccentColor(style)
-    val role = when {
-        !selected -> KeyRole.STD
-        style == BreakingNewsStyle.BREAKING -> KeyRole.VOICE
-        style == BreakingNewsStyle.DEVELOPING -> KeyRole.REPAIR
-        style == BreakingNewsStyle.EXCLUSIVE -> KeyRole.COMMIT
-        else -> KeyRole.ACTIVE
-    }
-    Row(
+    CsPill(
+        label = style.chipLabel.uppercase(),
+        selected = selected,
+        onClick = onSelect,
+        accentBarColor = if (style == BreakingNewsStyle.CLEAN) null else accent,
         modifier = modifier
-            .height(36.dp)
-            .offset(y = if (pressed) 1.dp else 0.dp)
-            .keyBevel(role, pressed, 4.dp, enabled = true)
-            .then(
-                if (selected && style == BreakingNewsStyle.ALERT_STAT) {
-                    Modifier.border(1.dp, Cs.Red, RoundedCornerShape(4.dp))
-                } else {
-                    Modifier
-                }
-            )
-            .clip(RoundedCornerShape(4.dp))
-            .toggleable(
-                value = selected,
-                interactionSource = interaction,
-                indication = null,
-                role = Role.RadioButton
-            ) { onSelect() }
-            .drawBehind {
-                // Left broadcast tally bar inside bevel
-                val barW = 3.dp.toPx()
-                val vInset = 5.dp.toPx()
-                drawRect(
-                    color = if (selected && (style == BreakingNewsStyle.BREAKING || style == BreakingNewsStyle.EXCLUSIVE)) {
-                        role.text
-                    } else {
-                        accent
-                    },
-                    topLeft = Offset(4.dp.toPx(), vInset),
-                    size = Size(barW, (size.height - 2f * vInset).coerceAtLeast(4f))
-                )
-            }
-            .padding(start = 13.dp, end = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(7.dp)
-    ) {
-        val dotColor = when {
-            selected && style == BreakingNewsStyle.BREAKING -> Cs.White
-            selected && style == BreakingNewsStyle.EXCLUSIVE -> Cs.Black
-            selected && style == BreakingNewsStyle.CLEAN -> Cs.Black
-            else -> accent
-        }
-        Box(
-            Modifier
-                .size(6.dp)
-                .background(
-                    color = dotColor,
-                    shape = if (style == BreakingNewsStyle.BREAKING) RoundedCornerShape(50) else RoundedCornerShape(1.dp)
-                )
-        )
-        Text(
-            text = style.chipLabel.uppercase(),
-            style = mono(11.sp, role.text, FontWeight.Medium, 0.03f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
+    )
 }
 
-// =============================================================================
-// Surfaces, Meters, Rulers
-// =============================================================================
-
-/** Recessed well that holds keys/chips. */
 @Composable
 fun CsWell(
     modifier: Modifier = Modifier,
-    padding: Dp = 6.dp,
-    radius: Dp = 4.dp,
+    padding: Dp = 5.dp,
+    radius: Dp = 16.dp,
     content: @Composable BoxScope.() -> Unit
 ) {
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(radius))
-            .background(Cs.Well)
-            .drawBehind {
-                drawLine(Cs.Black, Offset(0f, 0.5f), Offset(size.width, 0.5f), 1.dp.toPx())
-                drawLine(Cs.WellEdge, Offset(0f, size.height - 0.5f), Offset(size.width, size.height - 0.5f), 1.dp.toPx())
-            }
+            .sunkenPanel(radius = radius, fill = Cs.SunkenTrack)
             .padding(padding),
         content = content
     )
 }
 
-/** Dot-grid panel background (#121215 with 8dp radial dots). */
-fun Modifier.dotPanel(): Modifier = background(Cs.Panel).drawBehind {
-    val step = 8.dp.toPx()
-    val r = 1.dp.toPx() * 0.6f
-    val dot = Color.White.copy(alpha = 0.04f)
-    var y = step / 2
-    while (y < size.height) {
-        var x = step / 2
-        while (x < size.width) {
-            drawCircle(dot, r, Offset(x, y))
-            x += step
-        }
-        y += step
-    }
-}
-
-fun Modifier.hairlineBottom(color: Color = Cs.Hairline): Modifier = drawBehind {
+fun Modifier.hairlineBottom(color: Color = Cs.RowDivider): Modifier = drawBehind {
     drawLine(color, Offset(0f, size.height - 0.5f), Offset(size.width, size.height - 0.5f), 1.dp.toPx())
 }
 
-fun Modifier.hairlineTop(color: Color = Cs.Hairline): Modifier = drawBehind {
+fun Modifier.hairlineTop(color: Color = Cs.RowDivider): Modifier = drawBehind {
     drawLine(color, Offset(0f, 0.5f), Offset(size.width, 0.5f), 1.dp.toPx())
 }
 
-/** Corner-bracket marks used for pinned phrases and the active canvas zone. */
-fun Modifier.cornerBrackets(color: Color = Cs.White, len: Dp = 6.dp, all: Boolean = false): Modifier = drawBehind {
-    val l = len.toPx()
-    val w = 1.dp.toPx()
-    drawLine(color, Offset(0f, 0f), Offset(l, 0f), w)
-    drawLine(color, Offset(0f, 0f), Offset(0f, l), w)
-    drawLine(color, Offset(size.width, size.height), Offset(size.width - l, size.height), w)
-    drawLine(color, Offset(size.width, size.height), Offset(size.width, size.height - l), w)
-    if (all) {
-        drawLine(color, Offset(size.width, 0f), Offset(size.width - l, 0f), w)
-        drawLine(color, Offset(size.width, 0f), Offset(size.width, l), w)
-        drawLine(color, Offset(0f, size.height), Offset(l, size.height), w)
-        drawLine(color, Offset(0f, size.height), Offset(0f, size.height - l), w)
-    }
-}
-
 /**
- * Dual-lane stereo LED meter driven strictly by real persisted [waveformPeaks] at [positionMs].
- * Shows unlit bars when no audio is loaded or playback is parked at silence.
+ * Dual-lane stereo LED meter driven strictly by real persisted [peaks] at [positionMs].
  */
 @Composable
 fun CsStereoMeter(
@@ -547,10 +1059,6 @@ fun CsStereoMeter(
     )
 }
 
-/**
- * Interactive 56dp horizontal tick ruler scrubber (matching 04 Newsroom Studio).
- * Dragging moves ticks under the fixed center red needle; tapping the left/right half steps down/up.
- */
 @Composable
 fun CsTickRuler(
     label: String,
@@ -571,32 +1079,6 @@ fun CsTickRuler(
             .background(Cs.Surface)
             .hairlineTop()
             .hairlineBottom()
-            .drawBehind {
-                val minor = 4.dp.toPx()
-                val major = 20.dp.toPx()
-                val offsetPx = ((normalizedValue - 0.5f) * -size.width * 0.5f)
-                val shiftMinor = ((offsetPx % minor) + minor) % minor
-                val shiftMajor = ((offsetPx % major) + major) % major
-                val minorH = 5.dp.toPx()
-                val majorH = 12.dp.toPx()
-                var x = shiftMinor
-                while (x < size.width) {
-                    drawLine(Cs.Hairline, Offset(x, size.height - minorH), Offset(x, size.height), 1.dp.toPx())
-                    x += minor
-                }
-                x = shiftMajor
-                while (x < size.width) {
-                    drawLine(if (enabled) Cs.Muted else Cs.Dim, Offset(x, size.height - majorH), Offset(x, size.height), 1.dp.toPx())
-                    x += major
-                }
-                // Fixed center needle (lower half below labels)
-                drawLine(
-                    if (enabled) Cs.Red else Cs.Dim,
-                    Offset(size.width / 2f, size.height - 22.dp.toPx()),
-                    Offset(size.width / 2f, size.height),
-                    1.5.dp.toPx()
-                )
-            }
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 detectHorizontalDragGestures(
@@ -621,22 +1103,14 @@ fun CsTickRuler(
                 Modifier
                     .weight(1f)
                     .fillMaxHeight()
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        enabled = enabled
-                    ) { latestStep(-1) }
+                    .clickable(enabled = enabled) { latestStep(-1) }
                     .testTag("${tag}_dec")
             )
             Box(
                 Modifier
                     .weight(1f)
                     .fillMaxHeight()
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        enabled = enabled
-                    ) { latestStep(1) }
+                    .clickable(enabled = enabled) { latestStep(1) }
                     .testTag("${tag}_inc")
             )
         }
@@ -650,7 +1124,7 @@ fun CsTickRuler(
             Text(label, style = SectionLabelStyle, maxLines = 1)
             Text(
                 valueText,
-                style = mono(11.sp, if (enabled) Cs.Ink else Cs.Dim, FontWeight.Medium),
+                style = mono(13.sp, if (enabled) Cs.Ink else Cs.Dim, FontWeight.Medium),
                 maxLines = 1,
                 modifier = Modifier.testTag("${tag}_value")
             )
@@ -658,59 +1132,31 @@ fun CsTickRuler(
     }
 }
 
-/** 36dp header strip with hairline. */
+/** Tappable error or notice banner (busy states render in the bottom dock in v5). */
 @Composable
-fun CsHeader(modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(36.dp)
-            .hairlineBottom()
-            .padding(start = 12.dp, end = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        content = content
-    )
-}
-
-/** Stage breadcrumb: dimmed others, Ndot for the active one. */
-@Composable
-fun StageCrumb(active: Int, label: String, modifier: Modifier = Modifier, onSelect: (Int) -> Unit = {}) {
-    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        for (n in 1..3) {
-            if (n == active) {
-                Text("%02d %s".format(active, label), style = ndot(12.sp), maxLines = 1)
-            } else {
-                Text(
-                    "%02d".format(n),
-                    style = mono(11.sp, Cs.Dim),
-                    maxLines = 1,
-                    modifier = Modifier.clickable { onSelect(n) }.padding(horizontal = 2.dp).testTag("cs_crumb_$n")
-                )
-            }
-            if (n < 3) Text("·", style = mono(11.sp, Cs.Dim))
-        }
-    }
-}
-
-/** Busy / error / notice line. Errors and notices are tappable to dismiss. */
-@Composable
-fun CsStatusLine(busy: String?, error: String?, notice: String?, onDismissError: () -> Unit, onDismissNotice: () -> Unit) {
+fun CsStatusLine(
+    busy: String? = null,
+    error: String?,
+    notice: String?,
+    onDismissError: () -> Unit,
+    onDismissNotice: () -> Unit
+) {
     val (text, color, dismiss) = when {
-        error != null -> Triple("! $error", Cs.Red, onDismissError)
-        busy != null -> Triple("… $busy", Cs.Muted, null)
-        notice != null -> Triple(notice, Cs.Muted, onDismissNotice)
+        !error.isNullOrBlank() -> Triple(error, Cs.Red, onDismissError)
+        !notice.isNullOrBlank() -> Triple(notice, Cs.Muted, onDismissNotice)
         else -> return
     }
     Box(
         Modifier
             .fillMaxWidth()
-            .background(Cs.Surface)
-            .hairlineBottom()
-            .then(if (dismiss != null) Modifier.clickable { dismiss() } else Modifier)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .padding(horizontal = 10.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Cs.SunkenTrack)
+            .clickable(role = Role.Button) { dismiss() }
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .testTag("cs_status_line")
     ) {
-        Text(text, style = mono(10.sp, color, tracking = 0.02f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(text, style = mono(12.sp, color), maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -719,20 +1165,29 @@ fun CsSectionLabel(text: String, modifier: Modifier = Modifier) {
     Text(text, style = SectionLabelStyle, modifier = modifier, maxLines = 1, overflow = TextOverflow.Ellipsis)
 }
 
-/** Bottom bar row of keys (56dp high, full-bleed recessed well). */
-@Composable
-fun CsBottomBar(modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
-    CsWell(modifier.fillMaxWidth().height(56.dp), padding = 6.dp, radius = 0.dp) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), content = content)
-    }
-}
-
 @Composable
 fun CsColumn(modifier: Modifier = Modifier, gap: Dp = 8.dp, content: @Composable ColumnScope.() -> Unit) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(gap), content = content)
 }
 
+/** Formats milliseconds as `m:ss` (e.g. `0:58`, `1:05`), matching the Clip Studio v5 spec. */
 fun mmss(ms: Long): String {
     val s = (ms / 1000L).coerceAtLeast(0L)
-    return "%02d:%02d".format(s / 60, s % 60)
+    return "%d:%02d".format(s / 60, s % 60)
+}
+
+/** Formats an epoch timestamp into a concise uppercase relative age string (e.g. `2 DAYS AGO`, `TODAY`). */
+fun formatRelativeAgeUpper(updatedAtMillis: Long, nowMillis: Long = System.currentTimeMillis()): String {
+    if (updatedAtMillis <= 0L) return "RECENT"
+    val diffMs = (nowMillis - updatedAtMillis).coerceAtLeast(0L)
+    val mins = diffMs / 60_000L
+    val hours = diffMs / 3_600_000L
+    val days = diffMs / 86_400_000L
+    return when {
+        mins < 60L -> if (mins <= 1L) "JUST NOW" else "$mins MINS AGO"
+        hours < 24L -> if (hours == 1L) "1 HOUR AGO" else "$hours HOURS AGO"
+        days == 1L -> "1 DAY AGO"
+        days < 30L -> "$days DAYS AGO"
+        else -> "${days / 30L} MO AGO"
+    }
 }

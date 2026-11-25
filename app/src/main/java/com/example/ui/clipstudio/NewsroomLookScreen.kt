@@ -4,24 +4,39 @@ import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.sharp.ArrowBack
+import androidx.compose.material.icons.sharp.Add
+import androidx.compose.material.icons.sharp.Check
+import androidx.compose.material.icons.sharp.ContentCopy
+import androidx.compose.material.icons.sharp.FormatQuote
+import androidx.compose.material.icons.sharp.Refresh
+import androidx.compose.material.icons.sharp.Remove
+import androidx.compose.material.icons.sharp.Title
+import androidx.compose.material.icons.sharp.Wallpaper
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -31,50 +46,59 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
-import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.example.data.BreakingNewsStyle
-import com.example.data.BrollSegmentMode
+import com.example.data.CoreStoryClause
 import com.example.data.NewsroomLook
 import com.example.data.OverlayObjectKind
 import com.example.data.SavedNewsroomOverlay
 import com.example.ui.StudioUiState
 import com.example.ui.StudioViewModel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlin.math.pow
 
-private val TABS = listOf("01 BACKDROP", "02 B-ROLL", "03 HEADLINES", "04 CARDS")
-
 /**
- * 04 NEWSROOM DESIGNER STUDIO: persisted looks (rig-generated backdrop plate + draggable tick-ruler
- * blur & EV + warm/cool light, grain, border), B-roll cutaways, persisted Breaking News Style Chips,
- * and AI-generated headline / stat / quote-card overlay sets previewed live on the stage canvas and
- * rendered into the studio cut.
+ * Video look (Clip Studio v5, replaces 04 NEWSROOM):
+ * - 56dp header: `arrow_back`, `"Video look"` (Geist 500 17sp), `content_copy` (`duplicateNewsroomLook`).
+ * - 232dp sunken `#000` live preview (real plate with blur, EV, warm/neutral/cool tint + optional kicker tag +
+ *   `rgba(0,0,0,.82)` title box; zero `LIVE` bug or `ACTIVE:` debug clutter).
+ * - Sunken 3-way `background` · `title` · `cards` control:
+ *   - `background`: 48dp round `−`/`+` keys + 14dp sunken `#101013` track (`#EBEBEF` fill) for `BLUR` (±5%)
+ *     and `BRIGHTNESS` (±0.2 EV), 3-way `LIGHT` (`warm` / `neutral` / `cool`), plus saved look selector &
+ *     rig backdrop prompt + `generate`.
+ *   - `title`: sunken editable `TITLE ON SCREEN` field (`updateTitleOnScreen`) + 48x48dp `refresh` AI key
+ *     (`refreshHeadlineWithAi`) + `TAG ABOVE TITLE` 44dp pills (`none` · `breaking` · `developing` · `explainer`).
+ *   - `cards`: real attached cards summary & timing from `savedOverlays` / `selectedOverlayIds`, attach toggles,
+ *     and `"create / manage cards"` (`onOpenOverlayBuilder`).
+ * - Dock: `"use this look"` (`check`) -> `useLookAndReturn` + `onBack()`.
  */
 @Composable
 fun NewsroomLookScreen(
     state: StudioUiState,
     vm: StudioViewModel,
     onBack: () -> Unit,
-    onTestOnClip: (lookId: String) -> Unit,
+    onTestOnClip: (lookId: String) -> Unit = {},
     onOpenOverlayBuilder: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    renderGlobalOverlays: Boolean = true
 ) {
     val looks = state.newsroomLooks
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -83,185 +107,204 @@ fun NewsroomLookScreen(
             selectedId = (looks.firstOrNull { it.isDefault } ?: looks.firstOrNull())?.id
         }
     }
-    val persisted = looks.firstOrNull { it.id == selectedId }
-    var draft by remember(persisted?.id) { mutableStateOf(persisted) }
-    // Pick up rig-side changes (a freshly generated plate) without discarding unsaved slider edits.
-    LaunchedEffect(persisted?.plateId) {
-        val p = persisted ?: return@LaunchedEffect
-        draft = draft?.copy(plateId = p.plateId, plateUrl = p.plateUrl, platePrompt = p.platePrompt) ?: p
-    }
-    var tab by rememberSaveable { mutableIntStateOf(0) }
-    var prompt by rememberSaveable(persisted?.id) { mutableStateOf(persisted?.platePrompt.orEmpty()) }
-    val dirty = draft != null && persisted != null && draft!!.copy(updatedAtMillis = 0, isDefault = false) !=
-        persisted.copy(updatedAtMillis = 0, isDefault = false)
 
-    val attachedOverlays = remember(state.savedOverlays, state.corePipelineSession.selectedOverlayIds) {
-        val selectedSet = state.corePipelineSession.selectedOverlayIds.toSet()
+    val persisted = looks.firstOrNull { it.id == selectedId }
+    var draft by remember(persisted?.id) {
+        mutableStateOf(
+            persisted ?: NewsroomLook(
+                name = "LOOK_01",
+                isDefault = true
+            )
+        )
+    }
+
+    // Pick up rig-side plate updates without discarding unsaved slider adjustments.
+    LaunchedEffect(persisted?.plateId, persisted?.plateUrl) {
+        val p = persisted ?: return@LaunchedEffect
+        draft = draft.copy(plateId = p.plateId, plateUrl = p.plateUrl, platePrompt = p.platePrompt)
+    }
+
+    var tab by rememberSaveable { mutableIntStateOf(0) }
+
+    val session = state.corePipelineSession
+    val breakingStyle = session.renderOptions.breakingStyle
+    val resolvedTitle = remember(
+        session.renderOptions.chyronHeadline,
+        session.title,
+        state.activeProject.stageConfig.chyronHeadline,
+        state.activeProject.title
+    ) {
+        session.renderOptions.chyronHeadline.trim()
+            .ifBlank { session.title.trim() }
+            .ifBlank { state.activeProject.stageConfig.chyronHeadline.trim() }
+            .ifBlank { state.activeProject.title.trim() }
+    }
+
+    val attachedOverlays = remember(state.savedOverlays, session.selectedOverlayIds) {
+        val selectedSet = session.selectedOverlayIds.toSet()
         state.savedOverlays.filter { it.id in selectedSet }
     }
-    val breakingStyle = state.corePipelineSession.renderOptions.breakingStyle
 
-    Box(modifier.fillMaxSize().background(Cs.Black).testTag("cs_newsroom_root")) {
+    val isLookBusy = state.isGeneratingBackdrop || state.isRefreshingHeadline || state.isGeneratingOverlaySet
+    val busyLabel = when {
+        state.isGeneratingBackdrop -> "generating backdrop…"
+        state.isRefreshingHeadline -> "refreshing title…"
+        state.isGeneratingOverlaySet -> "generating cards…"
+        else -> null
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Cs.Body)
+            .testTag("cs_newsroom_root")
+    ) {
         Column(Modifier.fillMaxSize()) {
-            CsHeader {
-                Row(
-                    Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        "<- back",
-                        style = mono(11.sp, Cs.Muted),
-                        modifier = Modifier.clickable(onClick = onBack).testTag("cs_newsroom_back")
-                    )
-                    Text(
-                        draft?.name ?: "NO LOOK",
-                        style = ndot(12.sp),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                CsWell(padding = 2.dp) {
-                    CsKeyLabel(
-                        when {
-                            draft == null -> "new look"
-                            dirty -> "save look"
-                            else -> "saved ✓"
-                        },
-                        onClick = {
-                            val d = draft
-                            if (d == null) selectedId = vm.createNewsroomLook("LOOK_01") else if (dirty) vm.updateNewsroomLook(d)
-                        },
-                        role = KeyRole.COMMIT,
-                        size = 11.sp,
-                        weight = FontWeight.Medium,
-                        enabled = draft == null || dirty,
-                        modifier = Modifier.width(92.dp).height(28.dp).testTag("cs_look_save")
-                    )
-                }
-            }
-            val busy = when {
-                state.isGeneratingBackdrop -> "Generating backdrop plate on rig…"
-                state.isGeneratingOverlaySet -> "Generating breaking overlay set on rig…"
-                else -> null
-            }
-            CsStatusLine(busy, state.errorMessage, state.statusNotice, vm::dismissError, vm::dismissNotice)
-
-            // Stage canvas preview: live backdrop + live Breaking News Style + live attached overlays
-            Box(Modifier.fillMaxWidth().weight(0.45f).hairlineBottom().padding(12.dp)) {
-                LookCanvas(
-                    look = draft,
-                    tab = tab,
-                    breakingStyle = breakingStyle,
-                    attachedOverlays = attachedOverlays,
-                    fallbackHeadline = state.corePipelineSession.renderOptions.chyronHeadline
-                        .ifBlank { state.corePipelineSession.title },
-                    onPickZone = { tab = it }
+            // Clean 56dp Header (`arrow_back`, `"Video look"`, `content_copy`)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .padding(start = 8.dp, end = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                CsIconKey(
+                    icon = Icons.AutoMirrored.Sharp.ArrowBack,
+                    contentDescription = "Back to Cut",
+                    onClick = onBack,
+                    modifier = Modifier.testTag("cs_newsroom_back")
+                )
+                Text(
+                    text = "Video look",
+                    style = sans(17.sp, Cs.Ink, weight = FontWeight.Medium),
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f)
+                )
+                CsIconKey(
+                    icon = Icons.Sharp.ContentCopy,
+                    contentDescription = "Duplicate look",
+                    enabled = looks.isNotEmpty() || persisted != null,
+                    onClick = {
+                        val sourceId = persisted?.id ?: vm.createNewsroomLook(draft.name)
+                        if (persisted != null && draft != persisted) {
+                            vm.updateNewsroomLook(draft)
+                        }
+                        val duplicatedId = vm.duplicateNewsroomLook(sourceId)
+                        if (duplicatedId != null) {
+                            selectedId = duplicatedId
+                            vm.showToast("look duplicated")
+                        }
+                    },
+                    modifier = Modifier.testTag("cs_look_duplicate")
                 )
             }
 
-            CsWell(Modifier.fillMaxWidth().height(44.dp).hairlineBottom(), radius = 0.dp) {
-                Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TABS.forEachIndexed { i, label ->
-                        CsKeyLabel(
-                            label,
-                            onClick = { tab = i },
-                            role = if (tab == i) KeyRole.ACTIVE else KeyRole.STD,
-                            size = 10.sp,
-                            weight = FontWeight.Medium,
-                            horizontalPadding = 4.dp,
-                            modifier = Modifier.weight(1f).fillMaxSize().testTag("cs_newsroom_tab_$i")
-                        )
+            CsStatusLine(
+                error = state.errorMessage,
+                notice = state.statusNotice,
+                onDismissError = vm::dismissError,
+                onDismissNotice = vm::dismissNotice
+            )
+
+            // 232dp sunken #000 live preview
+            VideoLookPreviewPanel(
+                look = draft,
+                breakingStyle = breakingStyle,
+                titleText = resolvedTitle,
+                attachedOverlays = attachedOverlays
+            )
+
+            // Sunken 3-way `background` · `title` · `cards` segmented control
+            CsSegmentedRow(
+                modifier = Modifier.padding(start = 10.dp, top = 12.dp, end = 10.dp)
+            ) {
+                val tabs = listOf(
+                    Triple(0, "background", Icons.Sharp.Wallpaper),
+                    Triple(1, "title", Icons.Sharp.Title),
+                    Triple(2, "cards", Icons.Sharp.FormatQuote)
+                )
+                tabs.forEach { (idx, label, icon) ->
+                    CsSegment(
+                        selected = tab == idx,
+                        onClick = { tab = idx },
+                        height = 48.dp,
+                        modifier = Modifier.testTag("cs_newsroom_tab_$idx")
+                    ) { tint ->
+                        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+                        Text(label, style = mono(13.sp, tint), maxLines = 1)
                     }
                 }
             }
 
-            Column(Modifier.weight(0.55f).fillMaxWidth().dotPanel().verticalScroll(rememberScrollState())) {
+            // Tab body
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(start = 12.dp, top = 16.dp, end = 12.dp, bottom = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
                 when (tab) {
-                    0 -> BackdropTab(
+                    0 -> LookBackgroundTab(
                         state = state,
                         vm = vm,
                         draft = draft,
                         looks = looks,
-                        prompt = prompt,
-                        onPrompt = { prompt = it },
-                        onSelect = { selectedId = it },
-                        onDraft = { draft = it }
+                        onSelectLook = { id -> selectedId = id },
+                        onUpdateDraft = { updated -> draft = updated }
                     )
-                    1 -> BrollTab(state, vm)
-                    else -> OverlayTab(
+                    1 -> LookTitleTab(
                         state = state,
                         vm = vm,
-                        kinds = if (tab == 2) {
-                            setOf(OverlayObjectKind.LOWER_THIRD, OverlayObjectKind.STAT_CALLOUT)
-                        } else {
-                            setOf(OverlayObjectKind.QUOTE_BRIEF)
-                        },
+                        currentTitle = resolvedTitle,
+                        breakingStyle = breakingStyle
+                    )
+                    2 -> LookCardsTab(
+                        state = state,
+                        vm = vm,
+                        attachedOverlays = attachedOverlays,
                         onOpenOverlayBuilder = onOpenOverlayBuilder
                     )
                 }
             }
 
-            CsBottomBar {
-                CsKeyLabel(
-                    "duplicate look",
-                    onClick = { draft?.let { d -> vm.duplicateNewsroomLook(d.id)?.let { selectedId = it } } },
-                    enabled = draft != null && !dirty,
-                    size = 11.sp,
-                    horizontalPadding = 6.dp,
-                    modifier = Modifier.weight(130f).fillMaxSize().testTag("cs_look_duplicate")
-                )
-                CsKeyLabel(
-                    "test on clip",
-                    onClick = {
-                        draft?.let { d ->
-                            if (dirty) vm.updateNewsroomLook(d)
-                            onTestOnClip(d.id)
-                        }
-                    },
-                    enabled = draft != null && state.corePipelineSession.hasTalkingHead && !state.isCoreStageBusy,
-                    size = 11.sp,
-                    horizontalPadding = 6.dp,
-                    modifier = Modifier.weight(114f).fillMaxSize().testTag("cs_look_test")
-                )
-                CsKeyLabel(
-                    if (draft?.isDefault == true && !dirty) "default look ✓" else "set default look",
-                    onClick = {
-                        draft?.let { d ->
-                            if (dirty) vm.updateNewsroomLook(d)
-                            vm.setDefaultNewsroomLook(d.id)
-                        }
-                    },
-                    role = KeyRole.COMMIT,
-                    size = 11.sp,
-                    weight = FontWeight.Medium,
-                    horizontalPadding = 8.dp,
-                    trailingArrow = true,
-                    enabled = draft != null && (draft?.isDefault != true || dirty),
-                    modifier = Modifier.weight(168f).fillMaxSize().testTag("cs_look_default")
-                )
-            }
+            // Single Primary Dock Key: "use this look"
+            CsDock(
+                primaryLabel = "use this look",
+                primaryTrailingIcon = Icons.Sharp.Check,
+                primaryRole = KeyRole.COMMIT,
+                primaryEnabled = !isLookBusy,
+                primaryTag = "cs_use_look",
+                onPrimaryClick = {
+                    vm.useLookAndReturn(draft.id, draftOverride = draft)
+                    onBack()
+                },
+                isBusy = isLookBusy,
+                busyLabel = busyLabel
+            )
+        }
+
+        if (renderGlobalOverlays) {
+            CsToastOverlay(
+                message = state.toastMessage,
+                onDismiss = vm::dismissToast
+            )
         }
     }
 }
 
-/**
- * On-device live preview of the backdrop plate, grade, Breaking News Style kicker chip, and
- * attached quote-card / lower-third overlays; the rig's studio cut & Remotion 4 worker render
- * the matching broadcast graphics in the MP4.
- */
 @Composable
-private fun LookCanvas(
-    look: NewsroomLook?,
-    tab: Int,
+private fun VideoLookPreviewPanel(
+    look: NewsroomLook,
     breakingStyle: BreakingNewsStyle,
-    attachedOverlays: List<SavedNewsroomOverlay>,
-    fallbackHeadline: String,
-    onPickZone: (Int) -> Unit
+    titleText: String,
+    attachedOverlays: List<SavedNewsroomOverlay>
 ) {
-    val ev = look?.brightnessEv ?: 0.0
+    val ev = look.brightnessEv
     val gain = 2.0.pow(ev).toFloat()
-    val (rT, bT) = when (look?.light) {
+    val (rT, bT) = when (look.light) {
         NewsroomLook.LIGHT_WARM -> 1.08f to 0.9f
         NewsroomLook.LIGHT_COOL -> 0.9f to 1.08f
         else -> 1f to 1f
@@ -274,43 +317,45 @@ private fun LookCanvas(
             0f, 0f, 0f, 1f, 0f
         )
     )
-    val quoteOverlay = attachedOverlays.firstOrNull { it.kind == OverlayObjectKind.QUOTE_BRIEF }
-        ?: attachedOverlays.firstOrNull { it.kind == OverlayObjectKind.STAT_CALLOUT && attachedOverlays.size > 1 }
+    val blurDp = ((look.blurPercent / 100f) * 24f).dp
+
+    val ambientCenterColor = remember(look.light, gain) {
+        val base = when (look.light) {
+            NewsroomLook.LIGHT_WARM -> Color(0xFF3A2A1C)
+            NewsroomLook.LIGHT_COOL -> Color(0xFF1C2A3A)
+            else -> Color(0xFF2A2A2E)
+        }
+        Color(
+            red = (base.red * gain).coerceIn(0f, 1f),
+            green = (base.green * gain).coerceIn(0f, 1f),
+            blue = (base.blue * gain).coerceIn(0f, 1f),
+            alpha = 1f
+        )
+    }
+
     val chyronOverlay = attachedOverlays.firstOrNull { it.kind == OverlayObjectKind.LOWER_THIRD }
-        ?: attachedOverlays.firstOrNull { it.kind == OverlayObjectKind.STAT_CALLOUT }
-    val effectiveStyle = breakingStyle
-    val styleAccent = breakingAccentColor(effectiveStyle)
+    val displayTitle = chyronOverlay?.headline?.ifBlank { null }
+        ?: titleText.ifBlank { "Untitled clip" }
+
+    val tagKey = breakingStyle.titleTagKey
+    val showKicker = tagKey != "none"
+    val (kickerBg, kickerFg) = when (tagKey) {
+        "breaking" -> Cs.Red to Cs.White
+        "developing" -> Cs.AmberBright to Cs.Black
+        "explainer" -> Cs.Ink to Cs.Black
+        else -> Color.Transparent to Cs.White
+    }
 
     Box(
-        Modifier
-            .fillMaxSize()
-            .background(Cs.Surface)
-            .border(1.dp, Cs.Hairline)
-            .drawBehind {
-                val inset = 16.dp.toPx()
-                val dash = 4.dp.toPx()
-                drawRect(
-                    color = Cs.Dim,
-                    topLeft = Offset(inset, inset),
-                    size = Size(size.width - 2f * inset, size.height - 2f * inset),
-                    style = Stroke(
-                        width = 1.dp.toPx(),
-                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(dash, dash), 0f)
-                    )
-                )
-                val cx = size.width / 2f
-                val cy = size.height / 2f
-                val arm = 4.dp.toPx()
-                drawLine(Cs.Dim, Offset(cx - arm, cy), Offset(cx + arm, cy), 1.dp.toPx())
-                drawLine(Cs.Dim, Offset(cx, cy - arm), Offset(cx, cy + arm), 1.dp.toPx())
-            }
-            .clickable { onPickZone(0) }
-            .then(if (tab == 0) Modifier.cornerBrackets(all = true) else Modifier)
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp)
+            .height(232.dp)
+            .sunkenPanel(radius = 18.dp)
             .testTag("cs_look_canvas")
     ) {
-        val plate = look?.plateUrl
+        val plate = look.plateUrl
         if (!plate.isNullOrBlank()) {
-            val blurDp = ((look.blurPercent / 100f) * 24f).dp
             AsyncImage(
                 model = plate,
                 contentDescription = "Backdrop plate",
@@ -322,506 +367,523 @@ private fun LookCanvas(
                     .testTag("cs_look_plate")
             )
         } else {
-            Text(
-                if (look == null) "Create a look to start." else "Describe a studio backdrop below & tap generate.",
-                style = sans(12.sp, Cs.Muted, 16.sp),
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
+            Box(
                 modifier = Modifier
-                    .align(Alignment.Center)
-                    .padding(horizontal = 28.dp)
-            )
-        }
-        if (look?.border == true) {
-            Box(Modifier.fillMaxSize().padding(16.dp).border(1.dp, Cs.White))
-        }
-
-        // Top-left active zone tag
-        Text(
-            "ACTIVE: ${listOf("STUDIO_BACKDROP", "B_ROLL", "HEADLINE_BAR", "QUOTE_CARD")[tab]}",
-            style = mono(9.sp, Cs.Black, FontWeight.Medium),
-            modifier = Modifier
-                .padding(start = 8.dp, top = 6.dp)
-                .background(Cs.Ink)
-                .padding(horizontal = 5.dp, vertical = 2.dp)
-        )
-
-        // Top-right broadcast LIVE tally badge
-        val liveActive = effectiveStyle != BreakingNewsStyle.CLEAN
-        Row(
-            Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 16.dp, end = 16.dp)
-                .background(if (liveActive) Cs.Red else Cs.Black.copy(alpha = 0.78f), RoundedCornerShape(2.dp))
-                .border(1.dp, if (liveActive) Cs.Red else Cs.Hairline, RoundedCornerShape(2.dp))
-                .padding(horizontal = 7.dp, vertical = 3.dp)
-                .testTag("cs_canvas_live_bug"),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            if (liveActive) {
-                Box(Modifier.size(5.dp).background(Cs.White, RoundedCornerShape(50)))
-            }
-            Text(
-                if (liveActive) "LIVE" else "ON AIR",
-                style = mono(9.sp, if (liveActive) Cs.White else Cs.Muted, FontWeight.Medium),
-                maxLines = 1
+                    .fillMaxSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(ambientCenterColor, Color(0xFF0A0A0D)),
+                            radius = 520f
+                        )
+                    )
+                    .then(if (Build.VERSION.SDK_INT >= 31 && blurDp > 0.dp) Modifier.blur(blurDp) else Modifier)
             )
         }
 
-        // Upper-left Quote / Stat Card zone (tappable -> 04 CARDS)
-        Box(
-            Modifier
-                .padding(start = 16.dp, top = 28.dp)
-                .width(224.dp)
-                .background(Cs.Black.copy(alpha = if (quoteOverlay != null) 0.86f else 0.55f), RoundedCornerShape(3.dp))
-                .border(1.dp, if (tab == 3) Cs.White else Cs.Hairline, RoundedCornerShape(3.dp))
-                .then(if (tab == 3) Modifier.cornerBrackets(all = true) else Modifier)
-                .drawBehind {
-                    if (quoteOverlay != null) {
-                        drawRect(
-                            color = breakingAccentColor(quoteOverlay.breakingStyle),
-                            topLeft = Offset.Zero,
-                            size = Size(3.dp.toPx(), size.height)
-                        )
-                    }
-                }
-                .clickable { onPickZone(3) }
-                .padding(start = if (quoteOverlay != null) 9.dp else 6.dp, end = 8.dp, top = 5.dp, bottom = 5.dp)
-                .testTag("cs_zone_card")
-        ) {
-            if (quoteOverlay != null) {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    val kicker = buildString {
-                        append(quoteOverlay.kind.label.uppercase())
-                        if (quoteOverlay.calloutStat.isNotBlank()) {
-                            append(" · ").append(quoteOverlay.calloutStat.uppercase())
-                        }
-                    }
-                    Text(
-                        kicker,
-                        style = mono(9.sp, breakingAccentColor(quoteOverlay.breakingStyle), FontWeight.Medium),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        quoteOverlay.headline,
-                        style = sans(12.sp, Cs.White, weight = FontWeight.Medium),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (quoteOverlay.subline.isNotBlank()) {
-                        Text(
-                            quoteOverlay.subline,
-                            style = mono(9.sp, Cs.Muted),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            } else {
-                Text("TAP TO STYLE: QUOTE_CARD", style = mono(9.sp, Cs.Muted), maxLines = 1)
-            }
+        if (look.border) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(14.dp)
+                    .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+            )
         }
 
-        // Bottom Broadcast Lower-Third Chyron + Breaking News Style Kicker Chip (tappable -> 03 HEADLINES)
+        // Optional kicker tag + rgba(0,0,0,.82) title box
         Column(
-            Modifier
+            modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
                 .fillMaxWidth()
-                .clickable { onPickZone(2) }
-                .testTag("cs_zone_headline")
+                .testTag("cs_zone_headline"),
+            horizontalAlignment = Alignment.Start
         ) {
-            if (effectiveStyle != BreakingNewsStyle.CLEAN) {
-                val (kickerBg, kickerFg) = when (effectiveStyle) {
-                    BreakingNewsStyle.BREAKING -> Cs.Red to Cs.White
-                    BreakingNewsStyle.DEVELOPING -> Cs.AmberBright to Cs.Black
-                    BreakingNewsStyle.EXCLUSIVE -> Cs.White to Cs.Black
-                    BreakingNewsStyle.ALERT_STAT -> Cs.Red to Cs.White
-                    BreakingNewsStyle.CLEAN -> Color.Transparent to Cs.White
-                }
-                val kickerText = buildString {
-                    append(effectiveStyle.bannerText)
-                    val stat = chyronOverlay?.calloutStat.orEmpty().trim()
-                    if (stat.isNotEmpty() && !effectiveStyle.bannerText.contains(stat, ignoreCase = true)) {
-                        append(" · ").append(stat.uppercase())
-                    }
-                }
-                Row(
-                    Modifier
-                        .background(kickerBg, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
-                        .padding(horizontal = 8.dp, vertical = 2.dp)
-                        .testTag("cs_canvas_breaking_kicker"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+            if (showKicker) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
+                        .background(kickerBg)
+                        .padding(horizontal = 10.dp, vertical = 3.dp)
+                        .testTag("cs_canvas_breaking_kicker")
                 ) {
-                    Box(Modifier.size(5.dp).background(kickerFg, RoundedCornerShape(50)))
                     Text(
-                        kickerText,
-                        style = mono(9.sp, kickerFg, FontWeight.Medium, 0.04f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        text = tagKey.uppercase(),
+                        style = mono(10.sp, kickerFg, FontWeight.Medium, 0.06f),
+                        maxLines = 1
                     )
                 }
             }
             Box(
-                Modifier
-                    .fillMaxWidth()
-                    .background(
-                        Cs.Black.copy(alpha = 0.88f),
+                modifier = Modifier
+                    .clip(
                         RoundedCornerShape(
-                            topStart = if (effectiveStyle == BreakingNewsStyle.CLEAN) 3.dp else 0.dp,
-                            topEnd = 3.dp,
-                            bottomStart = 3.dp,
-                            bottomEnd = 3.dp
+                            topStart = if (showKicker) 0.dp else 10.dp,
+                            topEnd = 10.dp,
+                            bottomStart = 10.dp,
+                            bottomEnd = 10.dp
                         )
                     )
-                    .border(1.dp, if (tab == 2) Cs.White else Cs.Hairline)
-                    .then(if (tab == 2) Modifier.cornerBrackets(all = true) else Modifier)
-                    .drawBehind {
-                        drawRect(
-                            color = styleAccent,
-                            topLeft = Offset.Zero,
-                            size = Size(4.dp.toPx(), size.height)
-                        )
-                    }
-                    .padding(start = 10.dp, end = 8.dp, top = 6.dp, bottom = 6.dp)
+                    .background(Color.Black.copy(alpha = 0.82f))
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
             ) {
-                val shownHeadline = chyronOverlay?.headline?.ifBlank { null }
-                    ?: fallbackHeadline.trim().ifBlank { null }
-                if (shownHeadline != null) {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            shownHeadline.uppercase(),
-                            style = sans(13.sp, Cs.White, weight = FontWeight.Medium),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        val shownSubline = chyronOverlay?.subline?.ifBlank { null }
-                            ?: "TAP 03 HEADLINES TO GENERATE OVERLAY SET"
-                        Text(
-                            shownSubline,
-                            style = mono(9.sp, if (chyronOverlay != null) styleAccent else Cs.Muted),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                } else {
-                    Text("TAP TO STYLE: HEADLINE_BAR", style = mono(9.sp, Cs.Muted), maxLines = 1)
-                }
+                Text(
+                    text = displayTitle,
+                    style = sans(15.sp, Cs.White, 20.sp, FontWeight.Medium),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }
 }
 
 @Composable
-private fun BackdropTab(
+private fun LookBackgroundTab(
     state: StudioUiState,
     vm: StudioViewModel,
-    draft: NewsroomLook?,
+    draft: NewsroomLook,
     looks: List<NewsroomLook>,
-    prompt: String,
-    onPrompt: (String) -> Unit,
-    onSelect: (String) -> Unit,
-    onDraft: (NewsroomLook) -> Unit
+    onSelectLook: (String) -> Unit,
+    onUpdateDraft: (NewsroomLook) -> Unit
 ) {
-    Row(
-        Modifier
-            .padding(start = 12.dp, end = 12.dp, top = 12.dp)
-            .fillMaxWidth()
-            .height(40.dp)
-            .background(Cs.Black, RoundedCornerShape(2.dp))
-            .border(1.dp, Cs.Hairline, RoundedCornerShape(2.dp))
-            .padding(end = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        BasicTextField(
-            value = prompt,
-            onValueChange = onPrompt,
-            singleLine = true,
-            textStyle = mono(11.sp, Cs.Ink),
-            cursorBrush = SolidColor(Cs.Ink),
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp).testTag("cs_backdrop_prompt"),
-            decorationBox = { inner ->
-                if (prompt.isEmpty()) Text("describe the studio backdrop…", style = mono(11.sp, Cs.Dim))
-                inner()
-            }
-        )
-        CsKeyLabel(
-            if (state.isGeneratingBackdrop) "working…" else "generate",
-            onClick = { draft?.let { vm.generateBackdropForLook(it.id, prompt) } },
-            enabled = draft != null && prompt.isNotBlank() && !state.isGeneratingBackdrop,
-            size = 11.sp,
-            horizontalPadding = 6.dp,
-            modifier = Modifier.width(80.dp).height(30.dp).testTag("cs_backdrop_generate")
-        )
-    }
-    LazyRow(
-        Modifier.padding(top = 12.dp).fillMaxWidth().height(76.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        contentPadding = PaddingValues(horizontal = 12.dp)
-    ) {
-        items(looks, key = { it.id }) { look ->
-            val on = look.id == draft?.id
-            Box(
-                Modifier
-                    .width(116.dp)
-                    .height(76.dp)
-                    .background(Cs.Surface, RoundedCornerShape(2.dp))
-                    .border(1.dp, if (on) Cs.White else Cs.Hairline, RoundedCornerShape(2.dp))
-                    .clickable { onSelect(look.id) }
-                    .testTag("cs_look_tile_${look.id}")
-            ) {
-                if (!look.plateUrl.isNullOrBlank()) {
-                    AsyncImage(look.plateUrl, contentDescription = look.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                }
-                Text(
-                    (if (look.isDefault) "★ " else "") + look.name,
-                    style = mono(10.sp, if (on) Cs.Ink else Cs.Muted),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.align(Alignment.BottomStart).background(Cs.Black.copy(alpha = 0.65f)).padding(horizontal = 8.dp, vertical = 4.dp)
-                )
-            }
-        }
-        item {
-            Box(
-                Modifier
-                    .width(76.dp)
-                    .height(76.dp)
-                    .border(1.dp, Cs.Hairline, RoundedCornerShape(2.dp))
-                    .clickable { onSelect(vm.createNewsroomLook("LOOK_%02d".format(looks.size + 1))) }
-                    .testTag("cs_look_new"),
-                contentAlignment = Alignment.Center
-            ) { Text("+ new", style = mono(10.sp, Cs.Ink)) }
-        }
-    }
-    if (draft == null) return
-    Spacer(Modifier.height(12.dp))
-    CsTickRuler(
-        label = "BACKGROUND BLUR",
+    // 1. BLUR (±5%, 0..100%)
+    LookStepperSlider(
+        label = "BLUR",
         valueText = "${draft.blurPercent}%",
-        normalizedValue = draft.blurPercent / 100f,
-        enabled = !draft.plateId.isNullOrBlank(),
-        onStep = { delta ->
-            onDraft(draft.copy(blurPercent = (draft.blurPercent + delta * 5).coerceIn(0, 100)))
+        fraction = (draft.blurPercent / 100f).coerceIn(0f, 1f),
+        onDecrement = {
+            onUpdateDraft(draft.copy(blurPercent = (draft.blurPercent - 5).coerceIn(0, 100)))
+        },
+        onIncrement = {
+            onUpdateDraft(draft.copy(blurPercent = (draft.blurPercent + 5).coerceIn(0, 100)))
         },
         tag = "cs_scrub_blur"
     )
-    CsTickRuler(
-        label = "STUDIO BRIGHTNESS",
-        valueText = "${if (draft.brightnessEv > 0) "+" else ""}${"%.1f".format(draft.brightnessEv)} EV",
-        normalizedValue = ((draft.brightnessEv + 3.0) / 6.0).toFloat().coerceIn(0f, 1f),
-        enabled = true,
-        onStep = { delta ->
-            val next = (Math.round((draft.brightnessEv + delta * 0.1) * 10.0) / 10.0).coerceIn(-3.0, 3.0)
-            onDraft(draft.copy(brightnessEv = next))
+
+    // 2. BRIGHTNESS (±0.2 EV, -3.0..+3.0)
+    val evLabel = "${if (draft.brightnessEv > 0) "+" else ""}${"%.1f".format(draft.brightnessEv)}"
+    LookStepperSlider(
+        label = "BRIGHTNESS",
+        valueText = evLabel,
+        fraction = (((draft.brightnessEv + 3.0) / 6.0).toFloat()).coerceIn(0f, 1f),
+        onDecrement = {
+            val next = (Math.round((draft.brightnessEv - 0.2) * 10.0) / 10.0).coerceIn(-3.0, 3.0)
+            onUpdateDraft(draft.copy(brightnessEv = next))
+        },
+        onIncrement = {
+            val next = (Math.round((draft.brightnessEv + 0.2) * 10.0) / 10.0).coerceIn(-3.0, 3.0)
+            onUpdateDraft(draft.copy(brightnessEv = next))
         },
         tag = "cs_scrub_ev"
     )
-    CsWell(Modifier.padding(12.dp).fillMaxWidth()) {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                CsChip(
-                    "light: warm",
-                    draft.light == NewsroomLook.LIGHT_WARM,
-                    { onDraft(draft.copy(light = if (draft.light == NewsroomLook.LIGHT_WARM) NewsroomLook.LIGHT_NEUTRAL else NewsroomLook.LIGHT_WARM)) },
-                    height = 32.dp,
-                    size = 11.sp,
-                    horizontalPadding = 10.dp,
-                    modifier = Modifier.weight(1f).testTag("cs_pill_warm")
-                )
-                CsChip(
-                    "light: cool",
-                    draft.light == NewsroomLook.LIGHT_COOL,
-                    { onDraft(draft.copy(light = if (draft.light == NewsroomLook.LIGHT_COOL) NewsroomLook.LIGHT_NEUTRAL else NewsroomLook.LIGHT_COOL)) },
-                    height = 32.dp,
-                    size = 11.sp,
-                    horizontalPadding = 10.dp,
-                    modifier = Modifier.weight(1f).testTag("cs_pill_cool")
-                )
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                CsChip(
-                    "grain: ${if (draft.grain) "low" else "off"}",
-                    draft.grain,
-                    { onDraft(draft.copy(grain = !draft.grain)) },
-                    height = 32.dp,
-                    size = 11.sp,
-                    horizontalPadding = 10.dp,
-                    modifier = Modifier.weight(1f).testTag("cs_pill_grain")
-                )
-                CsChip(
-                    "border: ${if (draft.border) "1dp" else "off"}",
-                    draft.border,
-                    { onDraft(draft.copy(border = !draft.border)) },
-                    height = 32.dp,
-                    size = 11.sp,
-                    horizontalPadding = 10.dp,
-                    modifier = Modifier.weight(1f).testTag("cs_pill_border")
-                )
-            }
-        }
-    }
-}
 
-@Composable
-private fun BrollTab(state: StudioUiState, vm: StudioViewModel) {
-    val clauses = state.corePipelineSession.clauses
-    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        CsSectionLabel("B-ROLL CUTAWAYS · TAP TO SWAP A LINE TO A CAPTION PLATE")
-        if (clauses.isEmpty()) Text("No story loaded yet.", style = sans(13.sp, Cs.Muted))
-        clauses.forEachIndexed { idx, c ->
-            val on = c.segmentMode == BrollSegmentMode.BROLL_CUTAWAY
-            CsKey(
-                onClick = { vm.toggleCutClauseBroll(idx) },
-                role = if (on) KeyRole.ACTIVE else KeyRole.STD,
-                contentAlignment = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth().height(40.dp).testTag("cs_newsroom_broll_$idx")
-            ) { tint ->
-                Text(if (on) "B-ROLL" else "HEAD", style = mono(10.sp, tint), modifier = Modifier.width(48.dp))
-                Text(c.spokenText, style = sans(13.sp, tint), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            }
-        }
-    }
-}
-
-@Composable
-private fun OverlayTab(
-    state: StudioUiState,
-    vm: StudioViewModel,
-    kinds: Set<OverlayObjectKind>,
-    onOpenOverlayBuilder: () -> Unit
-) {
-    val overlays = state.savedOverlays.filter { it.kind in kinds }
-    val attached = state.corePipelineSession.selectedOverlayIds
-    val activeStyle = state.corePipelineSession.renderOptions.breakingStyle
-    val seedTopic = state.corePipelineSession.fullStoryText.ifBlank { state.activeProject.ideaSpark }
-    var briefTopic by rememberSaveable(state.corePipelineSession.id) { mutableStateOf(seedTopic) }
-    LaunchedEffect(seedTopic) {
-        if (briefTopic.isBlank() && seedTopic.isNotBlank()) {
-            briefTopic = seedTopic
-        }
-    }
-
-    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        CsSectionLabel("BREAKING NEWS STYLE CHIPS · LIVE ON STAGE & CUT")
-        CsWell(Modifier.fillMaxWidth()) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                BreakingNewsStyle.entries.chunked(2).forEach { pair ->
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        pair.forEach { style ->
-                            CsBreakingChip(
-                                style = style,
-                                selected = activeStyle == style,
-                                onSelect = { vm.setCoreBreakingStyle(style) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("cs_bstyle_${style.wire}")
-                            )
-                        }
-                        if (pair.size == 1) {
-                            Spacer(Modifier.weight(1f))
-                        }
-                    }
+    // 3. LIGHT 3-way segmented control (`warm` · `neutral` · `cool`)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("LIGHT", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+        CsSegmentedRow {
+            val lightChoices = listOf(
+                NewsroomLook.LIGHT_WARM to "warm",
+                NewsroomLook.LIGHT_NEUTRAL to "neutral",
+                NewsroomLook.LIGHT_COOL to "cool"
+            )
+            lightChoices.forEach { (wire, label) ->
+                CsSegment(
+                    selected = draft.light == wire,
+                    onClick = { onUpdateDraft(draft.copy(light = wire)) },
+                    height = 44.dp,
+                    modifier = Modifier.testTag("cs_light_$label")
+                ) { tint ->
+                    Text(label, style = mono(13.sp, tint), maxLines = 1)
                 }
             }
         }
+    }
 
-        CsSectionLabel("AI OVERLAY SET GENERATOR · HEADLINE + STAT + QUOTE CARD")
+    // 4. Backdrop plate generator & saved look selector (keeps real Mac-rig plate creation working)
+    val promptState = rememberTextFieldState(initialText = draft.platePrompt)
+    LaunchedEffect(draft.id, draft.platePrompt) {
+        if (promptState.text.isEmpty() && draft.platePrompt.isNotBlank()) {
+            promptState.setTextAndPlaceCursorAtEnd(draft.platePrompt)
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("BACKDROP PLATE", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
         Row(
-            Modifier
+            modifier = Modifier
                 .fillMaxWidth()
-                .height(40.dp)
-                .background(Cs.Black, RoundedCornerShape(2.dp))
-                .border(1.dp, Cs.Hairline, RoundedCornerShape(2.dp))
-                .padding(end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .heightIn(min = 52.dp)
+                .sunkenPanel(radius = 16.dp)
+                .padding(start = 14.dp, top = 4.dp, end = 6.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             BasicTextField(
-                value = briefTopic,
-                onValueChange = { briefTopic = it },
-                singleLine = true,
-                textStyle = mono(11.sp, Cs.Ink),
+                state = promptState,
+                textStyle = sans(14.sp, Cs.Ink, 20.sp),
                 cursorBrush = SolidColor(Cs.Ink),
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp).testTag("cs_overlay_topic"),
-                decorationBox = { inner ->
-                    if (briefTopic.isEmpty()) {
-                        Text("enter news brief topic to generate overlays…", style = mono(11.sp, Cs.Dim))
+                lineLimits = TextFieldLineLimits.SingleLine,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("cs_backdrop_prompt"),
+                decorator = { inner ->
+                    Box {
+                        if (promptState.text.isEmpty()) {
+                            Text("Describe a custom studio backdrop…", style = sans(14.sp, Cs.Dim, 20.sp))
+                        }
+                        inner()
                     }
-                    inner()
                 }
             )
             CsKeyLabel(
-                if (state.isGeneratingOverlaySet) "working…" else "generate set",
-                onClick = { vm.generateNewsroomOverlaySet(briefTopic) },
-                role = KeyRole.COMMIT,
-                enabled = (briefTopic.isNotBlank() || seedTopic.isNotBlank()) && !state.isGeneratingOverlaySet,
-                size = 11.sp,
-                weight = FontWeight.Medium,
-                horizontalPadding = 8.dp,
-                modifier = Modifier.width(108.dp).height(30.dp).testTag("cs_overlay_generate_set")
+                label = if (state.isGeneratingBackdrop) "working…" else "generate",
+                onClick = {
+                    val lookId = if (looks.any { it.id == draft.id }) {
+                        draft.id
+                    } else {
+                        vm.createNewsroomLook(draft.name).also(onSelectLook)
+                    }
+                    vm.generateBackdropForLook(lookId, promptState.text.toString())
+                },
+                enabled = promptState.text.toString().isNotBlank() && !state.isGeneratingBackdrop,
+                radius = 12.dp,
+                size = 12.sp,
+                modifier = Modifier
+                    .height(44.dp)
+                    .testTag("cs_backdrop_generate")
             )
         }
 
-        CsSectionLabel("SAVED ${kinds.joinToString(" / ") { it.label.uppercase() }} · TAP TO ATTACH TO THE CUT")
-        if (overlays.isEmpty()) {
-            Text(
-                "None saved yet. Tap generate set above or open the A2UI builder.",
-                style = sans(13.sp, Cs.Muted)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            looks.forEach { item ->
+                CsPill(
+                    label = item.name,
+                    selected = item.id == draft.id,
+                    onClick = { onSelectLook(item.id) },
+                    modifier = Modifier.testTag("cs_look_tile_${item.id}")
+                )
+            }
+            CsPill(
+                label = "new look",
+                selected = false,
+                icon = Icons.Sharp.Add,
+                onClick = {
+                    val createdId = vm.createNewsroomLook("LOOK_%02d".format(looks.size + 1))
+                    onSelectLook(createdId)
+                },
+                modifier = Modifier.testTag("cs_look_new")
             )
         }
-        overlays.forEach { ovl ->
-            val on = ovl.id in attached
-            val ovlAccent = breakingAccentColor(ovl.breakingStyle)
-            CsKey(
-                onClick = { vm.toggleSavedOverlayForPipeline(ovl.id) },
-                role = if (on) KeyRole.ACTIVE else KeyRole.STD,
-                contentAlignment = Arrangement.spacedBy(8.dp),
+    }
+}
+
+@Composable
+private fun LookStepperSlider(
+    label: String,
+    valueText: String,
+    fraction: Float,
+    onDecrement: () -> Unit,
+    onIncrement: () -> Unit,
+    tag: String
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(tag),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(label, style = SectionLabelStyle, maxLines = 1)
+            Text(
+                text = valueText,
+                style = mono(13.sp, Cs.Ink, FontWeight.Medium),
+                maxLines = 1,
+                modifier = Modifier.testTag("${tag}_value")
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            CsIconKey(
+                icon = Icons.Sharp.Remove,
+                contentDescription = "Decrease $label",
+                onClick = onDecrement,
+                size = 48.dp,
+                radius = 24.dp,
+                iconSize = 24.dp,
+                modifier = Modifier.testTag("${tag}_dec")
+            )
+
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .drawBehind {
-                        drawRect(
-                            color = ovlAccent,
-                            topLeft = Offset(3.dp.toPx(), 6.dp.toPx()),
-                            size = Size(3.dp.toPx(), (size.height - 12.dp.toPx()).coerceAtLeast(4f))
-                        )
-                    }
-                    .testTag("cs_overlay_${ovl.id}")
-            ) { tint ->
-                Text(
-                    if (on) "ON" else "OFF",
-                    style = mono(10.sp, tint, FontWeight.Medium),
-                    modifier = Modifier.width(32.dp)
-                )
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        ovl.headline,
-                        style = sans(13.sp, tint, weight = FontWeight.Medium),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                    .weight(1f)
+                    .height(14.dp)
+                    .sunkenPanel(radius = 7.dp, fill = Cs.SunkenTrack)
+                    .padding(2.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                if (fraction > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(fraction)
+                            .widthIn(min = 10.dp)
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(Cs.Ink)
                     )
-                    val metaLine = buildString {
-                        append(ovl.breakingStyle.bannerText.ifBlank { ovl.kind.label.uppercase() })
-                        if (ovl.calloutStat.isNotBlank()) append(" · ").append(ovl.calloutStat)
-                        append(" · ").append(ovl.durationSec).append("s")
-                        if (ovl.subline.isNotBlank()) append(" — ").append(ovl.subline)
+                }
+            }
+
+            CsIconKey(
+                icon = Icons.Sharp.Add,
+                contentDescription = "Increase $label",
+                onClick = onIncrement,
+                size = 48.dp,
+                radius = 24.dp,
+                iconSize = 24.dp,
+                modifier = Modifier.testTag("${tag}_inc")
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LookTitleTab(
+    state: StudioUiState,
+    vm: StudioViewModel,
+    currentTitle: String,
+    breakingStyle: BreakingNewsStyle
+) {
+    val titleFieldState = rememberTextFieldState(initialText = currentTitle)
+
+    // Keep text field synced when AI headline refresh updates currentTitle externally.
+    LaunchedEffect(currentTitle) {
+        if (currentTitle != titleFieldState.text.toString()) {
+            titleFieldState.setTextAndPlaceCursorAtEnd(currentTitle)
+        }
+    }
+
+    // Persist user edits back to StudioViewModel / Room cleanly.
+    LaunchedEffect(titleFieldState) {
+        snapshotFlow { titleFieldState.text.toString() }
+            .distinctUntilChanged()
+            .drop(1)
+            .collect { edited ->
+                if (edited.trim() != currentTitle.trim()) {
+                    vm.updateTitleOnScreen(edited)
+                }
+            }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("TITLE ON SCREEN", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .sunkenPanel(radius = 16.dp)
+                .padding(start = 16.dp, top = 4.dp, end = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            BasicTextField(
+                state = titleFieldState,
+                textStyle = sans(15.sp, Cs.Ink, 20.sp, FontWeight.Medium),
+                cursorBrush = SolidColor(Cs.Ink),
+                lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = 3),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("cs_title_input"),
+                decorator = { inner ->
+                    Box {
+                        if (titleFieldState.text.isEmpty()) {
+                            Text("Enter title shown on screen…", style = sans(15.sp, Cs.Dim, 20.sp))
+                        }
+                        inner()
                     }
+                }
+            )
+
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(
+                        enabled = !state.isRefreshingHeadline,
+                        role = Role.Button,
+                        onClick = vm::refreshHeadlineWithAi
+                    )
+                    .testTag("cs_title_refresh"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Sharp.Refresh,
+                    contentDescription = "Refresh title with AI",
+                    tint = if (!state.isRefreshingHeadline) Cs.Muted else Cs.Dim,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("TAG ABOVE TITLE", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+        val activeTagKey = breakingStyle.titleTagKey
+        val tags = listOf(
+            "none" to null,
+            "breaking" to Cs.Red,
+            "developing" to Cs.AmberBright,
+            "explainer" to Cs.Ink
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            tags.forEach { (tag, accent) ->
+                CsPill(
+                    label = tag,
+                    selected = activeTagKey == tag,
+                    accentBarColor = accent,
+                    onClick = { vm.setTitleTagStyle(tag) },
+                    modifier = Modifier.testTag("cs_tag_$tag")
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LookCardsTab(
+    state: StudioUiState,
+    vm: StudioViewModel,
+    attachedOverlays: List<SavedNewsroomOverlay>,
+    onOpenOverlayBuilder: () -> Unit
+) {
+    val session = state.corePipelineSession
+    val allCards = state.savedOverlays
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp)
+            .testTag("cs_cards_summary"),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        val countHeadline = when (attachedOverlays.size) {
+            0 -> "0 cards attached"
+            1 -> {
+                val single = attachedOverlays.first()
+                when (single.kind) {
+                    OverlayObjectKind.QUOTE_BRIEF -> "1 quote card attached"
+                    OverlayObjectKind.STAT_CALLOUT -> "1 stat card attached"
+                    OverlayObjectKind.LOWER_THIRD -> "1 lower-third card attached"
+                }
+            }
+            else -> "${attachedOverlays.size} cards attached"
+        }
+        Text(text = countHeadline, style = sans(16.sp, Cs.Ink, 23.sp))
+
+        if (attachedOverlays.isEmpty()) {
+            Text(
+                text = "No quote or stat cards are attached to this cut yet.",
+                style = sans(14.sp, Cs.Muted, 20.sp)
+            )
+        } else {
+            attachedOverlays.forEachIndexed { idx, ovl ->
+                val startMs = resolveCardAppearanceMs(session.clauses, idx, attachedOverlays.size)
+                Text(
+                    text = "\"${ovl.headline}\" appears at ${mmss(startMs)} for ${ovl.durationSec} seconds.",
+                    style = sans(14.sp, Cs.Muted, 20.sp)
+                )
+            }
+        }
+    }
+
+    if (allCards.isNotEmpty()) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("SAVED CARDS", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+            allCards.forEach { ovl ->
+                val attached = ovl.id in session.selectedOverlayIds
+                CsKey(
+                    onClick = { vm.toggleSavedOverlayForPipeline(ovl.id) },
+                    role = if (attached) KeyRole.DOWN else KeyRole.STD,
+                    radius = 14.dp,
+                    horizontalPadding = 14.dp,
+                    contentAlignment = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("cs_overlay_${ovl.id}")
+                ) { tint ->
+                    Icon(
+                        imageVector = if (attached) Icons.Sharp.Check else Icons.Sharp.Add,
+                        contentDescription = null,
+                        tint = tint,
+                        modifier = Modifier.size(18.dp)
+                    )
                     Text(
-                        metaLine,
-                        style = mono(9.sp, tint),
+                        text = ovl.headline,
+                        style = sans(15.sp, tint, 20.sp),
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = "${ovl.durationSec}s",
+                        style = mono(12.sp, Cs.Muted),
+                        maxLines = 1
                     )
                 }
             }
         }
-        CsKeyLabel(
-            "open overlay builder",
-            onClick = onOpenOverlayBuilder,
-            modifier = Modifier.fillMaxWidth().height(40.dp).testTag("cs_open_overlay_builder")
-        )
     }
+
+    CsKey(
+        onClick = onOpenOverlayBuilder,
+        role = KeyRole.STD,
+        radius = 14.dp,
+        horizontalPadding = 16.dp,
+        contentAlignment = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .testTag("cs_open_overlay_builder")
+    ) { tint ->
+        Icon(Icons.Sharp.FormatQuote, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+        Text("create / manage cards", style = mono(13.sp, tint), maxLines = 1)
+    }
+}
+
+private fun resolveCardAppearanceMs(
+    clauses: List<CoreStoryClause>,
+    cardIndex: Int,
+    totalCards: Int
+): Long {
+    if (clauses.isEmpty()) return 0L
+    val cardClauses = clauses.filter { it.shotTypeWire.equals("card", ignoreCase = true) }
+    if (cardClauses.isNotEmpty()) {
+        return cardClauses[cardIndex.coerceIn(0, cardClauses.lastIndex)].startMs
+    }
+    val chosenIdx = if (totalCards <= 1) {
+        clauses.lastIndex
+    } else {
+        ((cardIndex + 1) * clauses.lastIndex) / totalCards.coerceAtLeast(1)
+    }
+    return clauses[chosenIdx.coerceIn(0, clauses.lastIndex)].startMs
 }

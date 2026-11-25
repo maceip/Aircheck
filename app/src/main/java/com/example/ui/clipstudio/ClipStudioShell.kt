@@ -6,6 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +22,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.draft.XAttachment
 import com.example.ui.PostCardSource
@@ -29,13 +31,13 @@ import com.example.ui.StudioViewModel
 import com.example.ui.draft.DraftDeckUiState
 import com.example.ui.draft.DraftDeckViewModel
 
-/** Clip Studio v4 screens. */
+/** Clip Studio v5 screens (`01 SPARK`, `02 SCRIPT`, `03 CUT`, and `Video look`). */
 enum class ClipStudioScreen { SPARK, SCRIPT, CUT, NEWSROOM }
 
 /**
- * Default Aircheck surface (Clip Studio v4): 01 SPARK -> 02 SCRIPT -> 03 CUT, with the
- * 04 NEWSROOM look designer reachable from 03 CUT and System Settings / Voice Care / LLM Router
- * reachable via the utility gear key.
+ * Default Aircheck surface (Clip Studio v5): `01 SPARK` -> `02 SCRIPT` -> `03 CUT`, with
+ * `Video look` reachable from `03 CUT` and System Settings / Voice Care / LLM Router reachable
+ * via the top-bar settings key.
  */
 @Composable
 fun ClipStudioShell(
@@ -107,10 +109,13 @@ fun ClipStudioShell(
         }
     }
 
+    val activeToast = draftState.toastMessage ?: studioState.toastMessage
+    val isAnyRecording = draftState.isAnyRecording || studioState.isRecordingCoreVoiceover
+
     Box(
         modifier
             .fillMaxSize()
-            .background(Cs.Black)
+            .background(Cs.Body)
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .testTag("clip_studio_shell")
     ) {
@@ -120,7 +125,9 @@ fun ClipStudioShell(
                 vm = draftVm,
                 onRequestMic = requestMic,
                 onOpenSettings = onOpenSettings,
-                onNavigate = navigate
+                onNavigate = navigate,
+                lastCompletedVideo = studioState.lastCompletedVideo,
+                renderGlobalOverlays = false
             )
             ClipStudioScreen.SCRIPT -> ScriptScreen(
                 state = draftState,
@@ -132,16 +139,20 @@ fun ClipStudioShell(
                     studioVm.openStoryInCorePipeline(
                         plainText = text,
                         headline = draftState.document.arcBeats.firstOrNull()?.text.orEmpty().take(40),
-                        postCard = quote?.let { PostCardSource(it.handle, it.tweetId, it.snippet) }
+                        postCard = quote?.let { PostCardSource(it.handle, it.tweetId, it.snippet) },
+                        shotPlan = draftState.document.shotPlan
                     )
-                }
+                    onScreen(ClipStudioScreen.CUT)
+                },
+                renderGlobalOverlays = false
             )
             ClipStudioScreen.CUT -> CutScreen(
                 state = studioState,
                 vm = studioVm,
                 onOpenSettings = onOpenSettings,
                 onOpenNewsroom = { onScreen(ClipStudioScreen.NEWSROOM) },
-                onNavigate = navigate
+                onNavigate = navigate,
+                renderGlobalOverlays = false
             )
             ClipStudioScreen.NEWSROOM -> NewsroomLookScreen(
                 state = studioState,
@@ -151,7 +162,28 @@ fun ClipStudioShell(
                     studioVm.runCoreStage4ChopBroll(lookIdOverride = lookId)
                     onScreen(ClipStudioScreen.CUT)
                 },
-                onOpenOverlayBuilder = onOpenOverlayBuilder
+                onOpenOverlayBuilder = onOpenOverlayBuilder,
+                renderGlobalOverlays = false
+            )
+        }
+
+        CsToastOverlay(
+            message = activeToast,
+            onDismiss = {
+                if (draftState.toastMessage != null) {
+                    draftVm.dismissToast()
+                } else {
+                    studioVm.dismissToast()
+                }
+            }
+        )
+
+        if (isAnyRecording) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .border(2.dp, Cs.Red)
+                    .testTag("cs_recording_border")
             )
         }
     }

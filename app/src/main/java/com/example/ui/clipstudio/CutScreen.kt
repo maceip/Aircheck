@@ -1,28 +1,51 @@
 package com.example.ui.clipstudio
 
 import android.net.Uri
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.sharp.Notes
+import androidx.compose.material.icons.automirrored.sharp.Undo
+import androidx.compose.material.icons.sharp.ClosedCaption
+import androidx.compose.material.icons.sharp.ContentCut
+import androidx.compose.material.icons.sharp.CropLandscape
+import androidx.compose.material.icons.sharp.CropPortrait
+import androidx.compose.material.icons.sharp.Edit
+import androidx.compose.material.icons.sharp.Movie
+import androidx.compose.material.icons.sharp.Palette
+import androidx.compose.material.icons.sharp.Pause
+import androidx.compose.material.icons.sharp.Person
+import androidx.compose.material.icons.sharp.PlayArrow
+import androidx.compose.material.icons.sharp.RecordVoiceOver
+import androidx.compose.material.icons.sharp.Settings
+import androidx.compose.material.icons.sharp.Share
+import androidx.compose.material.icons.sharp.Sync
+import androidx.compose.material.icons.sharp.SyncProblem
+import androidx.compose.material.icons.sharp.ZoomIn
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -38,10 +61,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,20 +81,28 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import com.example.data.AlignedWord
 import com.example.data.BrollSegmentMode
 import com.example.data.ClipRecord
 import com.example.data.CoreRenderOptions
+import com.example.data.CoreStoryClause
 import com.example.data.ExportState
 import com.example.ui.StudioUiState
 import com.example.ui.StudioViewModel
 import kotlinx.coroutines.delay
 
 /**
- * 03 CUT: plays the real rig/on-device render (final cut, else talking head, else TTS audio)
- * beside a real waveform-driven stereo LED meter, edits by karaoke transcript or b-roll timeline,
- * and applies real studio-cut / Remotion 4 broadcast render options.
+ * 03 CUT (Clip Studio v5):
+ * - 56dp top bar: `01 · 02 · 03 CUT`, amber Ndot 11sp `"N LINE(S) NEED RE-VOICE"` badge when dirty, `undo`, `settings`.
+ * - 218dp sunken `#000` ExoPlayer video monitor (`m:ss / m:ss` top-left, centered 64dp circular Play/Pause,
+ *   live caption bottom, 3dp `#D71921` progress bar).
+ * - 44dp horizontal tool pill row (`captions`, `trim pauses`, `punch-in`, `9:16`/`16:9`, `look`).
+ * - Sunken 2-way `words` · `b-roll` mode switch.
+ * - Tap-to-expand transcript clauses (seeks & expands `edit words` + `b-roll here` / `back to face`;
+ *   amber 2dp left edge + `"edited · voice not synced"` when dirty; `B-ROLL` tag when cutaway).
+ * - Single sequential primary dock key (`voice the script` -> amber `re-voice N edited line(s)` ->
+ *   `render talking head` -> `render the video` -> `export & share` -> `share again`).
  */
-@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun CutScreen(
     state: StudioUiState,
@@ -70,7 +110,8 @@ fun CutScreen(
     onOpenSettings: () -> Unit,
     onOpenNewsroom: () -> Unit,
     modifier: Modifier = Modifier,
-    onNavigate: (Int) -> Unit = {}
+    onNavigate: (Int) -> Unit = {},
+    renderGlobalOverlays: Boolean = true
 ) {
     val session = state.corePipelineSession
     val opts = session.renderOptions
@@ -106,13 +147,10 @@ fun CutScreen(
             else -> null
         }
     }
-    val sourceLabel = when {
-        session.hasFinalVideo -> "FINAL CUT"
-        session.hasTalkingHead -> "TALKING HEAD"
-        session.hasTtsAudio -> "VOICE ONLY"
-        else -> "NO MEDIA YET"
+
+    LaunchedEffect(sourceUri) {
+        sourceUri?.let { vm.playerController.prepareUri(it, autoPlay = false) }
     }
-    LaunchedEffect(sourceUri) { sourceUri?.let { vm.playerController.prepareUri(it, autoPlay = false) } }
     LaunchedEffect(isPlaying) {
         while (true) {
             positionMs = vm.playerController.currentPositionMs()
@@ -131,264 +169,416 @@ fun CutScreen(
 
     val unsynced = session.unsyncedClauseIndices
     val activeClause = clauseAtPlayhead(session.clauses, positionMs)
+    val effectiveDurationMs = remember(durationMs, session.ttsDurationMs, session.clauses) {
+        when {
+            durationMs > 0L -> durationMs
+            session.ttsDurationMs > 0L -> session.ttsDurationMs
+            else -> session.clauses.maxOfOrNull { it.endMs } ?: 0L
+        }
+    }
 
-    Box(modifier.fillMaxSize().background(Cs.Black).testTag("cs_cut_root")) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Cs.Body)
+            .testTag("cs_cut_root")
+    ) {
         Column(Modifier.fillMaxSize()) {
-            CsHeader {
-                StageCrumb(active = 3, label = "CUT", onSelect = onNavigate)
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    val (badge, color) = when {
-                        session.voicedClauseTexts.isEmpty() -> "NOT VOICED" to Cs.Muted
-                        unsynced.isNotEmpty() -> "${unsynced.size} UNSYNCED EDIT${if (unsynced.size == 1) "" else "S"}" to Cs.Amber
-                        else -> "VOICE SYNCED" to Cs.Muted
-                    }
-                    Text(badge, style = ndot(11.sp, color), maxLines = 1, modifier = Modifier.testTag("cs_cut_badge"))
-                }
-                Text(
-                    "${mmss(positionMs)} / ${mmss(durationMs)}",
-                    style = mono(11.sp, Cs.Ink, FontWeight.Medium),
-                    maxLines = 1,
-                    modifier = Modifier.testTag("cs_cut_timecode")
-                )
-                CsWell(padding = 2.dp) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        CsKeyLabel(
-                            "↶",
-                            onClick = vm::undoCoreEdit,
-                            enabled = state.coreUndoDepth > 0,
-                            size = 14.sp,
-                            horizontalPadding = 0.dp,
-                            modifier = Modifier.width(30.dp).height(28.dp).testTag("cs_cut_undo")
-                        )
-                        CsKeyLabel(
-                            "⚙",
-                            onClick = onOpenSettings,
-                            size = 14.sp,
-                            horizontalPadding = 0.dp,
-                            modifier = Modifier.width(30.dp).height(28.dp).testTag("cs_cut_settings")
-                        )
-                    }
-                }
-            }
-            val busy = if (state.isCoreStageBusy) {
-                (state.coreStageStatusLabel ?: "Working…") + " ${(state.coreStageProgress * 100).toInt()}%"
-            } else if (state.isGeneratingBackdrop) "Generating backdrop…" else null
-            CsStatusLine(busy, state.errorMessage, state.statusNotice, vm::dismissError, vm::dismissNotice)
-
-            // Video monitor + real waveform stereo meter (responsive split so transcript/timeline always has generous height)
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .weight(0.50f)
-                    .hairlineBottom()
-                    .padding(start = 8.dp, end = 12.dp, top = 8.dp, bottom = 4.dp)
+            CsTopBar(
+                activeStage = 3,
+                onNavigate = onNavigate
             ) {
-                Row(
-                    Modifier.fillMaxWidth().weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    CsStereoMeter(
-                        peaks = session.waveformPeaks,
-                        positionMs = positionMs,
-                        durationMs = if (durationMs > 0L) durationMs else session.ttsDurationMs,
-                        isPlaying = isPlaying,
-                        modifier = Modifier.fillMaxHeight()
-                    )
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(Cs.Video)
-                            .border(1.dp, Cs.Hairline, RoundedCornerShape(2.dp))
-                            .testTag("cs_cut_monitor")
-                    ) {
-                        if (sourceUri != null) {
-                            val punchScale = if (opts.punchIn) 1.06f else 1.0f
-                            AndroidView(
-                                factory = { ctx ->
-                                    PlayerView(ctx).apply {
-                                        this.player = player
-                                        useController = false
-                                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                    }
-                                },
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .graphicsLayer {
-                                        scaleX = punchScale
-                                        scaleY = punchScale
-                                    }
-                            )
-                        } else {
-                            Text(
-                                "No render yet. Voice the script, then render the talking head.",
-                                style = sans(13.sp, Cs.Muted, 18.sp),
-                                modifier = Modifier.align(Alignment.Center).padding(24.dp)
-                            )
-                        }
-                        Text(sourceLabel, style = mono(9.sp, Cs.Dim), modifier = Modifier.align(Alignment.TopEnd).padding(8.dp))
+                if (unsynced.isNotEmpty()) {
+                    val badgeText = if (unsynced.size == 1) {
+                        "1 LINE NEEDS RE-VOICE"
+                    } else {
+                        "${unsynced.size} LINES NEED RE-VOICE"
                     }
-                }
-                Row(
-                    Modifier.fillMaxWidth().height(24.dp).padding(start = 22.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
                     Text(
-                        "LOOK: ${defaultLook?.name ?: "NONE"}",
-                        style = mono(10.sp, Cs.Muted),
-                        modifier = Modifier.weight(1f).clickable(onClick = onOpenNewsroom).testTag("cs_cut_look"),
+                        text = badgeText,
+                        style = ndot(11.sp, Cs.Amber),
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        modifier = Modifier
+                            .padding(horizontal = 4.dp)
+                            .testTag("cs_cut_badge")
                     )
-                    Text(
-                        "[captions: ${if (opts.captions) "on" else "off"}]",
-                        style = mono(10.sp, Cs.Ink),
-                        modifier = Modifier.clickable { vm.setCoreCaptions(!opts.captions) }.testTag("cs_cut_captions")
-                    )
-                    Text(" · ", style = mono(10.sp, Cs.Muted))
-                    Text(
-                        if (opts.aspect == CoreRenderOptions.ASPECT_VERTICAL) "[9:16 | 16:9]" else "[16:9 | 9:16]",
-                        style = mono(10.sp, Cs.Ink),
-                        modifier = Modifier.clickable {
-                            vm.setCoreAspect(
-                                if (opts.aspect == CoreRenderOptions.ASPECT_VERTICAL) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL
-                            )
-                        }.testTag("cs_cut_aspect")
-                    )
+                }
+                CsIconKey(
+                    icon = Icons.AutoMirrored.Sharp.Undo,
+                    contentDescription = "Undo cut edit",
+                    onClick = vm::undoCoreEdit,
+                    enabled = state.coreUndoDepth > 0,
+                    modifier = Modifier.testTag("cs_cut_undo")
+                )
+                CsIconKey(
+                    icon = Icons.Sharp.Settings,
+                    contentDescription = "Settings",
+                    onClick = onOpenSettings,
+                    modifier = Modifier.testTag("cs_cut_settings")
+                )
+            }
+
+            CsStatusLine(
+                error = state.errorMessage,
+                notice = state.statusNotice,
+                onDismissError = vm::dismissError,
+                onDismissNotice = vm::dismissNotice
+            )
+
+            // 218dp sunken #000 ExoPlayer video monitor
+            VideoMonitorPanel(
+                player = player,
+                sourceUri = sourceUri,
+                isPlaying = isPlaying,
+                positionMs = positionMs,
+                durationMs = effectiveDurationMs,
+                punchIn = opts.punchIn,
+                liveCaption = if (opts.captions && session.clauses.isNotEmpty()) {
+                    session.clauses.getOrNull(activeClause)?.spokenText.orEmpty()
+                } else {
+                    ""
+                },
+                onTogglePlay = {
+                    vm.playerController.togglePlayPause()
+                    positionMs = vm.playerController.currentPositionMs()
+                }
+            )
+
+            // 44dp horizontal tool pill row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(start = 10.dp, top = 12.dp, end = 10.dp, bottom = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                CsPill(
+                    label = "captions",
+                    selected = opts.captions,
+                    icon = Icons.Sharp.ClosedCaption,
+                    onClick = { vm.setCoreCaptions(!opts.captions) },
+                    modifier = Modifier.testTag("cs_cut_captions")
+                )
+                CsPill(
+                    label = "trim pauses",
+                    selected = opts.stripSilence,
+                    icon = Icons.Sharp.ContentCut,
+                    onClick = { vm.setCoreStripSilence(!opts.stripSilence) },
+                    modifier = Modifier.testTag("cs_cut_strip_silence")
+                )
+                CsPill(
+                    label = "punch-in",
+                    selected = opts.punchIn,
+                    icon = Icons.Sharp.ZoomIn,
+                    onClick = { vm.setCorePunchIn(!opts.punchIn) },
+                    modifier = Modifier.testTag("cs_cut_punch_in")
+                )
+                val isVertical = opts.aspect == CoreRenderOptions.ASPECT_VERTICAL
+                CsPill(
+                    label = if (isVertical) "9:16" else "16:9",
+                    selected = false,
+                    icon = if (isVertical) Icons.Sharp.CropPortrait else Icons.Sharp.CropLandscape,
+                    onClick = {
+                        vm.setCoreAspect(
+                            if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL
+                        )
+                    },
+                    modifier = Modifier.testTag("cs_cut_aspect")
+                )
+                CsPill(
+                    label = "look",
+                    selected = false,
+                    icon = Icons.Sharp.Palette,
+                    onClick = onOpenNewsroom,
+                    modifier = Modifier.testTag("cs_cut_look")
+                )
+            }
+
+            // Sunken 2-way `words` · `b-roll` mode switch
+            CsSegmentedRow(
+                modifier = Modifier.padding(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 10.dp)
+            ) {
+                CsSegment(
+                    selected = mode == "transcript",
+                    onClick = { mode = "transcript" },
+                    height = 44.dp,
+                    modifier = Modifier.testTag("cs_cut_mode_transcript")
+                ) { tint ->
+                    Icon(Icons.AutoMirrored.Sharp.Notes, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+                    Text("words", style = mono(13.sp, tint), maxLines = 1)
+                }
+                CsSegment(
+                    selected = mode == "timeline",
+                    onClick = { mode = "timeline" },
+                    height = 44.dp,
+                    modifier = Modifier.testTag("cs_cut_mode_timeline")
+                ) { tint ->
+                    Icon(Icons.Sharp.Movie, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+                    Text("b-roll", style = mono(13.sp, tint), maxLines = 1)
                 }
             }
 
-            // Mode switch
-            CsWell(Modifier.fillMaxWidth().height(44.dp).hairlineBottom(), radius = 0.dp) {
-                Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("transcript" to "edit by transcript", "timeline" to "edit b-roll timeline").forEach { (m, l) ->
-                        CsKeyLabel(
-                            l,
-                            onClick = { mode = m },
-                            role = if (mode == m) KeyRole.ACTIVE else KeyRole.STD,
-                            size = 11.sp,
-                            modifier = Modifier.weight(1f).fillMaxSize().testTag("cs_cut_mode_$m")
+            // Sunken #000 Transcript / B-roll Panel
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp)
+                    .sunkenPanel(radius = 18.dp)
+            ) {
+                if (session.clauses.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(20.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "No story loaded yet. Go to 02 SCRIPT and tap make the video.",
+                            style = sans(15.sp, Cs.Muted, 21.sp)
                         )
                     }
-                }
-            }
-
-            Box(Modifier.weight(0.50f).fillMaxWidth().background(Color08).padding(10.dp)) {
-                if (session.clauses.isEmpty()) {
-                    Text("No story loaded. Create the video from 02 SCRIPT.", style = sans(15.sp, Cs.Muted, 20.sp))
                 } else if (mode == "transcript") {
-                    TranscriptPane(state, vm, positionMs, unsynced, editingClause, onEdit = { editingClause = it })
+                    TranscriptWordsPane(
+                        state = state,
+                        vm = vm,
+                        positionMs = positionMs,
+                        unsynced = unsynced,
+                        editingClause = editingClause,
+                        onEdit = { editingClause = it },
+                        onSeekLocal = { ms -> positionMs = ms }
+                    )
                 } else {
-                    TimelinePane(state, vm, positionMs, durationMs)
+                    BrollModePane(
+                        clauses = session.clauses,
+                        vm = vm,
+                        onSeekLocal = { ms -> positionMs = ms }
+                    )
                 }
             }
 
-            // Action deck: 2x2 bevelled pip keys on dot-grid DeckPlate
-            Box(Modifier.fillMaxWidth().dotPanel().hairlineTop().padding(12.dp)) {
-                CsWell(Modifier.fillMaxWidth()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            CsKeyLabel(
-                                "re-voice edited words",
-                                onClick = vm::resyncEditedVoice,
-                                role = if (unsynced.isNotEmpty()) KeyRole.REPAIR else KeyRole.STD,
-                                enabled = unsynced.isNotEmpty() && !state.isCoreStageBusy,
-                                size = 11.sp,
-                                pip = true,
-                                contentAlignment = Arrangement.Start,
-                                modifier = Modifier.weight(1f).height(48.dp).testTag("cs_cut_revoice")
-                            )
-                            val here = session.clauses.getOrNull(activeClause)
-                            CsKeyLabel(
-                                if (here?.segmentMode == BrollSegmentMode.BROLL_CUTAWAY) "remove b-roll here" else "insert b-roll here",
-                                onClick = { vm.toggleCutClauseBroll(activeClause) },
-                                enabled = here != null,
-                                size = 11.sp,
-                                pip = true,
-                                contentAlignment = Arrangement.Start,
-                                modifier = Modifier.weight(1f).height(48.dp).testTag("cs_cut_insert_broll")
-                            )
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            val gapsKnown = session.silenceGapsJobId != null && session.silenceGapsJobId == session.talkingHeadJobId
-                            val gapLabel = when {
-                                state.isDetectingSilence -> "…"
-                                gapsKnown -> session.silenceGaps.size.toString()
-                                else -> "?"
-                            }
-                            CsKeyLabel(
-                                "strip silence gaps ($gapLabel)",
-                                onClick = { vm.setCoreStripSilence(!opts.stripSilence) },
-                                role = if (opts.stripSilence) KeyRole.ACTIVE else KeyRole.STD,
-                                size = 11.sp,
-                                pip = true,
-                                contentAlignment = Arrangement.Start,
-                                modifier = Modifier.weight(1f).height(48.dp).testTag("cs_cut_strip_silence")
-                            )
-                            CsKeyLabel(
-                                "camera punch-in [${if (opts.punchIn) "on" else "off"}]",
-                                onClick = { vm.setCorePunchIn(!opts.punchIn) },
-                                role = if (opts.punchIn) KeyRole.ACTIVE else KeyRole.STD,
-                                size = 11.sp,
-                                pip = true,
-                                contentAlignment = Arrangement.Start,
-                                modifier = Modifier.weight(1f).height(48.dp).testTag("cs_cut_punch_in")
-                            )
-                        }
-                        session.lastCutStats?.let { st ->
-                            Text(
-                                "LAST CUT: ${st.aspect} · ${st.brollCutCount} b-roll · ${st.captionCount} captions · " +
-                                    "${st.punchInCount} punch-ins · ${st.removedSilenceGapCount} gaps (-${st.removedSilenceMs} ms)",
-                                style = mono(9.sp, Cs.Muted),
-                                maxLines = 2,
-                                modifier = Modifier.padding(horizontal = 4.dp).testTag("cs_cut_stats")
-                            )
-                        }
+            // Single sequential primary pipeline dock key
+            val signature = session.cutSignature(defaultLook)
+            val cutCurrent = session.hasFinalVideo && session.lastCutSignature == signature
+            val isCutBusy = state.isCoreStageBusy || state.exportState == ExportState.EXPORTING
+            val busyLabel = when {
+                state.exportState == ExportState.EXPORTING -> "exporting…"
+                else -> state.coreStageStatusLabel ?: "rendering…"
+            }
+            val busyFraction = if (state.isCoreStageBusy) state.coreStageProgress else null
+
+            val dockSpec = resolveCutPrimarySpec(
+                hasClauses = session.clauses.isNotEmpty(),
+                hasTtsAudio = session.hasTtsAudio,
+                unsyncedCount = unsynced.size,
+                hasTalkingHead = session.hasTalkingHead,
+                cutCurrent = cutCurrent,
+                exportState = state.exportState,
+                clip = clip,
+                vm = vm
+            )
+
+            CsDock(
+                primaryLabel = dockSpec.label,
+                primaryLeadingIcon = dockSpec.icon,
+                primaryRole = dockSpec.role,
+                primaryEnabled = dockSpec.enabled && !isCutBusy,
+                primaryTag = "cs_cut_primary",
+                onPrimaryClick = dockSpec.onClick,
+                isBusy = isCutBusy,
+                busyLabel = busyLabel,
+                busyFraction = busyFraction
+            )
+        }
+
+        if (renderGlobalOverlays) {
+            CsToastOverlay(
+                message = state.toastMessage,
+                onDismiss = vm::dismissToast
+            )
+        }
+    }
+}
+
+private data class CutPrimarySpec(
+    val label: String,
+    val icon: ImageVector,
+    val role: KeyRole,
+    val enabled: Boolean,
+    val onClick: () -> Unit
+)
+
+private fun resolveCutPrimarySpec(
+    hasClauses: Boolean,
+    hasTtsAudio: Boolean,
+    unsyncedCount: Int,
+    hasTalkingHead: Boolean,
+    cutCurrent: Boolean,
+    exportState: ExportState,
+    clip: ClipRecord?,
+    vm: StudioViewModel
+): CutPrimarySpec {
+    return when {
+        !hasClauses -> CutPrimarySpec(
+            label = "voice the script",
+            icon = Icons.Sharp.RecordVoiceOver,
+            role = KeyRole.COMMIT,
+            enabled = false,
+            onClick = {}
+        )
+        !hasTtsAudio -> CutPrimarySpec(
+            label = "voice the script",
+            icon = Icons.Sharp.RecordVoiceOver,
+            role = KeyRole.COMMIT,
+            enabled = true,
+            onClick = vm::runCoreStage1Tts
+        )
+        unsyncedCount > 0 -> CutPrimarySpec(
+            label = "re-voice $unsyncedCount edited line${if (unsyncedCount == 1) "" else "s"}",
+            icon = Icons.Sharp.Sync,
+            role = KeyRole.REPAIR,
+            enabled = true,
+            onClick = vm::resyncEditedVoice
+        )
+        !hasTalkingHead -> CutPrimarySpec(
+            label = "render talking head",
+            icon = Icons.Sharp.Person,
+            role = KeyRole.COMMIT,
+            enabled = true,
+            onClick = vm::runCoreStage3SpeechToHead
+        )
+        !cutCurrent -> CutPrimarySpec(
+            label = "render the video",
+            icon = Icons.Sharp.Movie,
+            role = KeyRole.COMMIT,
+            enabled = true,
+            onClick = { vm.runCoreStage4ChopBroll() }
+        )
+        exportState != ExportState.EXPORTED -> CutPrimarySpec(
+            label = "export & share",
+            icon = Icons.Sharp.Share,
+            role = KeyRole.COMMIT,
+            enabled = clip != null,
+            onClick = { clip?.let { vm.exportClip(it, openShareSheet = true) } }
+        )
+        else -> CutPrimarySpec(
+            label = "share again",
+            icon = Icons.Sharp.Share,
+            role = KeyRole.STD,
+            enabled = clip != null,
+            onClick = { clip?.let { vm.exportClip(it, openShareSheet = true) } }
+        )
+    }
+}
+
+@Composable
+private fun VideoMonitorPanel(
+    player: androidx.media3.common.Player,
+    sourceUri: Uri?,
+    isPlaying: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    punchIn: Boolean,
+    liveCaption: String,
+    onTogglePlay: () -> Unit
+) {
+    val progressFraction = remember(positionMs, durationMs) {
+        if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp)
+            .height(218.dp)
+            .sunkenPanel(radius = 18.dp)
+            .testTag("cs_cut_monitor"),
+        contentAlignment = Alignment.Center
+    ) {
+        if (sourceUri != null) {
+            val punchScale = if (punchIn) 1.06f else 1.0f
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        this.player = player
+                        useController = false
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     }
-                }
-            }
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = punchScale
+                        scaleY = punchScale
+                    }
+            )
+        }
 
-            CsBottomBar {
-                CsKeyLabel(
-                    if (isPlaying) "❚❚ pause" else "▶ play",
-                    onClick = { vm.playerController.togglePlayPause() },
+        // Top-left timecode (`m:ss / m:ss`)
+        Text(
+            text = "${mmss(positionMs)} / ${mmss(durationMs)}",
+            style = mono(11.sp, Cs.Muted),
+            maxLines = 1,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 14.dp, top = 12.dp)
+                .testTag("cs_cut_timecode")
+        )
+
+        // Centered 64dp circular Play/Pause button
+        Box(
+            modifier = Modifier
+                .size(64.dp)
+                .clip(CircleShape)
+                .background(Cs.Raised.copy(alpha = 0.9f))
+                .border(1.dp, Color.White.copy(alpha = 0.06f), CircleShape)
+                .clickable(
                     enabled = sourceUri != null,
-                    size = 11.sp,
-                    horizontalPadding = 6.dp,
-                    modifier = Modifier.weight(103f).fillMaxSize().testTag("cs_cut_play")
+                    role = Role.Button,
+                    onClick = onTogglePlay
                 )
-                CsKeyLabel(
-                    "sync voice (${unsynced.size})",
-                    onClick = vm::resyncEditedVoice,
-                    role = if (unsynced.isNotEmpty()) KeyRole.REPAIR else KeyRole.STD,
-                    enabled = unsynced.isNotEmpty() && !state.isCoreStageBusy,
-                    size = 11.sp,
-                    horizontalPadding = 6.dp,
-                    modifier = Modifier.weight(144f).fillMaxSize().testTag("cs_cut_sync")
-                )
-                val signature = session.cutSignature(defaultLook)
-                val cutCurrent = session.hasFinalVideo && session.lastCutSignature == signature
-                val (label, action) = when {
-                    session.clauses.isEmpty() -> "export video" to {}
-                    !session.hasTtsAudio -> "voice script" to { vm.runCoreStage1Tts() }
-                    !session.hasTalkingHead -> "render head" to { vm.runCoreStage3SpeechToHead() }
-                    !cutCurrent -> (if (session.hasFinalVideo) "re-render cut" else "render cut") to { vm.runCoreStage4ChopBroll() }
-                    else -> (if (state.exportState == ExportState.EXPORTED) "exported ✓" else "export video") to {
-                        clip?.let { vm.exportClip(it, openShareSheet = true) } ?: Unit
-                    }
-                }
-                CsKeyLabel(
-                    label,
-                    onClick = action,
-                    role = KeyRole.COMMIT,
-                    size = 11.sp,
-                    weight = FontWeight.Medium,
-                    horizontalPadding = 8.dp,
-                    trailingArrow = true,
-                    enabled = session.clauses.isNotEmpty() && !state.isCoreStageBusy && state.exportState != ExportState.EXPORTING &&
-                        (unsynced.isEmpty() || !session.hasTtsAudio) && (!cutCurrent || clip != null),
-                    modifier = Modifier.weight(165f).fillMaxSize().testTag("cs_cut_primary")
+                .testTag("cs_cut_play"),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
+                contentDescription = if (isPlaying) "Pause" else "Play",
+                tint = if (sourceUri != null) Cs.Ink else Cs.Dim,
+                modifier = Modifier.size(36.dp)
+            )
+        }
+
+        // Live caption at bottom (Geist 500 14/19, white)
+        if (liveCaption.isNotBlank()) {
+            Text(
+                text = liveCaption,
+                style = sans(14.sp, Cs.White, 19.sp, FontWeight.Medium),
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(start = 12.dp, end = 12.dp, bottom = 16.dp)
+                    .testTag("cs_cut_live_caption")
+            )
+        }
+
+        // 3dp progress bar (#D71921 over #2C2C32)
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(start = 18.dp, end = 18.dp, bottom = 6.dp)
+                .fillMaxWidth()
+                .height(3.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(Cs.Hairline)
+        ) {
+            if (progressFraction > 0f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(progressFraction)
+                        .background(Cs.Red)
                 )
             }
         }
@@ -396,164 +586,391 @@ fun CutScreen(
 }
 
 /** Clause under the playhead; before Stage 1 timing exists (all windows 0) it is the first clause. */
-internal fun clauseAtPlayhead(clauses: List<com.example.data.CoreStoryClause>, positionMs: Long): Int {
+internal fun clauseAtPlayhead(clauses: List<CoreStoryClause>, positionMs: Long): Int {
     if (clauses.isEmpty()) return 0
     if (clauses.all { it.endMs <= 0L }) return 0
     return clauses.indexOfLast { it.startMs <= positionMs }.coerceAtLeast(0)
 }
 
-private val Color08 = androidx.compose.ui.graphics.Color(0xFF08080A)
-
-@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
-private fun TranscriptPane(
+private fun TranscriptWordsPane(
     state: StudioUiState,
     vm: StudioViewModel,
     positionMs: Long,
     unsynced: List<Int>,
     editingClause: Int?,
-    onEdit: (Int?) -> Unit
+    onEdit: (Int?) -> Unit,
+    onSeekLocal: (Long) -> Unit
 ) {
     val session = state.corePipelineSession
     val listState = rememberLazyListState()
     val activeClause = clauseAtPlayhead(session.clauses, positionMs)
-    LaunchedEffect(activeClause) { if (state.corePipelineSession.clauses.isNotEmpty()) listState.animateScrollToItem(activeClause) }
+
     LazyColumn(
-        Modifier.fillMaxSize().background(Cs.Black).testTag("cs_transcript"),
-        state = listState,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("cs_transcript"),
+        state = listState
     ) {
         itemsIndexed(session.clauses, key = { _, c -> c.id }) { idx, clause ->
             val dirty = idx in unsynced
-            if (editingClause == idx) {
-                var draft by remember(clause.id) { mutableStateOf(clause.spokenText) }
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    BasicTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        textStyle = sans(17.sp, Cs.Ink, 25.sp),
-                        cursorBrush = SolidColor(Cs.Ink),
-                        modifier = Modifier.fillMaxWidth().border(1.dp, Cs.Amber).padding(6.dp).testTag("cs_clause_editor_$idx")
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        CsKeyLabel("apply", onClick = { vm.editCutClauseText(idx, draft); onEdit(null) }, role = KeyRole.COMMIT, size = 11.sp, modifier = Modifier.height(30.dp).testTag("cs_clause_apply_$idx"))
-                        CsKeyLabel("cancel", onClick = { onEdit(null) }, size = 11.sp, modifier = Modifier.height(30.dp))
+            val broll = clause.segmentMode == BrollSegmentMode.BROLL_CUTAWAY
+            val isOpen = state.openClause == idx
+            val isActive = activeClause == idx && session.clauses.any { it.endMs > 0L }
+
+            val clauseWords = remember(dirty, session.alignedWords, clause.startMs, clause.endMs) {
+                if (dirty) {
+                    emptyList()
+                } else {
+                    session.alignedWords.filter {
+                        it.startMs >= clause.startMs && it.startMs < clause.endMs.coerceAtLeast(clause.startMs + 1L)
                     }
                 }
-                return@itemsIndexed
             }
-            val words = if (dirty) {
-                emptyList()
-            } else {
-                session.alignedWords.filter { it.startMs >= clause.startMs && it.startMs < clause.endMs.coerceAtLeast(clause.startMs + 1) }
-            }
-            FlowRow(
-                Modifier
+
+            Column(
+                modifier = Modifier
                     .fillMaxWidth()
-                    .combinedClickable(onClick = {}, onLongClick = { onEdit(idx) })
-                    .testTag("cs_clause_$idx"),
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
-            ) {
-                Text(
-                    "[${mmss(clause.startMs)}]",
-                    style = mono(10.sp, Cs.Muted).copy(lineHeight = 25.sp),
-                    modifier = Modifier.clickable { vm.playerController.seekTo(clause.startMs) }.padding(end = 3.dp)
-                )
-                if (words.isNotEmpty()) {
-                    words.forEach { w ->
-                        val active = positionMs in w.startMs until w.endMs
-                        Text(
-                            w.word,
-                            style = sans(17.sp, if (w.startMs <= positionMs) Cs.Ink else Cs.Muted, 25.sp),
-                            modifier = Modifier
-                                .then(if (active) Modifier.drawBehind {
-                                    drawLine(Cs.Red, Offset(0f, size.height - 1.dp.toPx()), Offset(size.width, size.height - 1.dp.toPx()), 2.dp.toPx())
-                                } else Modifier)
-                                .clickable { vm.playerController.seekTo(w.startMs) }
+                    .background(if (isActive) Cs.ActiveClauseBg else Color.Transparent)
+                    .drawBehind {
+                        if (dirty) {
+                            drawRect(
+                                color = Cs.Amber,
+                                topLeft = Offset.Zero,
+                                size = Size(2.dp.toPx(), size.height)
+                            )
+                        }
+                        drawLine(
+                            color = Cs.ClauseDivider,
+                            start = Offset(0f, size.height - 0.5f),
+                            end = Offset(size.width, size.height - 0.5f),
+                            strokeWidth = 1.dp.toPx()
                         )
                     }
-                } else {
-                    Text(
-                        clause.spokenText,
-                        style = sans(17.sp, if (dirty) Cs.Ink else Cs.Muted, 25.sp),
-                        modifier = if (dirty) Modifier.border(1.dp, Cs.Amber, RoundedCornerShape(2.dp)).padding(horizontal = 5.dp) else Modifier
+                    .then(
+                        if (editingClause != idx) {
+                            Modifier.clickable(role = Role.Button) {
+                                vm.toggleOpenCutClause(idx)
+                                onSeekLocal(clause.startMs)
+                            }
+                        } else {
+                            Modifier
+                        }
                     )
-                    if (dirty) Text("unsynced", style = mono(9.sp, Cs.Amber), modifier = Modifier.padding(top = 6.dp))
+                    .padding(start = 12.dp, top = 12.dp, end = 14.dp, bottom = 12.dp)
+                    .testTag("cs_clause_$idx")
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = mmss(clause.startMs),
+                        style = mono(11.sp, Cs.Muted).copy(lineHeight = 25.sp),
+                        maxLines = 1,
+                        modifier = Modifier.width(44.dp)
+                    )
+
+                    if (editingClause == idx) {
+                        InlineClauseWordsEditor(
+                            idx = idx,
+                            initialText = clause.spokenText,
+                            onSave = { updated ->
+                                vm.editCutClauseText(idx, updated)
+                                onEdit(null)
+                                vm.setOpenCutClause(null)
+                            },
+                            onCancel = { onEdit(null) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    } else {
+                        ClauseKaraokeWords(
+                            spokenText = clause.spokenText,
+                            words = clauseWords,
+                            positionMs = positionMs,
+                            clauseStartMs = clause.startMs,
+                            dirty = dirty,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
-                if (clause.segmentMode == BrollSegmentMode.BROLL_CUTAWAY) {
-                    Text(
-                        "[+ B-ROLL: ${clause.brollCaption.ifBlank { clause.spokenText }.take(28).uppercase()}]",
-                        style = mono(10.sp, Cs.Ink),
-                        modifier = Modifier.background(Cs.Track, RoundedCornerShape(2.dp)).border(1.dp, Cs.Hairline, RoundedCornerShape(2.dp)).padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
+
+                if (dirty && editingClause != idx) {
+                    Row(
+                        modifier = Modifier.padding(start = 52.dp, top = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Sharp.SyncProblem,
+                            contentDescription = null,
+                            tint = Cs.Amber,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "edited · voice not synced",
+                            style = mono(12.sp, Cs.Amber),
+                            maxLines = 1
+                        )
+                    }
+                }
+
+                if (broll && editingClause != idx) {
+                    Row(
+                        modifier = Modifier
+                            .padding(start = 52.dp, top = 6.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Cs.Track)
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Sharp.Movie,
+                            contentDescription = null,
+                            tint = Cs.Ink,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text("B-ROLL", style = mono(11.sp, Cs.Ink), maxLines = 1)
+                    }
+                }
+
+                if (isOpen && editingClause != idx) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 52.dp, top = 10.dp, bottom = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(44.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Cs.Raised)
+                                .border(1.dp, Cs.Hairline, RoundedCornerShape(14.dp))
+                                .clickable(role = Role.Button) { onEdit(idx) }
+                                .padding(horizontal = 10.dp)
+                                .testTag("cs_clause_edit_btn_$idx"),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Sharp.Edit, contentDescription = null, tint = Cs.Ink, modifier = Modifier.size(18.dp))
+                            Text("edit words", style = mono(13.sp, Cs.Ink), maxLines = 1)
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(44.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Cs.Raised)
+                                .border(1.dp, Cs.Hairline, RoundedCornerShape(14.dp))
+                                .clickable(role = Role.Button) { vm.toggleCutClauseBroll(idx) }
+                                .padding(horizontal = 10.dp)
+                                .testTag("cs_clause_broll_btn_$idx"),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Sharp.Movie, contentDescription = null, tint = Cs.Ink, modifier = Modifier.size(18.dp))
+                            Text(
+                                text = if (broll) "back to face" else "b-roll here",
+                                style = mono(13.sp, Cs.Ink),
+                                maxLines = 1
+                            )
+                        }
+                    }
                 }
             }
         }
-        item { Text("long-press a line to edit its words", style = mono(9.sp, Cs.Dim), modifier = Modifier.padding(top = 8.dp)) }
     }
 }
 
 @Composable
-private fun TimelinePane(state: StudioUiState, vm: StudioViewModel, positionMs: Long, durationMs: Long) {
-    val session = state.corePipelineSession
-    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("cs_timeline"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            itemsIndexed(session.clauses, key = { _, c -> c.id }) { idx, clause ->
-                val broll = clause.segmentMode == BrollSegmentMode.BROLL_CUTAWAY
-                val active = positionMs in clause.startMs until clause.endMs.coerceAtLeast(clause.startMs + 1)
+private fun ClauseKaraokeWords(
+    spokenText: String,
+    words: List<AlignedWord>,
+    positionMs: Long,
+    clauseStartMs: Long,
+    dirty: Boolean,
+    modifier: Modifier = Modifier
+) {
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+
+    data class WordSpanRange(val charRange: IntRange, val active: Boolean)
+
+    val built: Pair<AnnotatedString, IntRange?> = remember(spokenText, words, positionMs, clauseStartMs, dirty) {
+        if (words.isEmpty()) {
+            val color = if (dirty || positionMs >= clauseStartMs) Cs.Ink else Cs.Muted
+            buildAnnotatedString {
+                pushStyle(SpanStyle(color = color))
+                append(spokenText)
+                pop()
+            } to null
+        } else {
+            var activeRange: IntRange? = null
+            val str = buildAnnotatedString {
+                words.forEachIndexed { idx, w ->
+                    val startChar = length
+                    val spoken = dirty || positionMs >= w.startMs
+                    val isCurrent = !dirty && positionMs >= w.startMs && positionMs < w.endMs
+                    pushStyle(SpanStyle(color = if (spoken) Cs.Ink else Cs.Muted))
+                    append(w.word)
+                    pop()
+                    val endCharExcl = length
+                    if (isCurrent && endCharExcl > startChar) {
+                        activeRange = startChar until endCharExcl
+                    }
+                    if (idx < words.lastIndex) append(" ")
+                }
+            }
+            str to activeRange
+        }
+    }
+
+    val activeRange = built.second
+    Text(
+        text = built.first,
+        style = sans(17.sp, Cs.Ink, 25.sp),
+        onTextLayout = { layout = it },
+        modifier = modifier.drawBehind {
+            val l = layout ?: return@drawBehind
+            val range = activeRange ?: return@drawBehind
+            if (range.isEmpty() || l.layoutInput.text.isEmpty()) return@drawBehind
+            val safeStart = range.first.coerceIn(0, l.layoutInput.text.length - 1)
+            val safeEnd = range.last.coerceIn(safeStart, l.layoutInput.text.length - 1)
+            val a = l.getBoundingBox(safeStart)
+            val b = l.getBoundingBox(safeEnd)
+            val y = maxOf(a.bottom, b.bottom) - 1.dp.toPx()
+            if (b.right > a.left) {
+                drawLine(Cs.Red, Offset(a.left, y), Offset(b.right, y), 2.dp.toPx())
+            }
+        }
+    )
+}
+
+@Composable
+private fun InlineClauseWordsEditor(
+    idx: Int,
+    initialText: String,
+    onSave: (String) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val fieldState = rememberTextFieldState(initialText = initialText)
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        BasicTextField(
+            state = fieldState,
+            textStyle = sans(17.sp, Cs.Ink, 25.sp),
+            cursorBrush = SolidColor(Cs.Ink),
+            lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 2, maxHeightInLines = 5),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Cs.Body)
+                .border(1.dp, Cs.Amber, RoundedCornerShape(12.dp))
+                .padding(10.dp)
+                .testTag("cs_clause_editor_$idx")
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CsKeyLabel(
+                label = "save words",
+                onClick = { onSave(fieldState.text.toString()) },
+                role = KeyRole.COMMIT,
+                radius = 12.dp,
+                weight = FontWeight.Medium,
+                enabled = fieldState.text.toString().isNotBlank(),
+                modifier = Modifier
+                    .height(44.dp)
+                    .testTag("cs_clause_apply_$idx")
+            )
+            CsKeyLabel(
+                label = "cancel",
+                onClick = onCancel,
+                role = KeyRole.STD,
+                radius = 12.dp,
+                modifier = Modifier
+                    .height(44.dp)
+                    .testTag("cs_clause_cancel_$idx")
+            )
+        }
+    }
+}
+
+@Composable
+private fun BrollModePane(
+    clauses: List<CoreStoryClause>,
+    vm: StudioViewModel,
+    onSeekLocal: (Long) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(8.dp)
+            .testTag("cs_timeline"),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        itemsIndexed(clauses, key = { _, c -> c.id }) { idx, clause ->
+            val broll = clause.segmentMode == BrollSegmentMode.BROLL_CUTAWAY
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 56.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Cs.BrollRow)
+                    .clickable(role = Role.Button) {
+                        vm.playerController.seekTo(clause.startMs)
+                        onSeekLocal(clause.startMs)
+                    }
+                    .padding(start = 12.dp, top = 6.dp, end = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = mmss(clause.startMs),
+                    style = mono(11.sp, Cs.Muted),
+                    maxLines = 1,
+                    modifier = Modifier.width(40.dp)
+                )
+                Text(
+                    text = clause.spokenText,
+                    style = sans(14.sp, Cs.Ink, 19.sp),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                val toggleBg = if (broll) Cs.Ink else Cs.Raised
+                val toggleFg = if (broll) Cs.Black else Cs.Ink
                 Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(36.dp)
-                        .background(if (broll) Cs.Pinned else Cs.Track, RoundedCornerShape(2.dp))
-                        .border(1.dp, if (active) Cs.Ink else if (broll) Cs.Muted else Cs.Hairline, RoundedCornerShape(2.dp))
-                        .clickable { vm.playerController.seekTo(clause.startMs) }
-                        .padding(horizontal = 8.dp),
+                    modifier = Modifier
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(toggleBg)
+                        .then(
+                            if (!broll) Modifier.border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp)) else Modifier
+                        )
+                        .clickable(role = Role.Button) { vm.toggleCutClauseBroll(idx) }
+                        .padding(horizontal = 12.dp)
+                        .testTag("cs_timeline_toggle_$idx"),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text("${mmss(clause.startMs)}–${mmss(clause.endMs)}", style = mono(9.sp, Cs.Muted))
-                    Text(
-                        if (broll) "B-ROLL: ${clause.brollCaption.ifBlank { clause.spokenText }}" else clause.spokenText,
-                        style = mono(10.sp, Cs.Ink),
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                    Icon(
+                        imageVector = if (broll) Icons.Sharp.Movie else Icons.Sharp.Person,
+                        contentDescription = null,
+                        tint = toggleFg,
+                        modifier = Modifier.size(18.dp)
                     )
-                    CsKeyLabel(
-                        if (broll) "head" else "b-roll",
-                        onClick = { vm.toggleCutClauseBroll(idx) },
-                        role = if (broll) KeyRole.ACTIVE else KeyRole.STD,
-                        size = 10.sp,
-                        horizontalPadding = 8.dp,
-                        modifier = Modifier.height(26.dp).testTag("cs_timeline_toggle_$idx")
+                    Text(
+                        text = if (broll) "b-roll" else "face",
+                        style = mono(12.sp, toggleFg, if (broll) FontWeight.Medium else FontWeight.Normal),
+                        maxLines = 1
                     )
                 }
             }
-        }
-        val peaks = session.waveformPeaks
-        if (peaks.isNotEmpty()) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(40.dp)
-                    .drawBehind {
-                        val bw = size.width / peaks.size
-                        val played = if (durationMs > 0) positionMs.toFloat() / durationMs else 0f
-                        peaks.forEachIndexed { i, p ->
-                            val h = (p.coerceIn(0f, 1f) * size.height).coerceAtLeast(2f)
-                            val x = i * bw
-                            drawRect(
-                                if (i.toFloat() / peaks.size <= played) Cs.Ink else Cs.Muted,
-                                topLeft = Offset(x, (size.height - h) / 2),
-                                size = androidx.compose.ui.geometry.Size((bw - 2f).coerceAtLeast(1f), h)
-                            )
-                        }
-                        val px = played * size.width
-                        drawLine(Cs.Red, Offset(px, 0f), Offset(px, size.height), 1.dp.toPx())
-                    }
-                    .testTag("cs_waveform")
-            )
         }
     }
 }
