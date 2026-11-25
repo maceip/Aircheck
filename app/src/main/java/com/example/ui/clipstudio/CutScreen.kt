@@ -1,6 +1,7 @@
 package com.example.ui.clipstudio
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -122,6 +123,9 @@ fun CutScreen(
     var positionMs by remember { mutableLongStateOf(0L) }
     var mode by rememberSaveable { mutableStateOf("transcript") }
     var editingClause by rememberSaveable { mutableStateOf<Int?>(null) }
+
+    BackHandler(enabled = editingClause != null) { editingClause = null }
+    BackHandler(enabled = editingClause == null && state.openClause != null) { vm.setOpenCutClause(null) }
 
     val clipFlow = remember(session.finalClipId) { vm.observeClip(session.finalClipId.orEmpty()) }
     val clip: ClipRecord? by clipFlow.collectAsStateWithLifecycle(initialValue = null)

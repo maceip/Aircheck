@@ -1,5 +1,6 @@
 package com.example.ui.clipstudio
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -116,6 +117,12 @@ fun SparkScreen(
 
     var typedSheetOpen by rememberSaveable { mutableStateOf(false) }
     var noteEditSheetOpen by rememberSaveable { mutableStateOf(false) }
+    val activeFollowupVideo = state.followupVideo ?: lastCompletedVideo
+
+    BackHandler(enabled = typedSheetOpen) { typedSheetOpen = false }
+    BackHandler(enabled = noteEditSheetOpen) { noteEditSheetOpen = false }
+    BackHandler(enabled = state.anchorsSheetOpen && !sparkEmpty) { vm.setAnchorsSheetOpen(false) }
+    BackHandler(enabled = state.continueSheetOpen && activeFollowupVideo != null) { vm.closeContinueSheet() }
 
     Box(
         modifier = modifier
@@ -197,7 +204,6 @@ fun SparkScreen(
             )
         }
 
-        val activeFollowupVideo = state.followupVideo ?: lastCompletedVideo
         if (state.continueSheetOpen && activeFollowupVideo != null) {
             FollowupBottomSheet(
                 state = state,
@@ -278,10 +284,13 @@ private fun SparkEmptyContent(
                 .weight(1f)
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(start = 20.dp, top = 4.dp, end = 20.dp, bottom = 12.dp),
+                .padding(top = 4.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterVertically)
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.padding(horizontal = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Text("STEP 1 OF 3 · YOUR IDEA", style = SectionLabelStyle)
                 Text(
                     text = "What's the clip about?",
@@ -294,12 +303,16 @@ private fun SparkEmptyContent(
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("TONE", style = SectionLabelStyle)
+                Text(
+                    text = "TONE",
+                    style = SectionLabelStyle,
+                    modifier = Modifier.padding(horizontal = 20.dp)
+                )
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
-                        .padding(vertical = 4.dp),
+                        .padding(horizontal = 20.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     DraftTone.entries.forEach { tone ->
@@ -313,21 +326,23 @@ private fun SparkEmptyContent(
                 }
             }
 
-            SeedRecordHeroKey(
-                isRecording = state.isRecordingSeed,
-                elapsedMs = state.recordingElapsedMs,
-                isBusy = state.isBusy || state.isExtractingAngles,
-                busyLabel = state.busyLabel,
-                enabled = !state.isRecordingSteer && !state.isRecordingSplice,
-                onPress = {
-                    onRequestMic {
-                        if (!state.isRecordingSeed) vm.toggleLatchMic()
+            Box(Modifier.padding(horizontal = 20.dp)) {
+                SeedRecordHeroKey(
+                    isRecording = state.isRecordingSeed,
+                    elapsedMs = state.recordingElapsedMs,
+                    isBusy = state.isBusy || state.isExtractingAngles,
+                    busyLabel = state.busyLabel,
+                    enabled = !state.isRecordingSteer && !state.isRecordingSplice,
+                    onPress = {
+                        onRequestMic {
+                            if (!state.isRecordingSeed) vm.toggleLatchMic()
+                        }
+                    },
+                    onRelease = {
+                        if (state.isRecordingSeed) vm.toggleLatchMic()
                     }
-                },
-                onRelease = {
-                    if (state.isRecordingSeed) vm.toggleLatchMic()
-                }
-            )
+                )
+            }
 
             CsKey(
                 onClick = onOpenTypedSheet,
@@ -336,6 +351,7 @@ private fun SparkEmptyContent(
                 radius = 16.dp,
                 contentAlignment = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
                 modifier = Modifier
+                    .padding(horizontal = 20.dp)
                     .fillMaxWidth()
                     .height(56.dp)
                     .testTag("cs_type_instead")

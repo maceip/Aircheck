@@ -1,5 +1,6 @@
 package com.example.ui.clipstudio
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -139,6 +140,9 @@ fun ScriptScreen(
     val words = remember(activeText) { countWords(activeText) }
     val estimatedMs = remember(words) { ((words / 2.5f).roundToInt() * 1000L).coerceAtLeast(0L) }
     val targetSec = if (doc.arcTargetSec > 0) doc.arcTargetSec else DraftDeckViewModel.ARC_TARGET_SEC
+
+    BackHandler(enabled = state.rawKeyboardMode) { vm.toggleRawKeyboardMode() }
+    BackHandler(enabled = !state.rawKeyboardMode && state.selectedPhrase != null) { vm.dismissBrushStrip() }
 
     Box(
         modifier = modifier

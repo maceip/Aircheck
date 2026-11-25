@@ -214,13 +214,15 @@ fun Modifier.neumorphicSurface(
         )
     } else {
         if (role == KeyRole.COMMIT || role == KeyRole.VOICE || role == KeyRole.REPAIR || role == KeyRole.ACTIVE) {
-            val inset = (r * 0.45f).coerceAtMost(14.dp.toPx())
-            drawLine(
-                color = if (enabled) effectiveRole.hi else effectiveRole.hi.copy(alpha = 0.35f),
-                start = Offset(inset, 1.dp.toPx()),
-                end = Offset((size.width - inset).coerceAtLeast(inset), 1.dp.toPx()),
-                strokeWidth = 1.dp.toPx()
-            )
+            val inset = (r * 0.92f).coerceAtMost((size.width / 2f).coerceAtLeast(0f))
+            if (size.width - inset > inset) {
+                drawLine(
+                    color = if (enabled) effectiveRole.hi else effectiveRole.hi.copy(alpha = 0.35f),
+                    start = Offset(inset, 1.dp.toPx()),
+                    end = Offset(size.width - inset, 1.dp.toPx()),
+                    strokeWidth = 1.dp.toPx()
+                )
+            }
         }
         drawRoundRect(
             color = effectiveRole.border,
