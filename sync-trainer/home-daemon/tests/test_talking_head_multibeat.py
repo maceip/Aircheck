@@ -1222,3 +1222,47 @@ def test_generate_talking_head_lambda_1080p_endpoint_single_pass(tmp_path: Path)
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_build_lambda_voice_synthesizer_fn_decodes_48k_wav_to_44k_pcm(tmp_path: Path) -> None:
+    import http.server
+    from types import SimpleNamespace
+
+    class _FakeLambdaVoiceHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            body = json.dumps({"ok": True, "role": "voice"}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:  # noqa: N802
+            _ = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            wav_p = tmp_path / "synth48.wav"
+            t = np.linspace(0.0, 1.5, int(48000 * 1.5), endpoint=False, dtype=np.float32)
+            sf.write(str(wav_p), 0.25 * np.sin(2.0 * np.pi * 195.0 * t), 48000, subtype="PCM_16")
+            body = json.dumps({"wav_b64": base64.b64encode(wav_p.read_bytes()).decode("ascii")}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args: Any) -> None:
+            return
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeLambdaVoiceHandler)
+    port = httpd.server_address[1]
+    th = threading.Thread(target=httpd.serve_forever, daemon=True)
+    th.start()
+    try:
+        synth_fn = ota_server._build_lambda_voice_synthesizer_fn(f"http://127.0.0.1:{port}")
+        assert synth_fn is not None
+        takes = synth_fn(SimpleNamespace(index=0, raw_text="Good evening from the studio."), 1)
+        assert len(takes) == 1
+        assert takes[0].pcm44k.dtype == np.float32
+        assert takes[0].pcm44k.size > int(44100 * 1.5)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

@@ -722,6 +722,7 @@ def _build_lambda_voice_synthesizer_fn(endpoint: str) -> Callable[..., list[Any]
             raise RuntimeError(f"AIRCHECK_VOICE_ENDPOINT {base} unreachable: {exc}") from exc
         return None
 
+    import numpy as np
     import render_broadcast_studio as rbs
 
     call_counter = [0]
@@ -1906,6 +1907,10 @@ class RenderJobManager:
         metrics_out["av_sync_drift_ms"] = av_qa["av_sync_drift_ms"]
         metrics_out["video_duration_ms"] = av_qa["video_duration_ms"]
         metrics_out["audio_duration_ms"] = av_qa["audio_duration_ms"]
+        if isinstance(head_meta.get("identity_qa"), Mapping):
+            metrics_out["identity_qa"] = dict(head_meta["identity_qa"])
+        if head_meta.get("engine"):
+            metrics_out["video_engine"] = str(head_meta["engine"])
 
         duration_ms = _probe_media_duration_ms(staged_mp4)
         if duration_ms <= 0:
