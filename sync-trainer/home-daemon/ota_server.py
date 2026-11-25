@@ -30,6 +30,8 @@ import base64
 import binascii
 from concurrent.futures import ThreadPoolExecutor
 import datetime
+import hashlib
+import io
 import ipaddress
 import json
 import logging
@@ -2566,6 +2568,386 @@ class RenderJobManager:
             runner=self._plate_runner,
         )
 
+    def generate_shot_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Renders & caches a real 180x252 JPEG shot preview in ``renders_dir / shotprev_<sha16>.jpg``."""
+        from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+        if not isinstance(payload, dict):
+            raise ValueError("Shot-preview request body must be a JSON object")
+
+        raw_type = payload.get("shot_type") if payload.get("shot_type") is not None else payload.get("type")
+        if not isinstance(raw_type, str) or not raw_type.strip():
+            raise ValueError("shot_type must be one of ['face', 'pip', 'broll', 'card']")
+        type_norm = re.sub(r"[\s-]+", "_", raw_type.strip().lower())
+        type_aliases = {
+            "face": "face",
+            "talking_head": "face",
+            "pip": "pip",
+            "corner_head": "pip",
+            "broll": "broll",
+            "b_roll": "broll",
+            "card": "card",
+        }
+        if type_norm not in type_aliases:
+            raise ValueError(
+                f"shot_type must be one of ['face', 'pip', 'broll', 'card'], got {raw_type!r}"
+            )
+        shot_type = type_aliases[type_norm]
+
+        raw_prompt = payload.get("prompt")
+        if raw_prompt is not None and not isinstance(raw_prompt, str):
+            raise ValueError("prompt must be a string")
+        clean_prompt = " ".join(str(raw_prompt or "").split())[:240]
+
+        raw_headline = payload.get("headline")
+        if raw_headline is not None and not isinstance(raw_headline, str):
+            raise ValueError("headline must be a string")
+        clean_headline = " ".join(str(raw_headline or "").split())[:120]
+
+        raw_photo_b64 = payload.get("photo_jpeg_base64")
+        photo_bytes: bytes | None = None
+        if raw_photo_b64 is not None and str(raw_photo_b64).strip() != "":
+            photo_bytes = _decode_strict_base64(raw_photo_b64, "photo_jpeg_base64")
+
+        raw_plate_id = payload.get("plate_id")
+        explicit_plate: Path | None = None
+        if raw_plate_id is not None and str(raw_plate_id).strip() != "":
+            pid_str = str(raw_plate_id).strip()
+            explicit_plate = studio_plate_path(self.plates_dir, pid_str)
+            if explicit_plate is None:
+                raise ValueError(f"Backdrop plate '{pid_str}' not found")
+
+        generate_backdrop_flag = bool(payload.get("generate_backdrop", False))
+
+        # Validate avatar source upfront for face & pip shots.
+        avatar_fp = "none"
+        if shot_type in ("face", "pip"):
+            if photo_bytes is not None:
+                avatar_fp = "b64:" + hashlib.sha256(photo_bytes).hexdigest()[:16]
+            else:
+                if not self.default_avatar_path.is_file() or self.default_avatar_path.stat().st_size == 0:
+                    raise FileNotFoundError(
+                        f"Default avatar image not found at {self.default_avatar_path}; "
+                        "supply photo_jpeg_base64 or configure default_avatar_path."
+                    )
+                st = self.default_avatar_path.stat()
+                avatar_fp = f"avatar:{self.default_avatar_path.resolve()}:{st.st_mtime_ns}:{st.st_size}"
+
+        # Resolve optional plate source for broll & pip shots.
+        plate_file: Path | None = None
+        plate_fp = "slate"
+        if shot_type in ("broll", "pip"):
+            if explicit_plate is not None:
+                pst = explicit_plate.stat()
+                plate_file = explicit_plate
+                plate_fp = f"explicit:{explicit_plate.name}:{pst.st_mtime_ns}"
+            elif generate_backdrop_flag:
+                gen = self.generate_backdrop(
+                    {"prompt": clean_prompt or "studio cutaway visual", "aspect": "9:16"}
+                )
+                gen_pid = str(gen["plate_id"])
+                plate_file = studio_plate_path(self.plates_dir, gen_pid)
+                if plate_file is not None:
+                    pst = plate_file.stat()
+                    plate_fp = f"gen:{plate_file.name}:{pst.st_mtime_ns}"
+            elif self.plates_dir.is_dir():
+                matched_plate: Path | None = None
+                if clean_prompt:
+                    want_lower = clean_prompt.lower()
+                    for meta_json in sorted(
+                        self.plates_dir.glob("plate_*.json"),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    ):
+                        try:
+                            meta = json.loads(meta_json.read_text(encoding="utf-8"))
+                            if str(meta.get("prompt") or "").strip().lower() == want_lower:
+                                cand_png = studio_plate_path(self.plates_dir, meta_json.stem)
+                                if cand_png is not None:
+                                    matched_plate = cand_png
+                                    break
+                        except Exception:
+                            continue
+                if matched_plate is None:
+                    png_candidates = sorted(
+                        (
+                            p
+                            for p in self.plates_dir.glob("plate_*.png")
+                            if p.is_file() and p.stat().st_size > 0
+                        ),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if png_candidates:
+                        matched_plate = png_candidates[0]
+                if matched_plate is not None:
+                    pst = matched_plate.stat()
+                    plate_file = matched_plate
+                    plate_fp = f"dir:{matched_plate.name}:{pst.st_mtime_ns}"
+
+        target_w, target_h = 180, 252
+        cache_key = json.dumps(
+            {
+                "v": 1,
+                "shot_type": shot_type,
+                "prompt": clean_prompt,
+                "headline": clean_headline,
+                "avatar_fp": avatar_fp,
+                "plate_fp": plate_fp,
+            },
+            sort_keys=True,
+        )
+        digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()[:16]
+        preview_id = f"shotprev_{digest}"
+        filename = f"{preview_id}.jpg"
+        self.renders_dir.mkdir(parents=True, exist_ok=True)
+        out_jpg = (self.renders_dir / filename).resolve()
+
+        if out_jpg.is_file() and out_jpg.stat().st_size > 0:
+            return {
+                "preview_id": preview_id,
+                "preview_url": f"/v1/renders/{filename}",
+                "shot_type": shot_type,
+                "width": target_w,
+                "height": target_h,
+            }
+
+        repo_root = Path(__file__).resolve().parents[2]
+        geist_sans_path = repo_root / "app" / "src" / "main" / "res" / "font" / "geist.ttf"
+        geist_mono_path = repo_root / "app" / "src" / "main" / "res" / "font" / "geist_mono.ttf"
+        fallback_font_path = repo_root / "app" / "src" / "main" / "res" / "font" / "space_grotesk.ttf"
+
+        def _load_font(preferred: Path, size: int) -> Any:
+            for candidate in (preferred, fallback_font_path):
+                if candidate.is_file():
+                    try:
+                        return ImageFont.truetype(str(candidate), size)
+                    except Exception:
+                        continue
+            return ImageFont.load_default()
+
+        def _center_crop_resize(src_img: Image.Image, w: int, h: int) -> Image.Image:
+            transposed = ImageOps.exif_transpose(src_img).convert("RGB")
+            sw, sh = transposed.size
+            if sw <= 0 or sh <= 0:
+                raise ValueError("Source image has invalid zero dimensions")
+            target_ratio = w / float(h)
+            src_ratio = sw / float(sh)
+            if src_ratio > target_ratio:
+                crop_w = max(1, int(round(sh * target_ratio)))
+                left = max(0, (sw - crop_w) // 2)
+                cropped = transposed.crop((left, 0, left + crop_w, sh))
+            else:
+                crop_h = max(1, int(round(sw / target_ratio)))
+                top = max(0, (sh - crop_h) // 2)
+                cropped = transposed.crop((0, top, sw, top + crop_h))
+            return cropped.resize((w, h), Image.Resampling.LANCZOS)
+
+        def _load_avatar_image() -> Image.Image:
+            try:
+                if photo_bytes is not None:
+                    with Image.open(io.BytesIO(photo_bytes)) as im:
+                        return ImageOps.exif_transpose(im).convert("RGB")
+                with Image.open(self.default_avatar_path) as im:
+                    return ImageOps.exif_transpose(im).convert("RGB")
+            except Exception as exc:
+                raise ValueError(f"Avatar image could not be decoded: {exc}") from exc
+
+        def _wrap_lines(text: str, max_chars_per_line: int, max_lines: int) -> list[str]:
+            words = text.split()
+            if not words:
+                return []
+            lines_out: list[str] = []
+            cur = ""
+            for word in words:
+                if len(word) > max_chars_per_line:
+                    if cur:
+                        lines_out.append(cur)
+                        cur = ""
+                    word = word[: max_chars_per_line - 1] + "."
+                cand = f"{cur} {word}".strip()
+                if len(cand) <= max_chars_per_line:
+                    cur = cand
+                else:
+                    if cur:
+                        lines_out.append(cur)
+                    cur = word
+                if len(lines_out) >= max_lines:
+                    break
+            if cur and len(lines_out) < max_lines:
+                lines_out.append(cur)
+            return lines_out[:max_lines]
+
+        def _render_broll_canvas() -> Image.Image:
+            f_mono = _load_font(geist_mono_path, 10)
+            f_cue = _load_font(geist_sans_path, 12)
+            if plate_file is not None and plate_file.is_file():
+                with Image.open(plate_file) as pim:
+                    base_rgb = _center_crop_resize(pim, target_w, target_h)
+                overlay = base_rgb.convert("RGBA")
+                scrim = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+                sdraw = ImageDraw.Draw(scrim)
+                if clean_prompt:
+                    sdraw.rectangle([(0, 152), (target_w, target_h)], fill=(12, 16, 22, 188))
+                sdraw.rounded_rectangle([(10, 10), (62, 26)], radius=5, fill=(16, 16, 19, 210))
+                overlay = Image.alpha_composite(overlay, scrim)
+                draw = ImageDraw.Draw(overlay)
+                draw.text((16, 12), "B-ROLL", font=f_mono, fill=(235, 235, 239, 255))
+                if clean_prompt:
+                    for idx_l, line_s in enumerate(_wrap_lines(clean_prompt, 20, 3)):
+                        draw.text(
+                            (12, 162 + idx_l * 16),
+                            line_s,
+                            font=f_cue,
+                            fill=(235, 235, 239, 255),
+                        )
+                return overlay.convert("RGB")
+
+            # Crisp procedural dark-slate B-roll studio frame (#16212E -> #1C2A3A) with lighting & viewfinder grid.
+            canvas_rgb = Image.new("RGB", (target_w, target_h), (22, 33, 46))
+            px = canvas_rgb.load()
+            assert px is not None
+            for y in range(target_h):
+                fy = y / float(max(1, target_h - 1))
+                for x in range(target_w):
+                    fx = x / float(max(1, target_w - 1))
+                    band = ((x + y) // 18) % 2
+                    boost = 6 if band == 0 else 0
+                    glow = max(0.0, 1.0 - ((fx - 0.35) ** 2 + (fy - 0.32) ** 2) * 1.6)
+                    r = min(255, int(20 + 10 * glow + boost))
+                    g = min(255, int(31 + 16 * glow + boost))
+                    b = min(255, int(45 + 22 * glow + boost))
+                    px[x, y] = (r, g, b)
+
+            draw = ImageDraw.Draw(canvas_rgb)
+            # Rule-of-thirds subtle optical grid
+            for gx in (60, 120):
+                draw.line([(gx, 8), (gx, target_h - 8)], fill=(38, 54, 74), width=1)
+            for gy in (84, 168):
+                draw.line([(8, gy), (target_w - 8, gy)], fill=(38, 54, 74), width=1)
+            # Viewfinder corner marks
+            bracket = 10
+            m = 10
+            c_col = (142, 142, 150)
+            draw.line([(m, m), (m + bracket, m)], fill=c_col, width=1)
+            draw.line([(m, m), (m, m + bracket)], fill=c_col, width=1)
+            draw.line([(target_w - m - bracket, m), (target_w - m, m)], fill=c_col, width=1)
+            draw.line([(target_w - m, m), (target_w - m, m + bracket)], fill=c_col, width=1)
+            draw.line([(m, target_h - m), (m + bracket, target_h - m)], fill=c_col, width=1)
+            draw.line([(m, target_h - m - bracket), (m, target_h - m)], fill=c_col, width=1)
+            draw.line(
+                [(target_w - m - bracket, target_h - m), (target_w - m, target_h - m)],
+                fill=c_col,
+                width=1,
+            )
+            draw.line(
+                [(target_w - m, target_h - m - bracket), (target_w - m, target_h - m)],
+                fill=c_col,
+                width=1,
+            )
+
+            draw.rounded_rectangle([(14, 16), (68, 33)], radius=5, fill=(16, 16, 19))
+            draw.text((20, 19), "B-ROLL", font=f_mono, fill=(235, 235, 239))
+
+            cue_text = clean_prompt or "Visual cutaway"
+            cue_lines = _wrap_lines(cue_text, 19, 4)
+            start_y = 102
+            for idx_l, line_s in enumerate(cue_lines):
+                draw.text((16, start_y + idx_l * 17), line_s, font=f_cue, fill=(235, 235, 239))
+            draw.rounded_rectangle(
+                [(1, 1), (target_w - 2, target_h - 2)],
+                radius=8,
+                outline=(44, 44, 50),
+                width=1,
+            )
+            return canvas_rgb
+
+        if shot_type == "face":
+            avatar_img = _load_avatar_image()
+            rendered = _center_crop_resize(avatar_img, target_w, target_h)
+        elif shot_type == "broll":
+            rendered = _render_broll_canvas()
+        elif shot_type == "pip":
+            avatar_img = _load_avatar_image()
+            base_rgba = _render_broll_canvas().convert("RGBA")
+            pip_w, pip_h = 56, 72
+            pip_x = target_w - pip_w - 10
+            pip_y = target_h - pip_h - 10
+
+            shadow = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+            sdraw = ImageDraw.Draw(shadow)
+            sdraw.rounded_rectangle(
+                [(pip_x - 2, pip_y - 2), (pip_x + pip_w + 2, pip_y + pip_h + 2)],
+                radius=11,
+                fill=(0, 0, 0, 195),
+            )
+            base_rgba = Image.alpha_composite(base_rgba, shadow)
+
+            portrait_crop = _center_crop_resize(avatar_img, pip_w, pip_h)
+            mask = Image.new("L", (pip_w, pip_h), 0)
+            ImageDraw.Draw(mask).rounded_rectangle(
+                [(0, 0), (pip_w - 1, pip_h - 1)], radius=9, fill=255
+            )
+            base_rgba.paste(portrait_crop, (pip_x, pip_y), mask)
+            ImageDraw.Draw(base_rgba).rounded_rectangle(
+                [(pip_x, pip_y), (pip_x + pip_w - 1, pip_y + pip_h - 1)],
+                radius=9,
+                outline=(235, 235, 239, 245),
+                width=2,
+            )
+            rendered = base_rgba.convert("RGB")
+        else:  # shot_type == "card"
+            # #1A1A1E card canvas with #D71921 red accent bar and rendered headline/prompt text.
+            rendered = Image.new("RGB", (target_w, target_h), (26, 26, 30))
+            draw = ImageDraw.Draw(rendered)
+            f_mono = _load_font(geist_mono_path, 10)
+            f_head = _load_font(geist_sans_path, 14)
+            f_body = _load_font(geist_sans_path, 12)
+
+            draw.rounded_rectangle(
+                [(1, 1), (target_w - 2, target_h - 2)],
+                radius=10,
+                outline=(44, 44, 50),
+                width=1,
+            )
+            draw.text((16, 26), "CARD", font=f_mono, fill=(142, 142, 150))
+            # Crisp #D71921 red accent bar
+            draw.rectangle([(16, 48), (164, 56)], fill=(215, 25, 33))
+
+            cursor_y = 70
+            primary_txt = clean_headline or clean_prompt
+            secondary_txt = clean_prompt if (clean_headline and clean_prompt and clean_prompt != clean_headline) else ""
+            if primary_txt:
+                for line_s in _wrap_lines(primary_txt, 17, 4):
+                    draw.text((16, cursor_y), line_s, font=f_head, fill=(235, 235, 239))
+                    cursor_y += 19
+            if secondary_txt and cursor_y <= 190:
+                cursor_y += 6
+                for line_s in _wrap_lines(secondary_txt, 20, 4):
+                    if cursor_y > 226:
+                        break
+                    draw.text((16, cursor_y), line_s, font=f_body, fill=(200, 200, 206))
+                    cursor_y += 16
+
+        tmp_jpg = out_jpg.with_name(f".{filename}.tmp.{os.getpid()}.{threading.get_ident()}.jpg")
+        try:
+            with tmp_jpg.open("wb") as fh:
+                rendered.save(fh, format="JPEG", quality=90, subsampling=0)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_jpg, out_jpg)
+        finally:
+            if tmp_jpg.exists():
+                tmp_jpg.unlink(missing_ok=True)
+
+        return {
+            "preview_id": preview_id,
+            "preview_url": f"/v1/renders/{filename}",
+            "shot_type": shot_type,
+            "width": target_w,
+            "height": target_h,
+        }
+
 
 # S2-Pro emits ~21.5 codec frames per second of speech (320 tokens -> 14.86 s measured on this rig).
 TTS_TOKENS_PER_SEC = 21.5
@@ -3377,6 +3759,7 @@ class OtaHttpServer(ThreadingHTTPServer):
                 cwd=str(worker_dir),
                 capture_output=True,
                 text=True,
+                timeout=120,
                 check=False,
             )
             if proc.returncode != 0 or not dist_entry.is_file():
@@ -3555,6 +3938,22 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._handle_get_job(parts[0], head_only=head_only)
+            return
+
+        if raw_path.startswith("/v1/renders/previews/"):
+            remainder = raw_path[len("/v1/renders/previews/") :]
+            parts = remainder.split("/")
+            if len(parts) != 1 or not parts[0] or not parts[0].startswith("shotprev_"):
+                self._send_json(
+                    HTTPStatus.FORBIDDEN if len(parts) > 1 else HTTPStatus.NOT_FOUND,
+                    {
+                        "error": "forbidden" if len(parts) > 1 else "not_found",
+                        "detail": "Nested preview path rejected" if len(parts) > 1 else "Invalid preview route",
+                    },
+                    head_only=head_only,
+                )
+                return
+            self._handle_render_download(parts[0], head_only=head_only)
             return
 
         if raw_path.startswith("/v1/renders/"):
@@ -3901,11 +4300,20 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/draft/arc":
             self._handle_post_draft_pass("arc", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
             return
+        if parsed.path == "/v1/draft/reroll-beat":
+            self._handle_post_draft_pass("reroll_beat", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
+        if parsed.path == "/v1/draft/followup":
+            self._handle_post_draft_pass("followup", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
         if parsed.path == "/v1/draft/synthesize-script":
             self._handle_post_draft_pass("synthesize_script", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
             return
         if parsed.path == "/v1/draft/rewrite":
             self._handle_post_draft_pass("rewrite", max_bytes=MAX_DRAFT_TEXT_BODY_BYTES)
+            return
+        if parsed.path == "/v1/studio/shot-preview":
+            self._handle_post_shot_preview()
             return
         if parsed.path == "/v1/remotion/install":
             self._handle_post_remotion_install()
@@ -4232,6 +4640,43 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             return
         except Exception as exc:
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": error_code, "detail": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _handle_post_shot_preview(self) -> None:
+        text_body = self._read_post_utf8_body(
+            max_bytes=16 * 1024 * 1024,
+            empty_detail="Empty /v1/studio/shot-preview payload",
+        )
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"},
+            )
+            return
+        try:
+            result = self.server.render_manager.generate_shot_preview(decoded)
+        except ValueError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "invalid_shot_preview_request", "detail": str(exc)},
+            )
+            return
+        except FileNotFoundError as exc:
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {"error": "not_found", "detail": str(exc)},
+            )
+            return
+        except Exception as exc:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY,
+                {"error": "shot_preview_failed", "detail": str(exc)},
+            )
             return
         self._send_json(HTTPStatus.OK, result)
 
