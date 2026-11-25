@@ -462,11 +462,20 @@ def compose_studio_cut(
 
     clause_dicts = [c for c in clauses if isinstance(c, dict)]
     timed_pngs: list[tuple[Path, float, float]] = []
+    broll_windows: list[tuple[float, float]] = []
     broll_count = 0
     caption_count = 0
     overlay_count = 0
     punch_windows: list[tuple[float, float]] = []
     talking_head_seen = 0
+
+    # Corner talking-head PiP dimensions (top-right broadcast inset during B-roll cutaways)
+    if width < height:
+        pip_w, pip_h = 236, 316
+        pip_x, pip_y = width - pip_w - 36, 56
+    else:
+        pip_w, pip_h = 320, 220
+        pip_x, pip_y = width - pip_w - 40, 36
 
     for idx, item in enumerate(clause_dicts):
         window = remapped_window(item)
@@ -477,21 +486,32 @@ def compose_studio_cut(
         if mode == "BROLL_CUTAWAY":
             caption = str(item.get("broll_caption") or item.get("spoken_text") or "").strip()[:88]
             png = work_dir / f"broll_plate_{idx}.png"
-            img = Image.new("RGBA", (width, height), (10, 12, 18, 242))
+            img = Image.new("RGBA", (width, height), (10, 12, 18, 244))
             draw = ImageDraw.Draw(img)
-            box = (int(width * 0.055), int(height * 0.17), int(width * 0.945), int(height * 0.6))
+            if width < height:
+                box = (int(width * 0.05), int(height * 0.33), int(width * 0.95), int(height * 0.74))
+            else:
+                box = (int(width * 0.045), int(height * 0.14), int(width * 0.67), int(height * 0.74))
             draw.rectangle([box[:2], box[2:]], fill=(18, 22, 32, 255), outline=(235, 235, 239, 220), width=3)
-            draw.text((box[0] + int(28 * scale), box[1] + int(36 * scale)), "B-ROLL", font=f_tag, fill=(142, 142, 150, 255))
-            chars = max(12, int(26 * width / 720))
+            draw.text((box[0] + int(28 * scale), box[1] + int(32 * scale)), "B-ROLL CUTAWAY", font=f_tag, fill=(184, 255, 0, 255))
+            chars = max(12, int(26 * (box[2] - box[0]) / 648))
             for li, line in enumerate(_wrap(caption, chars)[:5]):
                 draw.text(
-                    (box[0] + int(28 * scale), box[1] + int(110 * scale) + li * int(58 * scale)),
+                    (box[0] + int(28 * scale), box[1] + int(96 * scale) + li * int(54 * scale)),
                     line,
                     font=f_title,
                     fill=(244, 246, 250, 255),
                 )
+            # Crisp broadcast frame around top-right live talking-head PiP window
+            draw.rectangle(
+                [(pip_x - 3, pip_y - 3), (pip_x + pip_w + 3, pip_y + pip_h + 3)],
+                fill=(0, 0, 0, 0),
+                outline=(235, 235, 239, 235),
+                width=3,
+            )
             img.save(png)
             timed_pngs.append((png, start_s, end_s))
+            broll_windows.append((start_s, end_s))
             broll_count += 1
         else:
             if options.punch_in and talking_head_seen % 2 == 1:
@@ -588,7 +608,25 @@ def compose_studio_cut(
         frame_w, frame_h = width, height
 
     base_fit = f"scale={frame_w}:{frame_h}:force_original_aspect_ratio=increase,crop={frame_w}:{frame_h},fps=30"
-    if punch_windows:
+    if broll_windows:
+        if punch_windows:
+            zw = int(round(frame_w * PUNCH_IN_SCALE))
+            zh = int(round(frame_h * PUNCH_IN_SCALE))
+            zw += zw % 2
+            zh += zh % 2
+            parts.append("[0:v]split=3[p_norm][p_zoom][p_pip_src]")
+            parts.append(f"[p_norm]{base_fit}[p_n]")
+            parts.append(
+                f"[p_zoom]scale={zw}:{zh}:force_original_aspect_ratio=increase,crop={frame_w}:{frame_h},fps=30[p_z]"
+            )
+            parts.append(f"[p_n][p_z]overlay=0:0:enable='{_between(punch_windows)}'[pres0]")
+        else:
+            parts.append("[0:v]split=2[p_norm][p_pip_src]")
+            parts.append(f"[p_norm]{base_fit}[pres0]")
+        parts.append(
+            f"[p_pip_src]scale={pip_w}:{pip_h}:force_original_aspect_ratio=increase,crop={pip_w}:{pip_h},fps=30[vpip]"
+        )
+    elif punch_windows:
         zw = int(round(frame_w * PUNCH_IN_SCALE))
         zh = int(round(frame_h * PUNCH_IN_SCALE))
         zw += zw % 2
@@ -624,6 +662,11 @@ def compose_studio_cut(
             f"[v{i}][{in_idx}:v]overlay=0:0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[v{i + 1}]"
         )
     graded = f"v{len(timed_pngs)}"
+    if broll_windows:
+        parts.append(
+            f"[{graded}][vpip]overlay={pip_x}:{pip_y}:shortest=1:enable='{_between(broll_windows)}'[v_with_pip]"
+        )
+        graded = "v_with_pip"
     grade_filters: list[str] = []
     if abs(look.brightness_ev) > 1e-6:
         gain = round(2.0 ** look.brightness_ev, 4)

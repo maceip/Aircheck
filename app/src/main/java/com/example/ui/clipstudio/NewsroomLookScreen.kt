@@ -122,8 +122,8 @@ fun NewsroomLookScreen(
             val busy = if (state.isGeneratingBackdrop) "Generating backdrop plate on rig…" else null
             CsStatusLine(busy, state.errorMessage, state.statusNotice, vm::dismissError, vm::dismissNotice)
 
-            // Stage canvas preview
-            Box(Modifier.fillMaxWidth().height(360.dp).hairlineBottom().padding(16.dp)) {
+            // Stage canvas preview (responsive so controls + TickRulers always fit cleanly)
+            Box(Modifier.fillMaxWidth().weight(0.45f).hairlineBottom().padding(12.dp)) {
                 LookCanvas(draft, tab, onPickZone = { tab = it })
             }
 
@@ -143,7 +143,7 @@ fun NewsroomLookScreen(
                 }
             }
 
-            Column(Modifier.weight(1f).fillMaxWidth().dotPanel().verticalScroll(rememberScrollState())) {
+            Column(Modifier.weight(0.55f).fillMaxWidth().dotPanel().verticalScroll(rememberScrollState())) {
                 when (tab) {
                     0 -> BackdropTab(state, vm, draft, looks, prompt, onPrompt = { prompt = it }, onSelect = { selectedId = it }, onDraft = { draft = it })
                     1 -> BrollTab(state, vm)
@@ -161,7 +161,9 @@ fun NewsroomLookScreen(
                     "duplicate look",
                     onClick = { draft?.let { d -> vm.duplicateNewsroomLook(d.id)?.let { selectedId = it } } },
                     enabled = draft != null && !dirty,
-                    modifier = Modifier.weight(136f).fillMaxSize().testTag("cs_look_duplicate")
+                    size = 11.sp,
+                    horizontalPadding = 6.dp,
+                    modifier = Modifier.weight(130f).fillMaxSize().testTag("cs_look_duplicate")
                 )
                 CsKeyLabel(
                     "test on clip",
@@ -172,7 +174,9 @@ fun NewsroomLookScreen(
                         }
                     },
                     enabled = draft != null && state.corePipelineSession.hasTalkingHead && !state.isCoreStageBusy,
-                    modifier = Modifier.weight(112f).fillMaxSize().testTag("cs_look_test")
+                    size = 11.sp,
+                    horizontalPadding = 6.dp,
+                    modifier = Modifier.weight(114f).fillMaxSize().testTag("cs_look_test")
                 )
                 CsKeyLabel(
                     if (draft?.isDefault == true && !dirty) "default look ✓" else "set default look",
@@ -183,10 +187,12 @@ fun NewsroomLookScreen(
                         }
                     },
                     role = KeyRole.COMMIT,
+                    size = 11.sp,
                     weight = FontWeight.Medium,
+                    horizontalPadding = 8.dp,
                     trailingArrow = true,
                     enabled = draft != null && (draft?.isDefault != true || dirty),
-                    modifier = Modifier.weight(164f).fillMaxSize().testTag("cs_look_default")
+                    modifier = Modifier.weight(168f).fillMaxSize().testTag("cs_look_default")
                 )
             }
         }
@@ -412,14 +418,14 @@ private fun BackdropTab(
         tag = "cs_scrub_ev"
     )
     CsWell(Modifier.padding(12.dp).fillMaxWidth()) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             CsChip(
                 "light: warm",
                 draft.light == NewsroomLook.LIGHT_WARM,
                 { onDraft(draft.copy(light = if (draft.light == NewsroomLook.LIGHT_WARM) NewsroomLook.LIGHT_NEUTRAL else NewsroomLook.LIGHT_WARM)) },
                 height = 28.dp,
-                size = 11.sp,
-                horizontalPadding = 9.dp,
+                size = 10.sp,
+                horizontalPadding = 8.dp,
                 modifier = Modifier.testTag("cs_pill_warm")
             )
             CsChip(
@@ -427,8 +433,8 @@ private fun BackdropTab(
                 draft.light == NewsroomLook.LIGHT_COOL,
                 { onDraft(draft.copy(light = if (draft.light == NewsroomLook.LIGHT_COOL) NewsroomLook.LIGHT_NEUTRAL else NewsroomLook.LIGHT_COOL)) },
                 height = 28.dp,
-                size = 11.sp,
-                horizontalPadding = 9.dp,
+                size = 10.sp,
+                horizontalPadding = 8.dp,
                 modifier = Modifier.testTag("cs_pill_cool")
             )
             CsChip(
@@ -436,8 +442,8 @@ private fun BackdropTab(
                 draft.grain,
                 { onDraft(draft.copy(grain = !draft.grain)) },
                 height = 28.dp,
-                size = 11.sp,
-                horizontalPadding = 9.dp,
+                size = 10.sp,
+                horizontalPadding = 8.dp,
                 modifier = Modifier.testTag("cs_pill_grain")
             )
             CsChip(
@@ -445,8 +451,8 @@ private fun BackdropTab(
                 draft.border,
                 { onDraft(draft.copy(border = !draft.border)) },
                 height = 28.dp,
-                size = 11.sp,
-                horizontalPadding = 9.dp,
+                size = 10.sp,
+                horizontalPadding = 8.dp,
                 modifier = Modifier.testTag("cs_pill_border")
             )
         }

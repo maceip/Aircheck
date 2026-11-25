@@ -199,10 +199,10 @@ fun SparkScreen(
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 310.dp)
+                        .heightIn(max = 228.dp)
                         .verticalScroll(rememberScrollState())
-                        .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     CsSectionLabel("KEEP FROM YOUR NOTE")
                     CsWell(Modifier.fillMaxWidth()) {
@@ -270,19 +270,24 @@ fun SparkScreen(
                     onRelease = { if (state.isRecordingSeed) vm.toggleLatchMic() },
                     held = state.isRecordingSeed,
                     enabled = !state.isRecordingSteer && !state.isRecordingSplice,
-                    modifier = Modifier.weight(116f).fillMaxSize().testTag("cs_rerecord")
+                    size = 11.sp,
+                    modifier = Modifier.weight(110f).fillMaxSize().testTag("cs_rerecord")
                 )
                 CsKeyLabel(
                     "keep last 15s",
                     onClick = vm::distillLast15Seconds,
                     enabled = !state.isBusy,
-                    modifier = Modifier.weight(112f).fillMaxSize().testTag("cs_keep_15s")
+                    size = 11.sp,
+                    horizontalPadding = 6.dp,
+                    modifier = Modifier.weight(118f).fillMaxSize().testTag("cs_keep_15s")
                 )
                 CsKeyLabel(
                     "write ${if (doc.arcTargetSec > 0) doc.arcTargetSec else DraftDeckViewModel.ARC_TARGET_SEC}s script",
                     onClick = vm::writeVideoScript,
                     role = KeyRole.COMMIT,
+                    size = 11.sp,
                     weight = FontWeight.Medium,
+                    horizontalPadding = 10.dp,
                     trailingArrow = true,
                     enabled = doc.seedTranscript.isNotBlank() && !state.isBusy,
                     modifier = Modifier.weight(184f).fillMaxSize().testTag("cs_write_script")

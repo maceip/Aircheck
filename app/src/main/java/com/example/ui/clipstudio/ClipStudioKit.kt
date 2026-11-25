@@ -228,8 +228,15 @@ fun CsKeyLabel(
         textColor = textColor,
         contentAlignment = contentAlignment ?: if (trailingArrow) Arrangement.SpaceBetween else Arrangement.Center
     ) { tint ->
-        Text(label, style = mono(size, tint, weight, 0.02f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (trailingArrow) Text("->", style = mono(size, tint, weight))
+        Text(
+            label,
+            style = mono(size, tint, weight, 0.02f),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            modifier = if (trailingArrow) Modifier.weight(1f, fill = false).padding(end = 4.dp) else Modifier
+        )
+        if (trailingArrow) Text("->", style = mono(size, tint, weight), maxLines = 1, softWrap = false)
     }
 }
 
@@ -245,7 +252,8 @@ fun CsHoldKey(
     modifier: Modifier = Modifier,
     role: KeyRole = KeyRole.VOICE,
     enabled: Boolean = true,
-    held: Boolean = false
+    held: Boolean = false,
+    size: TextUnit = 11.sp
 ) {
     val press by rememberUpdatedState(onPress)
     val release by rememberUpdatedState(onRelease)
@@ -275,8 +283,9 @@ fun CsHoldKey(
     ) {
         Text(
             label,
-            style = mono(12.sp, if (enabled) role.text else Cs.Dim, tracking = 0.02f),
+            style = mono(size, if (enabled) role.text else Cs.Dim, tracking = 0.02f),
             maxLines = 1,
+            softWrap = false,
             overflow = TextOverflow.Ellipsis
         )
     }

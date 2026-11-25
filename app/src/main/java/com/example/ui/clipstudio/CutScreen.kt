@@ -11,9 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -177,10 +175,16 @@ fun CutScreen(
             } else if (state.isGeneratingBackdrop) "Generating backdrop…" else null
             CsStatusLine(busy, state.errorMessage, state.statusNotice, vm::dismissError, vm::dismissNotice)
 
-            // Video monitor + real waveform stereo meter
-            Column(Modifier.fillMaxWidth().hairlineBottom().padding(start = 8.dp, end = 12.dp, top = 10.dp, bottom = 6.dp)) {
+            // Video monitor + real waveform stereo meter (responsive split so transcript/timeline always has generous height)
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(0.50f)
+                    .hairlineBottom()
+                    .padding(start = 8.dp, end = 12.dp, top = 8.dp, bottom = 4.dp)
+            ) {
                 Row(
-                    Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+                    Modifier.fillMaxWidth().weight(1f),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     CsStereoMeter(
@@ -193,7 +197,7 @@ fun CutScreen(
                     Box(
                         Modifier
                             .weight(1f)
-                            .aspectRatio(if (opts.aspect == CoreRenderOptions.ASPECT_HORIZONTAL) 16f / 9f else 370f / 312f)
+                            .fillMaxHeight()
                             .clip(RoundedCornerShape(2.dp))
                             .background(Cs.Video)
                             .border(1.dp, Cs.Hairline, RoundedCornerShape(2.dp))
@@ -270,7 +274,7 @@ fun CutScreen(
                 }
             }
 
-            Box(Modifier.weight(1f).fillMaxWidth().background(Color08).padding(12.dp)) {
+            Box(Modifier.weight(0.50f).fillMaxWidth().background(Color08).padding(10.dp)) {
                 if (session.clauses.isEmpty()) {
                     Text("No story loaded. Create the video from 02 SCRIPT.", style = sans(15.sp, Cs.Muted, 20.sp))
                 } else if (mode == "transcript") {
@@ -350,6 +354,8 @@ fun CutScreen(
                     if (isPlaying) "❚❚ pause" else "▶ play",
                     onClick = { vm.playerController.togglePlayPause() },
                     enabled = sourceUri != null,
+                    size = 11.sp,
+                    horizontalPadding = 6.dp,
                     modifier = Modifier.weight(103f).fillMaxSize().testTag("cs_cut_play")
                 )
                 CsKeyLabel(
@@ -357,6 +363,8 @@ fun CutScreen(
                     onClick = vm::resyncEditedVoice,
                     role = if (unsynced.isNotEmpty()) KeyRole.REPAIR else KeyRole.STD,
                     enabled = unsynced.isNotEmpty() && !state.isCoreStageBusy,
+                    size = 11.sp,
+                    horizontalPadding = 6.dp,
                     modifier = Modifier.weight(144f).fillMaxSize().testTag("cs_cut_sync")
                 )
                 val signature = session.cutSignature(defaultLook)
@@ -374,7 +382,9 @@ fun CutScreen(
                     label,
                     onClick = action,
                     role = KeyRole.COMMIT,
+                    size = 11.sp,
                     weight = FontWeight.Medium,
+                    horizontalPadding = 8.dp,
                     trailingArrow = true,
                     enabled = session.clauses.isNotEmpty() && !state.isCoreStageBusy && state.exportState != ExportState.EXPORTING &&
                         (unsynced.isEmpty() || !session.hasTtsAudio) && (!cutCurrent || clip != null),

@@ -232,12 +232,13 @@ class AircheckRunningAppE2ETest {
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             runBlocking { app.container.localRepo.newsroomLooksOnce().size } == beforeLooks + 1
         }
-        val newLook = studioVm.uiState.value.newsroomLooks.first()
+        val newLook = runBlocking { app.container.localRepo.newsroomLooksOnce().maxBy { it.createdAtMillis } }
+        composeRule.onNodeWithTag("cs_look_tile_${newLook.id}").performScrollTo().performClick()
         composeRule.onNodeWithTag("cs_scrub_ev_inc").performScrollTo().performClick()
         composeRule.onNodeWithTag("cs_scrub_ev_inc").performClick()
         composeRule.onNodeWithTag("cs_pill_warm").performScrollTo().performClick()
-        composeRule.onNodeWithTag("cs_pill_grain").performClick()
-        composeRule.onNodeWithTag("cs_pill_border").performClick()
+        composeRule.onNodeWithTag("cs_pill_grain").performScrollTo().performClick()
+        composeRule.onNodeWithTag("cs_pill_border").performScrollTo().performClick()
         composeRule.onNodeWithTag("cs_look_save").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             val l = runBlocking { app.container.localRepo.getNewsroomLook(newLook.id) }
@@ -256,7 +257,7 @@ class AircheckRunningAppE2ETest {
         }
         composeRule.onNodeWithTag("cs_cut_settings").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
-            composeRule.onAllNodesWithTag("system_deck_sheet").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithTag("open_voice_model_care_button").fetchSemanticsNodes().isNotEmpty()
         }
         captureScreenshot(screenshotDir, "v4_05_settings.png")
         assertTrue(studioVm.uiState.value.newsroomLooks.isNotEmpty())

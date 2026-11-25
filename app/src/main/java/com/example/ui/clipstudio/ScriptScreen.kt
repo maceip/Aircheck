@@ -272,22 +272,27 @@ fun ScriptScreen(
                     onRelease = vm::stopVoiceSplice,
                     held = state.isRecordingSplice,
                     enabled = candidate != null && !state.isRecordingSeed && !state.isRecordingSteer,
-                    modifier = Modifier.weight(208f).fillMaxSize().testTag("cs_speak_own_words")
+                    size = 10.sp,
+                    modifier = Modifier.weight(194f).fillMaxSize().testTag("cs_speak_own_words")
                 )
                 CsKeyLabel(
                     if (state.rawKeyboardMode) "cancel" else "keyboard",
                     onClick = vm::toggleRawKeyboardMode,
                     enabled = candidate != null,
-                    modifier = Modifier.weight(76f).fillMaxSize().testTag("cs_keyboard")
+                    size = 11.sp,
+                    horizontalPadding = 6.dp,
+                    modifier = Modifier.weight(84f).fillMaxSize().testTag("cs_keyboard")
                 )
                 CsKeyLabel(
                     "create video",
                     onClick = { candidate?.let { onCreateVideo(it.plainText()) } },
                     role = KeyRole.COMMIT,
+                    size = 11.sp,
                     weight = FontWeight.Medium,
+                    horizontalPadding = 8.dp,
                     trailingArrow = true,
                     enabled = candidate != null && !state.isBusy,
-                    modifier = Modifier.weight(128f).fillMaxSize().testTag("cs_create_video")
+                    modifier = Modifier.weight(134f).fillMaxSize().testTag("cs_create_video")
                 )
             }
         }
