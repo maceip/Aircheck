@@ -788,6 +788,112 @@ def _build_lambda_voice_synthesizer_fn(endpoint: str) -> Callable[..., list[Any]
     return _synth
 
 
+def _count_lex_words(text: str) -> int:
+    return len(re.findall(r"[A-Za-z0-9']+", text))
+
+
+def _coalesce_clauses_for_lambda_tts(
+    spoken_text: str,
+    caller_clauses: list[dict[str, str]] | None,
+    *,
+    min_words: int = 6,
+    max_merged_words: int = 34,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], bool]:
+    """Coalesce `< min_words` micro-clauses into natural breath groups for zero-shot synthesis & WeSpeaker/DNSMOS."""
+    if caller_clauses:
+        orig = [
+            {
+                "id": str(c.get("id") or f"clause_{i}"),
+                "spoken_text": str(c.get("spoken_text") or "").strip(),
+            }
+            for i, c in enumerate(caller_clauses)
+            if str(c.get("spoken_text") or "").strip()
+        ]
+    else:
+        parts = [
+            p.strip()
+            for p in re.split(r"(?<=[.!?])\s+", spoken_text.strip())
+            if p.strip() and re.search(r"[A-Za-z0-9]", p)
+        ]
+        orig = [{"id": f"c_{i + 1:03d}", "spoken_text": p} for i, p in enumerate(parts)]
+
+    if len(orig) <= 1:
+        return orig, orig, False
+
+    groups: list[list[dict[str, str]]] = []
+    buf: list[dict[str, str]] = []
+    buf_words = 0
+    for item in orig:
+        w = max(1, _count_lex_words(item["spoken_text"]))
+        if not buf:
+            buf = [item]
+            buf_words = w
+        elif buf_words < min_words and (buf_words + w) <= max_merged_words:
+            buf.append(item)
+            buf_words += w
+        else:
+            groups.append(buf)
+            buf = [item]
+            buf_words = w
+    if buf:
+        if groups and buf_words < min_words:
+            prev_words = sum(max(1, _count_lex_words(x["spoken_text"])) for x in groups[-1])
+            if prev_words + buf_words <= max_merged_words + 6:
+                groups[-1].extend(buf)
+            else:
+                groups.append(buf)
+        else:
+            groups.append(buf)
+
+    did_merge = len(groups) < len(orig)
+    merged = [
+        {
+            "id": grp[0]["id"],
+            "spoken_text": " ".join(x["spoken_text"] for x in grp).strip(),
+        }
+        for grp in groups
+    ]
+    return orig, merged, did_merge
+
+
+def _restore_caller_clause_timings_from_words(
+    orig_clauses: list[dict[str, str]],
+    words: list[dict[str, Any]],
+    duration_ms: int,
+) -> list[dict[str, Any]]:
+    """Recover monotonic `start_ms` / `end_ms` per original clause from forced-aligned `words`."""
+    if not orig_clauses:
+        return []
+    if not words:
+        return _distribute_clause_timings(orig_clauses, duration_ms)
+
+    counts = [max(1, _count_lex_words(c["spoken_text"])) for c in orig_clauses]
+    total_expected = max(1, sum(counts))
+    n_words = len(words)
+    out: list[dict[str, Any]] = []
+    cum = 0
+    prev_end = 0
+    for idx, c in enumerate(orig_clauses):
+        w_lo = min(n_words - 1, int(round((cum * n_words) / total_expected)))
+        cum += counts[idx]
+        w_hi = max(w_lo + 1, min(n_words, int(round((cum * n_words) / total_expected))))
+        raw_s = int(words[w_lo].get("start_ms", prev_end))
+        raw_e = duration_ms if idx == len(orig_clauses) - 1 else int(words[w_hi - 1].get("end_ms", raw_s))
+        s_ms = max(prev_end, min(duration_ms, raw_s))
+        e_ms = max(s_ms, min(duration_ms, raw_e))
+        prev_end = e_ms
+        out.append(
+            {
+                "id": c["id"],
+                "index": idx,
+                "spoken_text": c["spoken_text"],
+                "start_ms": s_ms,
+                "end_ms": e_ms,
+            }
+        )
+    return out
+
+
 def _validate_strict_tts_metrics(
     metrics: Mapping[str, Any] | None,
     *,
@@ -1618,9 +1724,18 @@ class RenderJobManager:
             voice_endpoint = os.environ.get("AIRCHECK_VOICE_ENDPOINT", "http://127.0.0.1:8452").strip()
             lambda_synth_fn = _build_lambda_voice_synthesizer_fn(voice_endpoint) if voice_endpoint else None
 
+            eff_caller_clauses = caller_clauses
+            orig_clauses_for_unmerge: list[dict[str, str]] | None = None
+            if lambda_synth_fn is not None:
+                orig_c, merged_c, did_merge = _coalesce_clauses_for_lambda_tts(spoken_text, caller_clauses)
+                if merged_c:
+                    eff_caller_clauses = merged_c
+                if caller_clauses and did_merge:
+                    orig_clauses_for_unmerge = orig_c
+
             kwargs: dict[str, Any] = {
                 "script_text": spoken_text,
-                "caller_clauses": caller_clauses,
+                "caller_clauses": eff_caller_clauses,
                 "project_id": project_id,
                 "output_dir": studio_dir,
                 "takes_per_clause": 1 if lambda_synth_fn is not None else takes_per_clause,
@@ -1657,7 +1772,17 @@ class RenderJobManager:
             if assets.get("room_tone") is not None:
                 kwargs["room_tone_path"] = assets["room_tone"]
 
-            return rbs.render_broadcast_studio(**kwargs)
+            studio_res = rbs.render_broadcast_studio(**kwargs)
+            if orig_clauses_for_unmerge is not None:
+                dur_ms = int(round(float(studio_res.get("duration_sec") or 0.0) * 1000.0))
+                if dur_ms <= 0 and studio_res.get("master_wav_path"):
+                    dur_ms, _ = _measure_wav_duration_and_peaks(Path(studio_res["master_wav_path"]), num_bins=16)
+                studio_res["timed_clauses"] = _restore_caller_clause_timings_from_words(
+                    orig_clauses_for_unmerge,
+                    list(studio_res.get("words") or []),
+                    dur_ms,
+                )
+            return studio_res
 
     def _default_render_runner(
         self,

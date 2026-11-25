@@ -1266,3 +1266,38 @@ def test_build_lambda_voice_synthesizer_fn_decodes_48k_wav_to_44k_pcm(tmp_path: 
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_coalesce_and_restore_micro_clauses_for_lambda_tts() -> None:
+    caller = [
+        {"id": "c0", "spoken_text": "Good evening."},
+        {"id": "c1", "spoken_text": "Two new AI agents shipped overnight with studio clarity."},
+    ]
+    orig, merged, did_merge = ota_server._coalesce_clauses_for_lambda_tts("", caller)
+    assert did_merge is True
+    assert len(merged) == 1
+    assert merged[0]["spoken_text"].startswith("Good evening. Two new AI agents")
+
+    words = [
+        {"word": "Good", "start_ms": 60, "end_ms": 320},
+        {"word": "evening", "start_ms": 320, "end_ms": 780},
+        {"word": "Two", "start_ms": 940, "end_ms": 1150},
+        {"word": "new", "start_ms": 1150, "end_ms": 1350},
+        {"word": "AI", "start_ms": 1350, "end_ms": 1620},
+        {"word": "agents", "start_ms": 1620, "end_ms": 2050},
+        {"word": "shipped", "start_ms": 2050, "end_ms": 2400},
+        {"word": "overnight", "start_ms": 2400, "end_ms": 2900},
+        {"word": "with", "start_ms": 2900, "end_ms": 3080},
+        {"word": "studio", "start_ms": 3080, "end_ms": 3450},
+        {"word": "clarity", "start_ms": 3450, "end_ms": 3950},
+    ]
+    restored = ota_server._restore_caller_clause_timings_from_words(orig, words, 4050)
+    assert len(restored) == 2
+    assert restored[0] == {"id": "c0", "index": 0, "spoken_text": "Good evening.", "start_ms": 60, "end_ms": 780}
+    assert restored[1] == {
+        "id": "c1",
+        "index": 1,
+        "spoken_text": "Two new AI agents shipped overnight with studio clarity.",
+        "start_ms": 940,
+        "end_ms": 4050,
+    }
