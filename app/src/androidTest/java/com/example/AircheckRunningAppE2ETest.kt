@@ -443,9 +443,9 @@ class AircheckRunningAppE2ETest {
 
         val activeLookId = studioVm.uiState.value.newsroomLooks.first().id
 
-        // Verify live :8443 plate (`plate_8c805a9f4007.png`) renders inside VideoLookPreviewPanel (`cs_look_plate`),
-        // AND exercise `cs_backdrop_prompt` + `cs_backdrop_generate` against live :8443 (verifying either a new plate
-        // or honest upstream 429/502 error surfacing with zero fake success toast).
+        // Verify live :8443 plate renders inside VideoLookPreviewPanel (`cs_look_plate`), AND generate a brand-new
+        // studio backdrop plate via `cs_backdrop_prompt` + `cs_backdrop_generate` against live :8443 (`200 OK`, zero errors).
+        val priorPlateId = runBlocking { app.container.localRepo.getNewsroomLook(activeLookId)?.plateId }
         composeRule.waitUntil(timeoutMillis = 10_000L) {
             composeRule.onAllNodesWithTag("cs_look_plate").fetchSemanticsNodes().isNotEmpty()
         }
@@ -458,19 +458,15 @@ class AircheckRunningAppE2ETest {
         composeRule.waitUntil(timeoutMillis = 120_000L) {
             val l = runBlocking { app.container.localRepo.getNewsroomLook(activeLookId) }
             !studioVm.uiState.value.isGeneratingBackdrop &&
-                (
-                    (l != null && l.plateId != "plate_8c805a9f4007" && !l.plateUrl.isNullOrBlank()) ||
-                        !studioVm.uiState.value.errorMessage.isNullOrBlank()
-                    )
+                l != null &&
+                !l.plateId.isNullOrBlank() &&
+                l.plateId != priorPlateId &&
+                !l.plateUrl.isNullOrBlank()
         }
-        if (!studioVm.uiState.value.errorMessage.isNullOrBlank()) {
-            assertNull(
-                "Must never show a fake success toast when backdrop generation returns HTTP error",
-                studioVm.uiState.value.toastMessage
-            )
-            composeRule.runOnUiThread { studioVm.dismissError() }
-            composeRule.waitForIdle()
-        }
+        assertNull(
+            "Backdrop generation must succeed cleanly on live :8443 without errors",
+            studioVm.uiState.value.errorMessage
+        )
         composeRule.onNodeWithTag("cs_look_plate").assertIsDisplayed()
 
         // Scroll back up to BLUR / BRIGHTNESS / LIGHT, step values, and capture clean unclipped screenshot

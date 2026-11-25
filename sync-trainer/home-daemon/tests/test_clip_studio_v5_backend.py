@@ -689,6 +689,55 @@ class TestClipStudioV5Backend(unittest.TestCase):
         with Image.open(io.BytesIO(raw_img)) as decoded_im:
             self.assertEqual(decoded_im.size, (180, 252))
 
+    def test_generate_backdrop_plate_uses_openai_when_bl_quota_exhausted(self) -> None:
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from unittest.mock import patch
+        import studio_cut
+
+        seen_requests: list[dict] = []
+        buf = io.BytesIO()
+        Image.new("RGB", (320, 480), (24, 36, 58)).save(buf, format="PNG")
+        png_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        class FakeImagesHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                n = int(self.headers.get("Content-Length", "0"))
+                seen_requests.append(json.loads(self.rfile.read(n).decode("utf-8")))
+                resp = json.dumps({"data": [{"b64_json": png_b64}]}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
+            def log_message(self, *_args: object) -> None:
+                return
+
+        srv = HTTPServer(("127.0.0.1", 0), FakeImagesHandler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            failing_bl = self.root / "failing_bl.sh"
+            failing_bl.write_text("#!/bin/sh\necho '429 Throttling.AllocationQuota' >&2\nexit 1\n", encoding="utf-8")
+            failing_bl.chmod(0o755)
+            plates_dir = self.root / "plates_test"
+            with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test-img"}, clear=False):
+                out = studio_cut.generate_backdrop_plate(
+                    prompt="Warm tungsten broadcast desk",
+                    aspect="9:16",
+                    plates_dir=plates_dir,
+                    bl_bin=failing_bl,
+                    openai_base_url=f"http://127.0.0.1:{srv.server_port}/v1",
+                )
+            self.assertTrue(out["plate_id"].startswith("plate_"))
+            self.assertEqual((out["width"], out["height"]), (320, 480))
+            self.assertEqual(len(seen_requests), 1)
+            self.assertEqual(seen_requests[0]["size"], "1024x1536")
+            self.assertTrue((plates_dir / f"{out['plate_id']}.png").is_file())
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

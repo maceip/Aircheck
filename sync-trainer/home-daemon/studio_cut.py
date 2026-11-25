@@ -16,10 +16,13 @@ Everything here produces a real effect in the composed MP4:
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
 import shutil
 import subprocess
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -344,6 +347,48 @@ def plate_path(plates_dir: Path, plate_id: str) -> Path | None:
     return candidate
 
 
+def _generate_backdrop_via_openai(
+    full_prompt: str,
+    aspect: str,
+    work: Path,
+    *,
+    base_url: str | None = None,
+) -> Path:
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured for backdrop generation.")
+    endpoint = (base_url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    size = "1024x1536" if aspect == "9:16" else "1536x1024"
+    model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1-mini").strip() or "gpt-image-1-mini"
+    body = json.dumps(
+        {
+            "model": model,
+            "prompt": full_prompt,
+            "size": size,
+            "n": 1,
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"{endpoint}/images/generations",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    items = payload.get("data") if isinstance(payload, dict) else None
+    first = items[0] if isinstance(items, list) and items else {}
+    b64 = first.get("b64_json") if isinstance(first, dict) else None
+    if not isinstance(b64, str) or not b64.strip():
+        raise RuntimeError("OpenAI images/generations returned no b64_json image payload.")
+    out_file = work / "plate_openai.png"
+    out_file.write_bytes(base64.b64decode(b64))
+    return out_file
+
+
 def generate_backdrop_plate(
     *,
     prompt: str,
@@ -351,6 +396,7 @@ def generate_backdrop_plate(
     plates_dir: Path,
     bl_bin: Path,
     runner: Any = None,
+    openai_base_url: str | None = None,
 ) -> dict[str, Any]:
     """Generates a studio backdrop plate image from ``prompt`` and stores it as PNG."""
     clean_prompt = " ".join(str(prompt or "").split())
@@ -372,37 +418,53 @@ def generate_backdrop_plate(
         if runner is not None:
             runner(full_prompt, aspect, work)
         else:
+            bl_error: str | None = None
             resolved = bl_bin if bl_bin.is_file() else Path(shutil.which("bl") or "")
-            if not resolved.is_file():
-                raise RuntimeError("Bailian CLI `bl` is not available on this Mac rig.")
-            proc = subprocess.run(
-                [
-                    str(resolved),
-                    "image",
-                    "generate",
-                    "--prompt",
-                    full_prompt,
-                    "--size",
-                    aspect,
-                    "--n",
-                    "1",
-                    "--watermark",
-                    "false",
-                    "--out-dir",
-                    str(work),
-                    "--out-prefix",
-                    "plate",
-                    "--output",
-                    "json",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=240,
-            )
-            if proc.returncode != 0:
-                tail = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()[-3:]
-                raise RuntimeError("bl image generate failed: " + " | ".join(tail))
+            if resolved.is_file():
+                proc = subprocess.run(
+                    [
+                        str(resolved),
+                        "image",
+                        "generate",
+                        "--prompt",
+                        full_prompt,
+                        "--size",
+                        aspect,
+                        "--n",
+                        "1",
+                        "--watermark",
+                        "false",
+                        "--out-dir",
+                        str(work),
+                        "--out-prefix",
+                        "plate",
+                        "--output",
+                        "json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=240,
+                )
+                if proc.returncode != 0:
+                    tail = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()[-3:]
+                    bl_error = "bl image generate failed: " + " | ".join(tail)
+            else:
+                bl_error = "Bailian CLI `bl` is not available on this Mac rig."
+
+            if bl_error is not None:
+                if os.environ.get("OPENAI_API_KEY", "").strip():
+                    try:
+                        _generate_backdrop_via_openai(
+                            full_prompt,
+                            aspect,
+                            work,
+                            base_url=openai_base_url,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(f"{bl_error}; OpenAI image provider failed: {exc}") from exc
+                else:
+                    raise RuntimeError(bl_error)
         produced = sorted(
             p for p in work.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
         )
