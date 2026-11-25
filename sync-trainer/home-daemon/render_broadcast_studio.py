@@ -640,6 +640,7 @@ def split_script_into_clauses(
     conservative_syl_per_sec: float = CONSERVATIVE_SYLLABLES_PER_SEC,
     takes_dir_prefix: str = "takes",
     base_gap_after_samples: int = DEFAULT_BASE_GAP_SAMPLES,
+    min_clause_words: int = 0,
 ) -> list[PlannedClause]:
     """Split a multi-clause script into `< 14.0s` clauses with IPA normalization & prefix chaining."""
     if not (1.0 < max_clause_sec < MAX_CLAUSE_DURATION_SEC):
@@ -658,6 +659,36 @@ def split_script_into_clauses(
             conservative_syl_per_sec=conservative_syl_per_sec,
         )
     raw_clauses = [c for c in raw_clauses if _has_speakable_text(c)]
+    if min_clause_words > 0 and len(raw_clauses) > 1:
+        coalesced: list[str] = []
+        buf = ""
+        for item in raw_clauses:
+            if not buf:
+                buf = item
+                continue
+            buf_w = len(re.findall(r"[A-Za-z0-9']+", buf))
+            joined = f"{buf} {item}".strip()
+            if buf_w < min_clause_words and (
+                estimate_clause_duration_sec(joined, conservative_syl_per_sec=conservative_syl_per_sec)
+                <= max_clause_sec
+            ):
+                buf = joined
+            else:
+                coalesced.append(buf)
+                buf = item
+        if buf:
+            if coalesced and len(re.findall(r"[A-Za-z0-9']+", buf)) < min_clause_words:
+                tail_joined = f"{coalesced[-1]} {buf}".strip()
+                if (
+                    estimate_clause_duration_sec(tail_joined, conservative_syl_per_sec=conservative_syl_per_sec)
+                    <= max_clause_sec
+                ):
+                    coalesced[-1] = tail_joined
+                else:
+                    coalesced.append(buf)
+            else:
+                coalesced.append(buf)
+        raw_clauses = coalesced
 
     prefix_dir = takes_dir_prefix.rstrip("/")
     planned: list[PlannedClause] = []
@@ -691,6 +722,7 @@ def plan_caller_clauses(
     conservative_syl_per_sec: float = CONSERVATIVE_SYLLABLES_PER_SEC,
     takes_dir_prefix: str = "takes",
     base_gap_after_samples: int = DEFAULT_BASE_GAP_SAMPLES,
+    min_clause_words: int = 0,
 ) -> tuple[list[PlannedClause], list[dict[str, Any]]]:
     """Split each caller clause into `< 14.0s` sub-clauses while preserving caller clause IDs."""
     prefix_dir = takes_dir_prefix.rstrip("/")
@@ -710,6 +742,7 @@ def plan_caller_clauses(
             conservative_syl_per_sec=conservative_syl_per_sec,
             takes_dir_prefix=takes_dir_prefix,
             base_gap_after_samples=base_gap_after_samples,
+            min_clause_words=min_clause_words,
         )
         if not sub_clauses:
             continue
@@ -1488,6 +1521,7 @@ def render_broadcast_studio(
     require_real_alignment: bool | None = None,
     warm_engine: Any | None = None,
     early_exit_on_pass: bool = False,
+    min_clause_words: int = 0,
     gate_max_cer: float = sar.GATE_MAX_CER,
     gate_min_speaker_cos: float = sar.GATE_MIN_SPEAKER_COS,
     gate_min_dnsmos_p808: float = sar.GATE_MIN_DNSMOS_P808,
@@ -1530,6 +1564,7 @@ def render_broadcast_studio(
             phonetic_overrides=phonetic_overrides,
             takes_dir_prefix="takes",
             base_gap_after_samples=base_gap_after_samples,
+            min_clause_words=min_clause_words,
         )
     else:
         planned_clauses = split_script_into_clauses(
@@ -1538,6 +1573,7 @@ def render_broadcast_studio(
             phonetic_overrides=phonetic_overrides,
             takes_dir_prefix="takes",
             base_gap_after_samples=base_gap_after_samples,
+            min_clause_words=min_clause_words,
         )
         parent_groups = [
             {

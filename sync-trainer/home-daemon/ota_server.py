@@ -1745,6 +1745,7 @@ class RenderJobManager:
                 "warm_engine": None if lambda_synth_fn is not None else self._get_warm_tts_engine(),
                 "synthesizer_fn": lambda_synth_fn,
                 "early_exit_on_pass": True,
+                "min_clause_words": 6 if lambda_synth_fn is not None else 0,
                 "gate_max_cer": LIVE_TTS_GATE_MAX_CER,
                 "gate_min_speaker_cos": LIVE_TTS_GATE_MIN_SPEAKER_COS,
                 "gate_min_dnsmos_p808": LIVE_TTS_GATE_MIN_DNSMOS_P808,

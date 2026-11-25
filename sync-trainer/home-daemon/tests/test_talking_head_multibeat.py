@@ -1277,6 +1277,11 @@ def test_coalesce_and_restore_micro_clauses_for_lambda_tts() -> None:
     assert did_merge is True
     assert len(merged) == 1
     assert merged[0]["spoken_text"].startswith("Good evening. Two new AI agents")
+    import render_broadcast_studio as rbs
+
+    planned, _ = rbs.plan_caller_clauses(merged, min_clause_words=6)
+    assert len(planned) == 1
+    assert planned[0].raw_text.startswith("Good evening. Two new AI agents")
 
     words = [
         {"word": "Good", "start_ms": 60, "end_ms": 320},
