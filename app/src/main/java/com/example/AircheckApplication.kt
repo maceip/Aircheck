@@ -104,9 +104,14 @@ class AircheckContainer(context: Context) {
             return draftApiClient
         }
         return draftClientsByUrl.computeIfAbsent(normalized) { url ->
+            val usbUrl = if (url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:")) {
+                url
+            } else {
+                DraftApiClient.DEFAULT_RIG_USB_URL
+            }
             DraftApiClient(
                 configuredRigUrl = url,
-                usbLoopbackUrl = DraftApiClient.DEFAULT_RIG_USB_URL,
+                usbLoopbackUrl = usbUrl,
                 okHttpClient = okHttpClient
             )
         }
