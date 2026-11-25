@@ -904,8 +904,9 @@ class AircheckSeparateScreensAndA2uiTest {
             studioVm.uiState.value.statusNotice == null
         }
 
-        // Exercise StereoMeter, captions, aspect, punch-in, strip silence, undo, timeline B-roll toggle
-        onNodeWithTag("cs_stereo_meter").assertIsDisplayed()
+        // Exercise v5 monitor, play key, captions, aspect, punch-in, trim pauses, undo, tap-to-expand clause edit, and b-roll mode
+        onNodeWithTag("cs_cut_monitor").assertIsDisplayed()
+        onNodeWithTag("cs_cut_play").assertIsDisplayed()
         onNodeWithTag("cs_cut_captions").performClick()
         onNodeWithTag("cs_cut_aspect").performClick()
         onNodeWithTag("cs_cut_punch_in").performClick()
@@ -925,7 +926,22 @@ class AircheckSeparateScreensAndA2uiTest {
             saved != null && !saved.renderOptions.stripSilence
         }
 
-        // Switch to B-roll timeline mode and toggle clause 0 to B-roll cutaway
+        // Single tap on clause 0 expands inline actions (`edit words` & `b-roll here`) without long-press
+        onNodeWithTag("cs_clause_0").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("cs_clause_edit_btn_0").fetchSemanticsNodes().isNotEmpty()
+        }
+        onNodeWithTag("cs_clause_edit_btn_0").performClick()
+        onNodeWithTag("cs_clause_editor_0").performTextReplacement("Updated first broadcast line.")
+        onNodeWithTag("cs_clause_apply_0").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            val saved = runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
+            saved?.clauses?.firstOrNull()?.spokenText == "Updated first broadcast line."
+        }
+
+        // Switch to B-roll mode and toggle clause 0 to B-roll cutaway
         onNodeWithTag("cs_cut_mode_timeline").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
@@ -942,6 +958,7 @@ class AircheckSeparateScreensAndA2uiTest {
     @Test
     fun clipStudioNewsroomLookScreen_exercisesTickRulersPillsSaveDuplicateAndDefault() = runComposeUiTest {
         var studioVmRef: StudioViewModel? = null
+        var returnedToCut = false
         setContent {
             val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
             val st by studioVm.uiState.collectAsStateWithLifecycle()
@@ -949,7 +966,7 @@ class AircheckSeparateScreensAndA2uiTest {
                 NewsroomLookScreen(
                     state = st,
                     vm = studioVm,
-                    onBack = {},
+                    onBack = { returnedToCut = true },
                     onTestOnClip = {},
                     onOpenOverlayBuilder = {}
                 )
@@ -963,40 +980,36 @@ class AircheckSeparateScreensAndA2uiTest {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.newsroomLooksOnce().size } == initialCount + 1
         }
-        val lookId = studioVm.uiState.value.newsroomLooks.first().id
 
-        onNodeWithTag("cs_scrub_ev_inc").performScrollTo().performClick()
-        onNodeWithTag("cs_scrub_ev_inc").performClick()
-        onNodeWithTag("cs_pill_warm").performScrollTo().performClick()
-        onNodeWithTag("cs_pill_grain").performClick()
-        onNodeWithTag("cs_pill_border").performClick()
-        onNodeWithTag("cs_look_save").performClick()
-
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            val saved = runBlocking { app.container.localRepo.getNewsroomLook(lookId) }
-            saved != null && saved.brightnessEv == 0.2 &&
-                saved.light == com.example.data.NewsroomLook.LIGHT_WARM &&
-                saved.grain && saved.border
-        }
-
-        // Duplicate & set default
+        // Duplicate look from header icon key
         onNodeWithTag("cs_look_duplicate").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.newsroomLooksOnce().size } == initialCount + 2
         }
-        onNodeWithTag("cs_look_default").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            runBlocking { app.container.localRepo.getDefaultNewsroomLook() } != null
-        }
 
-        // Canvas zones switch tabs cleanly
-        onNodeWithTag("cs_zone_card").performClick()
+        // Adjust v5 BLUR (±5%) + BRIGHTNESS (±0.2 EV) + 3-way LIGHT (`warm`)
+        onNodeWithTag("cs_scrub_blur_inc").performScrollTo().performClick()
+        onNodeWithTag("cs_scrub_blur_inc").performClick()
+        onNodeWithTag("cs_scrub_ev_inc").performScrollTo().performClick()
+        onNodeWithTag("cs_light_warm").performScrollTo().performClick()
+
+        // Switch to `cards` tab and verify honest empty cards summary + builder button
+        onNodeWithTag("cs_newsroom_tab_2").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             onAllNodesWithTag("cs_open_overlay_builder").fetchSemanticsNodes().isNotEmpty()
+        }
+        onNodeWithText("0 cards attached").assertIsDisplayed()
+
+        // Primary dock key "use this look" saves edits, sets default in Room, posts toast, and navigates back
+        onNodeWithTag("cs_use_look").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            val def = runBlocking { app.container.localRepo.getDefaultNewsroomLook() }
+            returnedToCut && def != null && def.blurPercent == 10 && def.brightnessEv == 0.2 &&
+                def.light == com.example.data.NewsroomLook.LIGHT_WARM &&
+                studioVm.uiState.value.toastMessage == "look applied · render to see it"
         }
     }
 
@@ -1012,39 +1025,28 @@ class AircheckSeparateScreensAndA2uiTest {
             exchange.responseBody.use { it.write(resp) }
         }
         server.createContext("/v1/ai-assist") { exchange ->
-            aiBodies.add(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
-            val resp = """
-                {
-                  "mode": "generate_overlay_set",
-                  "breaking_style": "developing",
-                  "overlays": [
+            val req = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
+            aiBodies.add(req)
+            val resp = if (req.contains("\"polish_headline\"")) {
+                """{"headline":"Log video fixes default phone HDR"}""".toByteArray(Charsets.UTF_8)
+            } else {
+                """
                     {
-                      "kind": "LOWER_THIRD",
+                      "mode": "generate_overlay_set",
                       "breaking_style": "developing",
-                      "headline": "AUTO-HDR HALOS EXPOSED",
-                      "subline": "RAW LOG PIPELINE RESTORES SKIN TONES",
-                      "callout_stat": "10-BIT LOG",
-                      "duration_sec": 6
-                    },
-                    {
-                      "kind": "STAT_CALLOUT",
-                      "breaking_style": "developing",
-                      "headline": "ZERO EDGE SHARPENING",
-                      "subline": "MANUAL CAMERA BYPASS VERIFIED",
-                      "callout_stat": "0 HALOS",
-                      "duration_sec": 5
-                    },
-                    {
-                      "kind": "QUOTE_BRIEF",
-                      "breaking_style": "developing",
-                      "headline": "@CAMERA_LAB BENCH",
-                      "subline": "Default tone-mapping crushes highlight roll-off.",
-                      "callout_stat": "FIELD BRIEF",
-                      "duration_sec": 5
+                      "overlays": [
+                        {
+                          "kind": "QUOTE_BRIEF",
+                          "breaking_style": "developing",
+                          "headline": "Default tone-mapping crushes highlight roll-off.",
+                          "subline": "@CAMERA_LAB",
+                          "callout_stat": "FIELD BRIEF",
+                          "duration_sec": 5
+                        }
+                      ]
                     }
-                  ]
-                }
-            """.trimIndent().toByteArray(Charsets.UTF_8)
+                """.trimIndent().toByteArray(Charsets.UTF_8)
+            }
             exchange.responseHeaders.add("Content-Type", "application/json")
             exchange.sendResponseHeaders(200, resp.size.toLong())
             exchange.responseBody.use { it.write(resp) }
@@ -1082,22 +1084,22 @@ class AircheckSeparateScreensAndA2uiTest {
             studioVm.uiState.value.corePipelineSession.clauses.isNotEmpty()
         }
 
-        // Switch to 03 HEADLINES tab
-        onNodeWithTag("cs_newsroom_tab_2").performClick()
+        // Switch to v5 `title` tab (`cs_newsroom_tab_1`)
+        onNodeWithTag("cs_newsroom_tab_1").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_bstyle_breaking").fetchSemanticsNodes().isNotEmpty()
+            onAllNodesWithTag("cs_tag_breaking").fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Cycle every Breaking News Style Chip and assert real Room persistence
-        onNodeWithTag("cs_bstyle_exclusive").performScrollTo().performClick()
+        // Cycle TAG ABOVE TITLE pills (`explainer`, `none`, `developing`) and assert real Room persistence
+        onNodeWithTag("cs_tag_explainer").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
                 ?.renderOptions?.breakingStyle == com.example.data.BreakingNewsStyle.EXCLUSIVE
         }
 
-        onNodeWithTag("cs_bstyle_clean").performScrollTo().performClick()
+        onNodeWithTag("cs_tag_none").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
@@ -1105,7 +1107,7 @@ class AircheckSeparateScreensAndA2uiTest {
                 onAllNodesWithTag("cs_canvas_breaking_kicker", useUnmergedTree = true).fetchSemanticsNodes().isEmpty()
         }
 
-        onNodeWithTag("cs_bstyle_developing").performScrollTo().performClick()
+        onNodeWithTag("cs_tag_developing").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
@@ -1113,20 +1115,19 @@ class AircheckSeparateScreensAndA2uiTest {
                 onAllNodesWithTag("cs_canvas_breaking_kicker", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Generate the 3-overlay set and verify Room persistence + live canvas preview
-        onNodeWithTag("cs_overlay_generate_set").performScrollTo().performClick()
+        // Refresh title with AI (`polish_headline` on Mac rig) and verify Room persistence + live preview
+        onNodeWithTag("cs_title_refresh").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            aiBodies.isNotEmpty() &&
-                runBlocking { app.container.localRepo.listSavedNewsroomOverlays().size } == 3 &&
-                studioVm.uiState.value.corePipelineSession.selectedOverlayIds.size == 3
+            aiBodies.any { it.contains("\"polish_headline\"") } &&
+                runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
+                    ?.renderOptions?.chyronHeadline == "Log video fixes default phone HDR"
         }
-        assertTrue(aiBodies.first().contains("\"mode\":\"generate_overlay_set\""))
-        assertTrue(aiBodies.first().contains("\"breaking_style\":\"developing\""))
-
-        // Both LookCanvas lower-third and quote-card zones display the generated overlays live
-        onNodeWithText("DEVELOPING · 10-BIT LOG", useUnmergedTree = true).assertIsDisplayed()
-        onNodeWithText("@CAMERA_LAB BENCH", useUnmergedTree = true).assertIsDisplayed()
+        onNodeWithText("DEVELOPING", useUnmergedTree = true).assertIsDisplayed()
+        assertEquals(
+            2,
+            onAllNodesWithText("Log video fixes default phone HDR", useUnmergedTree = true).fetchSemanticsNodes().size
+        )
     }
 
     private val rigTasks = java.util.concurrent.ConcurrentHashMap<String, String>()
