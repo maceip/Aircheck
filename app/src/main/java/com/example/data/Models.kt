@@ -391,6 +391,19 @@ data class LlmRoutingSettings(
     }
 }
 
+@androidx.compose.runtime.Immutable
+data class LastVideoSummary(
+    val clipId: String,
+    val title: String,
+    val durationMs: Long,
+    val updatedAtMillis: Long,
+    val thumbFilePath: String?,
+    val transcript: String,
+    val topReplyQuestion: String? = null,
+    val remoteThumbUrl: String? = null,
+    val remoteVideoUrl: String? = null
+)
+
 enum class ExportState {
     IDLE,
     EXPORTING,

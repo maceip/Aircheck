@@ -38,7 +38,8 @@ data class CoreStoryClause(
     val brollMediaUri: String? = null,
     val bRollPrompt: String = "",
     val bRollSha: String? = null,
-    val depthTextTag: String = ""
+    val depthTextTag: String = "",
+    val shotTypeWire: String = ""
 ) {
     val durationMs: Long
         get() = (endMs - startMs).coerceAtLeast(0L)
@@ -73,11 +74,29 @@ enum class BreakingNewsStyle(
     ALERT_STAT("alert_stat", "data alert", "DATA ALERT"),
     CLEAN("clean", "clean desk", "");
 
+    /** Maps to Clip Studio v5 `Video look` -> `TAG ABOVE TITLE` pill key (`none | breaking | developing | explainer`). */
+    val titleTagKey: String
+        get() = when (this) {
+            CLEAN -> "none"
+            BREAKING -> "breaking"
+            DEVELOPING -> "developing"
+            EXCLUSIVE, ALERT_STAT -> "explainer"
+        }
+
     companion object {
         fun fromWire(raw: String?): BreakingNewsStyle =
             entries.firstOrNull {
                 it.wire.equals(raw, ignoreCase = true) || it.name.equals(raw, ignoreCase = true)
             } ?: BREAKING
+
+        fun fromTitleTag(tag: String?): BreakingNewsStyle = when (tag?.trim()?.lowercase()) {
+            "none", "clean", "" -> CLEAN
+            "breaking" -> BREAKING
+            "developing" -> DEVELOPING
+            "explainer", "exclusive" -> EXCLUSIVE
+            "alert_stat", "data_alert", "stat" -> ALERT_STAT
+            else -> fromWire(tag)
+        }
     }
 }
 

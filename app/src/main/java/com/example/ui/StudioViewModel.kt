@@ -21,6 +21,7 @@ import androidx.work.WorkManager
 import com.example.data.CorePipelineStage
 import com.example.data.CoreStoryClause
 import com.example.data.ExportState
+import com.example.data.LastVideoSummary
 import com.example.data.OverlayObjectKind
 import com.example.data.RenderJobStatus
 import com.example.data.SavedNewsroomOverlay
@@ -28,15 +29,21 @@ import com.example.data.ScriptBeat
 import com.example.data.ScriptProject
 import com.example.data.VoiceSource
 import com.example.data.estimateDurationSeconds
+import com.example.data.gateway.MacRigRenderGateway
 import com.example.data.gateway.RemoteRenderSummary
+import com.example.data.local.AircheckLocalRepository
+import com.example.data.local.AircheckProfileStore
 import com.example.data.local.CasMediaStore
 import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.data.local.StudioSettings
+import com.example.draft.ShotSpec
+import com.example.draft.ShotType
 import com.example.engine.AircheckPlayerController
 import com.example.engine.CoreStoryPipelineCoordinator
 import com.example.engine.VoiceModelCareManager
 import com.example.engine.VoiceQualityReport
 import com.example.engine.VoiceStorageSnapshot
+import com.example.graph.LocalGraphDatabase
 import com.example.ui.a2ui.AircheckA2uiController
 import com.example.ui.a2ui.NewsroomA2uiAction
 import com.voicestudio.edl.OtaBundleState
@@ -95,6 +102,10 @@ data class StudioUiState(
     val coreUndoDepth: Int = 0,
     val errorMessage: String? = null,
     val statusNotice: String? = null,
+    val toastMessage: String? = null,
+    val lastCompletedVideo: LastVideoSummary? = null,
+    val openClauseIndex: Int? = null,
+    val isRefreshingHeadline: Boolean = false,
     val otaBundleState: OtaBundleState = OtaBundleState(),
     val rigHealth: RigHealthUiState = RigHealthUiState(),
     val voiceStorageSnapshot: VoiceStorageSnapshot? = null,
@@ -108,23 +119,49 @@ data class StudioUiState(
     val isRemotionUnused: Boolean
         get() = settings.remotionUsedCount <= 0 &&
             settings.providers.packageProviderId != "mac_rig_remotion"
+
+    val openClause: Int?
+        get() = openClauseIndex
 }
 
 /** An X post chosen with "show post" in 02 SCRIPT, burned into the cut as a quote card. */
 data class PostCardSource(val handle: String, val tweetId: String, val snippet: String)
 
-class StudioViewModel(application: Application) : AndroidViewModel(application) {
+class StudioViewModel internal constructor(
+    application: Application,
+    localRepoOverride: AircheckLocalRepository? = null,
+    profileStoreOverride: AircheckProfileStore? = null,
+    casStoreOverride: CasMediaStore? = null,
+    macRigGatewayOverride: MacRigRenderGateway? = null,
+    localGraphDatabaseOverride: LocalGraphDatabase? = null
+) : AndroidViewModel(application) {
+
+    constructor(application: Application) : this(
+        application = application,
+        localRepoOverride = null
+    )
 
     private val container = (application as AircheckApplication).container
-    private val localRepo = container.localRepo
-    private val profileStore = container.profileStore
-    val casStore: CasMediaStore = container.casStore
+    private val localRepo: AircheckLocalRepository = localRepoOverride ?: container.localRepo
+    private val profileStore: AircheckProfileStore = profileStoreOverride ?: container.profileStore
+    val casStore: CasMediaStore = casStoreOverride ?: container.casStore
     val playerController: AircheckPlayerController = container.playerController
     private val clipExporter = container.clipExporter
-    private val macRigGateway = container.macRigGateway
+    private val macRigGateway: MacRigRenderGateway = macRigGatewayOverride ?: container.macRigGateway
+    private val localGraphDatabase: LocalGraphDatabase = localGraphDatabaseOverride ?: container.localGraphDatabase
     private val otaBundleSyncManager = container.otaBundleSyncManager
     val voiceModelCareManager: VoiceModelCareManager = container.voiceModelCareManager
-    private val corePipelineCoordinator: CoreStoryPipelineCoordinator = container.corePipelineCoordinator
+    private val corePipelineCoordinator: CoreStoryPipelineCoordinator =
+        if (localRepoOverride != null || casStoreOverride != null || macRigGatewayOverride != null || profileStoreOverride != null) {
+            CoreStoryPipelineCoordinator(
+                localRepo = localRepo,
+                casStore = casStore,
+                macRigGateway = macRigGateway,
+                profileStore = profileStore
+            )
+        } else {
+            container.corePipelineCoordinator
+        }
     private val onDevicePromptEngine = container.onDevicePromptEngine
     private val vadAudioEngine = container.vadAudioEngine
 
@@ -189,6 +226,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             localRepo.clipCards.collect { cards ->
                 _uiState.update { it.copy(clipCards = cards) }
+                recomputeLastCompletedVideo(cards)
             }
         }
 
@@ -591,12 +629,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * Routes any drafted story into Stage 1 (`01 TTS`) of the single canonical Core Pipeline
-     * instead of bypassing straight to a one-shot clip render.
+     * instead of bypassing straight to a one-shot clip render, mapping any SPARK/SCRIPT
+     * [shotPlan] (`PIP`/`BROLL` -> `BROLL_CUTAWAY`, `CARD` -> real Room `QUOTE_BRIEF` overlay).
      */
     fun openStoryInCorePipeline(
         plainText: String,
         headline: String = "",
-        postCard: PostCardSource? = null
+        postCard: PostCardSource? = null,
+        shotPlan: List<List<ShotSpec>> = emptyList()
     ) {
         val clean = plainText.trim()
         if (clean.isBlank()) {
@@ -613,6 +653,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             project.copy(
                 title = effectiveHeadline.ifBlank { "Story Draft" },
                 ideaSpark = clean,
+                stageConfig = project.stageConfig.copy(
+                    chyronHeadline = effectiveHeadline.ifBlank { project.stageConfig.chyronHeadline }
+                ),
                 beats = listOf(
                     ScriptBeat(
                         index = 0,
@@ -623,12 +666,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             )
         )
         viewModelScope.launch(Dispatchers.IO) {
-            val seeded = corePipelineCoordinator.seedSessionFromStory(
-                rawStoryText = clean,
-                headline = effectiveHeadline,
-                scriptId = project.id
-            )
-            val session = if (postCard != null) {
+            val rawClauses = CoreStoryPipelineCoordinator.splitStoryIntoClauses(clean)
+            val mappedClauses = applyShotPlanToClauses(rawClauses, shotPlan)
+            var selectedOverlayIds = emptyList<String>()
+            var newlyCreatedOverlay: SavedNewsroomOverlay? = null
+
+            if (postCard != null) {
                 // "show post" in 02 SCRIPT: burn the quoted X post as a QUOTE_BRIEF card in the cut.
                 val overlay = SavedNewsroomOverlay(
                     id = "ovl_x_" + postCard.tweetId.filter { it.isLetterOrDigit() }.take(24),
@@ -644,15 +687,66 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 )
                 localRepo.saveNewsroomOverlay(overlay)
-                seeded.copy(selectedOverlayIds = (seeded.selectedOverlayIds + overlay.id).distinct()).also {
-                    localRepo.saveCorePipelineSession(it)
-                }
+                newlyCreatedOverlay = overlay
+                selectedOverlayIds = listOf(overlay.id)
             } else {
-                seeded
+                val cardShot = shotPlan.flatten().firstOrNull { it.type == ShotType.CARD }
+                if (cardShot != null) {
+                    val existingOverlays = localRepo.listSavedNewsroomOverlays()
+                    val existingQuote = existingOverlays.firstOrNull { it.kind == OverlayObjectKind.QUOTE_BRIEF }
+                    if (existingQuote != null) {
+                        selectedOverlayIds = listOf(existingQuote.id)
+                    } else {
+                        val quoteHeadline = cardShot.prompt.trim()
+                            .ifBlank { mappedClauses.lastOrNull()?.spokenText ?: effectiveHeadline }
+                            .take(48)
+                        val quoteSubline = effectiveHeadline.take(56)
+                        val cardOverlay = SavedNewsroomOverlay(
+                            kind = OverlayObjectKind.QUOTE_BRIEF,
+                            breakingStyle = BreakingNewsStyle.CLEAN,
+                            headline = quoteHeadline,
+                            subline = quoteSubline,
+                            calloutStat = "QUOTE",
+                            durationSec = 4,
+                            a2uiComponentsJson = AircheckA2uiController.serializeOverlayAsA2uiComponentsJson(
+                                headline = quoteHeadline,
+                                subline = quoteSubline,
+                                calloutStat = "QUOTE"
+                            )
+                        )
+                        localRepo.saveNewsroomOverlay(cardOverlay)
+                        newlyCreatedOverlay = cardOverlay
+                        selectedOverlayIds = listOf(cardOverlay.id)
+                    }
+                }
             }
-            _uiState.update {
-                it.copy(
+
+            val nextStamp = maxOf(
+                System.currentTimeMillis(),
+                _uiState.value.corePipelineSession.updatedAtMillis + 1L
+            )
+            val baseOptions = CoreRenderOptions(chyronHeadline = effectiveHeadline)
+            val session = CorePipelineSession(
+                scriptId = project.id,
+                title = effectiveHeadline,
+                stage = CorePipelineStage.TTS,
+                clauses = mappedClauses,
+                selectedOverlayIds = selectedOverlayIds,
+                renderOptions = baseOptions,
+                updatedAtMillis = nextStamp
+            )
+            localRepo.saveCorePipelineSession(session)
+
+            _uiState.update { state ->
+                val mergedOverlays = if (newlyCreatedOverlay != null && state.savedOverlays.none { it.id == newlyCreatedOverlay.id }) {
+                    listOf(newlyCreatedOverlay) + state.savedOverlays
+                } else {
+                    state.savedOverlays
+                }
+                state.copy(
                     corePipelineSession = session,
+                    savedOverlays = mergedOverlays,
+                    openClauseIndex = null,
                     openCorePipelineEvent = true,
                     errorMessage = null,
                     statusNotice = "Story loaded in Core Pipeline (01 TTS)."
@@ -909,7 +1003,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     /** Mirrors background pipeline jobs (WorkManager) into UI state; works across VM/process restarts. */
     private fun observeBackgroundStages() {
-        val wm = WorkManager.getInstance(getApplication())
+        val wm = runCatching { WorkManager.getInstance(getApplication()) }.getOrNull() ?: return
         val handled = mutableSetOf<java.util.UUID>()
         var primed = false
         fun consume(infos: List<WorkInfo>, onRunning: (WorkInfo?) -> Unit) {
@@ -977,8 +1071,32 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun undoCoreEdit() {
         val restored = synchronized(coreUndoStack) { coreUndoStack.removeLastOrNull() } ?: return
         val stamped = restored.copy(updatedAtMillis = System.currentTimeMillis())
-        _uiState.update { it.copy(corePipelineSession = stamped, coreUndoDepth = coreUndoStack.size) }
+        _uiState.update {
+            it.copy(
+                corePipelineSession = stamped,
+                coreUndoDepth = coreUndoStack.size,
+                toastMessage = "undid last change"
+            )
+        }
         viewModelScope.launch(Dispatchers.IO) { localRepo.saveCorePipelineSession(stamped) }
+    }
+
+    /** Seeks to clause [index] and toggles its inline action tray (`edit words` / `b-roll here`). */
+    fun toggleOpenCutClause(index: Int) {
+        val clauses = _uiState.value.corePipelineSession.clauses
+        if (index !in clauses.indices) return
+        val opening = _uiState.value.openClauseIndex != index
+        _uiState.update { it.copy(openClauseIndex = if (opening) index else null) }
+        if (opening) {
+            val startMs = clauses[index].startMs
+            if (startMs >= 0L) {
+                runCatching { playerController.seekTo(startMs) }
+            }
+        }
+    }
+
+    fun setOpenCutClause(index: Int?) {
+        _uiState.update { it.copy(openClauseIndex = index) }
     }
 
     fun setCoreStripSilence(enabled: Boolean) = updateRenderOptions { it.copy(stripSilence = enabled) }
@@ -1020,12 +1138,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleCutClauseBroll(index: Int) {
         val current = _uiState.value.corePipelineSession
         if (index !in current.clauses.indices) return
+        val willBeBroll = current.clauses[index].segmentMode == BrollSegmentMode.TALKING_HEAD
         commitCoreEdit(
             current.copy(
                 clauses = current.clauses.mapIndexed { i, c ->
                     if (i != index) {
                         c
-                    } else if (c.segmentMode == BrollSegmentMode.TALKING_HEAD) {
+                    } else if (willBeBroll) {
                         c.copy(
                             segmentMode = BrollSegmentMode.BROLL_CUTAWAY,
                             brollCaption = c.brollCaption.ifBlank { c.spokenText.take(48) }
@@ -1036,6 +1155,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 }
             )
         )
+        showToast(if (willBeBroll) "b-roll added" else "b-roll removed")
     }
 
     /** Asks the rig which pauses `strip_silence` would remove from the current talking-head render. */
@@ -1059,13 +1179,21 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     // Clip Studio v4: 04 NEWSROOM looks
     // =========================================================================
 
+    private val lookSaveMutex = Mutex()
+
     fun createNewsroomLook(name: String): String {
         val look = NewsroomLook(
             name = name.trim().ifBlank { "LOOK_${_uiState.value.newsroomLooks.size + 1}" },
             isDefault = _uiState.value.newsroomLooks.isEmpty()
         )
-        viewModelScope.launch(Dispatchers.IO) { localRepo.saveNewsroomLook(look) }
         _uiState.update { it.copy(newsroomLooks = listOf(look) + it.newsroomLooks) }
+        viewModelScope.launch {
+            lookSaveMutex.withLock {
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    localRepo.saveNewsroomLook(look)
+                }
+            }
+        }
         return look.id
     }
 
@@ -1078,7 +1206,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             } ?: NewsroomLook.LIGHT_NEUTRAL
         )
         _uiState.update { st -> st.copy(newsroomLooks = st.newsroomLooks.map { if (it.id == clamped.id) clamped else it }) }
-        viewModelScope.launch(Dispatchers.IO) { localRepo.saveNewsroomLook(clamped) }
+        viewModelScope.launch {
+            lookSaveMutex.withLock {
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    localRepo.saveNewsroomLook(clamped)
+                }
+            }
+        }
     }
 
     fun duplicateNewsroomLook(id: String): String? {
@@ -1090,15 +1224,165 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             createdAtMillis = System.currentTimeMillis()
         )
         _uiState.update { it.copy(newsroomLooks = listOf(copy) + it.newsroomLooks) }
-        viewModelScope.launch(Dispatchers.IO) { localRepo.saveNewsroomLook(copy) }
+        viewModelScope.launch {
+            lookSaveMutex.withLock {
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    localRepo.saveNewsroomLook(copy)
+                }
+            }
+        }
         return copy.id
     }
 
     fun setDefaultNewsroomLook(id: String) {
         _uiState.update { st -> st.copy(newsroomLooks = st.newsroomLooks.map { it.copy(isDefault = it.id == id) }) }
-        viewModelScope.launch(Dispatchers.IO) {
-            localRepo.setDefaultNewsroomLook(id)
+        viewModelScope.launch {
+            lookSaveMutex.withLock {
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    localRepo.setDefaultNewsroomLook(id)
+                }
+            }
             _uiState.update { it.copy(statusNotice = "Default look set — applied to the next cut.") }
+        }
+    }
+
+    /**
+     * Clip Studio v5 `Video look` primary action (`"use this look"`):
+     * saves any pending look edits, marks [lookId] as the persisted default in Room, and posts
+     * toast `"look applied · render to see it"`.
+     */
+    fun useLookAndReturn(lookId: String, draftOverride: NewsroomLook? = null) {
+        val baseLook = draftOverride
+            ?: _uiState.value.newsroomLooks.firstOrNull { it.id == lookId }
+            ?: NewsroomLook(
+                id = lookId.trim().ifBlank { "look_default" },
+                name = "LOOK_01",
+                isDefault = true
+            )
+        val clamped = baseLook.copy(
+            blurPercent = baseLook.blurPercent.coerceIn(0, 100),
+            brightnessEv = (Math.round(baseLook.brightnessEv.coerceIn(-3.0, 3.0) * 10.0) / 10.0),
+            light = baseLook.light.takeIf {
+                it in setOf(NewsroomLook.LIGHT_WARM, NewsroomLook.LIGHT_COOL, NewsroomLook.LIGHT_NEUTRAL)
+            } ?: NewsroomLook.LIGHT_NEUTRAL,
+            isDefault = true,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _uiState.update { st ->
+            val exists = st.newsroomLooks.any { it.id == clamped.id }
+            val updatedList = if (exists) {
+                st.newsroomLooks.map { if (it.id == clamped.id) clamped else it.copy(isDefault = false) }
+            } else {
+                listOf(clamped) + st.newsroomLooks.map { it.copy(isDefault = false) }
+            }
+            st.copy(
+                newsroomLooks = updatedList,
+                toastMessage = "look applied · render to see it"
+            )
+        }
+        viewModelScope.launch {
+            lookSaveMutex.withLock {
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    localRepo.saveNewsroomLook(clamped)
+                    localRepo.setDefaultNewsroomLook(clamped.id)
+                }
+            }
+        }
+    }
+
+    /**
+     * Updates the `TAG ABOVE TITLE` style (`"none"` -> `CLEAN`, `"breaking"` -> `BREAKING`,
+     * `"developing"` -> `DEVELOPING`, `"explainer"` -> `EXCLUSIVE`) and persists to Room.
+     */
+    fun setTitleTagStyle(tag: String) {
+        val style = BreakingNewsStyle.fromTitleTag(tag)
+        setCoreBreakingStyle(style)
+    }
+
+    /** Updates the on-screen title in `Video look` and persists to Room. */
+    fun updateTitleOnScreen(newTitle: String) {
+        val clean = newTitle.trim()
+        val current = _uiState.value.corePipelineSession
+        commitCoreEdit(
+            current.copy(
+                title = clean.ifBlank { current.title },
+                renderOptions = current.renderOptions.copy(chyronHeadline = clean)
+            )
+        )
+        if (clean.isNotEmpty()) {
+            val proj = _uiState.value.activeProject
+            persistProject(
+                proj.copy(
+                    title = clean,
+                    stageConfig = proj.stageConfig.copy(chyronHeadline = clean)
+                )
+            )
+        }
+    }
+
+    /**
+     * Calls real `POST /v1/ai-assist` (`mode = "polish_headline"`) on the Mac rig to rewrite
+     * the active on-screen title, persisting the result to Room.
+     */
+    fun refreshHeadlineWithAi() {
+        if (_uiState.value.isRefreshingHeadline) return
+        val session = _uiState.value.corePipelineSession
+        val activeProj = _uiState.value.activeProject
+        val currentHeadline = session.renderOptions.chyronHeadline.trim()
+            .ifBlank { session.title.trim() }
+            .ifBlank { activeProj.stageConfig.chyronHeadline.trim() }
+            .ifBlank { activeProj.title.trim() }
+        val storyContext = session.fullStoryText.trim()
+            .ifBlank { activeProj.ideaSpark.trim() }
+            .ifBlank { currentHeadline }
+        if (currentHeadline.isEmpty() && storyContext.isEmpty()) {
+            _uiState.update { it.copy(errorMessage = "Load or write a story before refreshing the title.") }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(isRefreshingHeadline = true, errorMessage = null) }
+            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+            val result = runCatching {
+                val health = macRigGateway.resolveAndCheckHealth(rigUrl)
+                macRigGateway.polishHeadline(
+                    rigBaseUrl = health.resolvedUrl,
+                    currentHeadline = currentHeadline,
+                    storyContext = storyContext
+                )
+            }
+            result.onSuccess { refreshed ->
+                val clean = refreshed.trim()
+                val latestSession = _uiState.value.corePipelineSession
+                commitCoreEdit(
+                    latestSession.copy(
+                        title = clean,
+                        renderOptions = latestSession.renderOptions.copy(chyronHeadline = clean)
+                    )
+                )
+                val proj = _uiState.value.activeProject
+                persistProject(
+                    proj.copy(
+                        title = clean,
+                        stageConfig = proj.stageConfig.copy(chyronHeadline = clean)
+                    )
+                )
+                _uiState.update {
+                    it.copy(
+                        isRefreshingHeadline = false,
+                        toastMessage = "title refreshed",
+                        errorMessage = null
+                    )
+                }
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                _uiState.update {
+                    it.copy(
+                        isRefreshingHeadline = false,
+                        errorMessage = "Title refresh failed: ${err.localizedMessage ?: "rig unreachable"}."
+                    )
+                }
+            }
         }
     }
 
@@ -1343,6 +1627,110 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(statusNotice = null) }
     }
 
+    fun showToast(message: String) {
+        val clean = message.trim()
+        if (clean.isEmpty()) return
+        _uiState.update { it.copy(toastMessage = clean) }
+    }
+
+    fun dismissToast() {
+        _uiState.update { it.copy(toastMessage = null) }
+    }
+
+    /** Re-queries Room `clips` (`status == READY`) and `LocalGraphDatabase` replies to refresh `lastCompletedVideo`. */
+    fun refreshLastCompletedVideo() {
+        recomputeLastCompletedVideo(_uiState.value.clipCards)
+    }
+
+    private fun recomputeLastCompletedVideo(cards: List<ClipCardRow>) {
+        val latestReady = cards
+            .filter { it.status == RenderJobStatus.READY }
+            .maxByOrNull { it.updatedAtMillis }
+        if (latestReady == null) {
+            _uiState.update { it.copy(lastCompletedVideo = null) }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val clip = localRepo.getClipById(latestReady.id)
+            if (clip == null || clip.status != RenderJobStatus.READY) {
+                _uiState.update { it.copy(lastCompletedVideo = null) }
+                return@launch
+            }
+            val latestSession = localRepo.getLatestCorePipelineSession()
+            val scriptTranscript = if (clip.scriptId.isNotBlank()) {
+                localRepo.getScriptById(clip.scriptId)?.let { proj ->
+                    proj.activeBeats.joinToString(" ") { it.spokenText.trim() }
+                        .trim()
+                        .ifBlank { proj.ideaSpark.trim() }
+                }?.takeIf { it.isNotBlank() }
+            } else {
+                null
+            }
+            val resolvedTranscript = when {
+                latestSession != null &&
+                    latestSession.finalClipId == clip.id &&
+                    latestSession.fullStoryText.isNotBlank() -> latestSession.fullStoryText.trim()
+                !scriptTranscript.isNullOrBlank() -> scriptTranscript
+                clip.alignedWords.isNotEmpty() -> clip.alignedWords.joinToString(" ") { it.word }.trim()
+                clip.chyronSubline.isNotBlank() -> clip.chyronSubline.trim()
+                else -> clip.title.trim()
+            }
+            val cleanTitle = clip.title.trim()
+                .ifBlank { clip.chyronHeadline.trim() }
+                .ifBlank { "Untitled clip" }
+            val thumbPath = casStore.fileForSha(clip.thumbHash, "jpg")?.absolutePath
+                ?: casStore.fileForSha(clip.photoSha, "jpg")?.absolutePath
+            val topReply = resolveTopReplyQuestionFromGraph(cleanTitle, resolvedTranscript)
+            val summary = LastVideoSummary(
+                clipId = clip.id,
+                title = cleanTitle,
+                durationMs = clip.durationMs,
+                updatedAtMillis = clip.updatedAtMillis,
+                thumbFilePath = thumbPath,
+                transcript = resolvedTranscript,
+                topReplyQuestion = topReply,
+                remoteThumbUrl = _uiState.value.remoteThumbUrls[clip.id]?.ifBlank { null },
+                remoteVideoUrl = clip.remoteFinalUrl?.ifBlank { null }
+            )
+            _uiState.update { state ->
+                val stillHasReady = state.clipCards.any { it.id == clip.id && it.status == RenderJobStatus.READY }
+                if (stillHasReady) {
+                    state.copy(lastCompletedVideo = summary)
+                } else {
+                    state.copy(lastCompletedVideo = null)
+                }
+            }
+        }
+    }
+
+    private fun resolveTopReplyQuestionFromGraph(title: String, transcript: String): String? {
+        val replies = runCatching {
+            localGraphDatabase.getAllPosts()
+                .map { it.record }
+                .filter { it.isReplyToUser && it.text.isNotBlank() }
+        }.getOrDefault(emptyList())
+        if (replies.isEmpty()) return null
+
+        val topicWords = Regex("[a-z0-9]{4,}")
+            .findAll("$title $transcript".lowercase())
+            .map { it.value }
+            .toSet()
+
+        val ranked = replies.sortedWith(
+            compareByDescending<com.example.graph.GraphPostRecord> { it.text.contains('?') }
+                .thenByDescending { post ->
+                    val words = Regex("[a-z0-9]{4,}").findAll(post.text.lowercase()).map { it.value }.toSet()
+                    words.count { it in topicWords }
+                }
+                .thenByDescending { it.createdAtEpochMs }
+        )
+        val best = ranked.firstOrNull() ?: return null
+        return best.text
+            .replace(Regex("^(?:@[A-Za-z0-9_]+\\s+)+"), "")
+            .trim()
+            .takeIf { it.isNotEmpty() }
+    }
+
     fun clearPendingShareIntent() {
         _uiState.update { it.copy(pendingShareIntent = null) }
     }
@@ -1517,5 +1905,58 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     companion object {
         const val MAC_RIG_POLL_INTERVAL_MS: Long = 2_500L
         private const val MAX_CORE_UNDO: Int = 40
+
+        internal fun applyShotPlanToClauses(
+            clauses: List<CoreStoryClause>,
+            shotPlan: List<List<ShotSpec>>
+        ): List<CoreStoryClause> {
+            val nonEmptyBeats = shotPlan.filter { it.isNotEmpty() }
+            if (clauses.isEmpty() || nonEmptyBeats.isEmpty()) return clauses
+
+            val beatIndexByClause = IntArray(clauses.size) { cIdx ->
+                ((cIdx * nonEmptyBeats.size) / clauses.size).coerceIn(0, nonEmptyBeats.lastIndex)
+            }
+            val clausesPerBeat = IntArray(nonEmptyBeats.size)
+            val seenPerBeat = IntArray(nonEmptyBeats.size)
+            for (bIdx in beatIndexByClause) {
+                clausesPerBeat[bIdx]++
+            }
+
+            return clauses.mapIndexed { cIdx, clause ->
+                val bIdx = beatIndexByClause[cIdx]
+                val localOffset = seenPerBeat[bIdx]++
+                val bucketSize = clausesPerBeat[bIdx].coerceAtLeast(1)
+                val beatShots = nonEmptyBeats[bIdx]
+                val chosenShot = if (bucketSize == 1 && beatShots.size > 1) {
+                    val defaultCount = ShotType.defaultTypesForBeat(bIdx).size
+                    if (beatShots.size > defaultCount) {
+                        beatShots.last()
+                    } else {
+                        beatShots.first()
+                    }
+                } else {
+                    val sIdx = ((localOffset * beatShots.size) / bucketSize).coerceIn(0, beatShots.lastIndex)
+                    beatShots[sIdx]
+                }
+
+                when (chosenShot.type) {
+                    ShotType.PIP, ShotType.BROLL -> {
+                        val cue = chosenShot.prompt.trim().ifBlank { clause.spokenText.take(48) }
+                        clause.copy(
+                            segmentMode = BrollSegmentMode.BROLL_CUTAWAY,
+                            brollCaption = cue,
+                            bRollPrompt = chosenShot.prompt.trim().ifBlank { clause.spokenText.take(72) },
+                            shotTypeWire = chosenShot.type.wireValue
+                        )
+                    }
+                    ShotType.FACE, ShotType.CARD -> {
+                        clause.copy(
+                            segmentMode = BrollSegmentMode.TALKING_HEAD,
+                            shotTypeWire = chosenShot.type.wireValue
+                        )
+                    }
+                }
+            }
+        }
     }
 }

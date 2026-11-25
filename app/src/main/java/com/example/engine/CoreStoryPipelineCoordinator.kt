@@ -594,10 +594,13 @@ class CoreStoryPipelineCoordinator(
             )
 
             // Pre-stage clause index 1 as B-Roll Cutaway when >= 2 clauses exist and none have been
-            // customized yet, giving an immediate Talking Head -> B-Roll -> Talking Head cut list.
+            // customized yet (including no explicit SPARK/SCRIPT shotPlan), giving an immediate
+            // Talking Head -> B-Roll -> Talking Head cut list.
             val brollReadyClauses = if (
                 beatLockedClauses.size >= 2 &&
-                beatLockedClauses.all { it.segmentMode == BrollSegmentMode.TALKING_HEAD }
+                beatLockedClauses.all {
+                    it.segmentMode == BrollSegmentMode.TALKING_HEAD && it.shotTypeWire.isEmpty()
+                }
             ) {
                 beatLockedClauses.mapIndexed { idx, clause ->
                     if (idx == 1) {

@@ -1083,6 +1083,140 @@ object DraftStateReducer {
             }
     }
 
+    /**
+     * 16. Clip Studio v5 single-tap natural phrase selection:
+     * Given a [charOffset] in [draft]'s plain text, selects a natural 3–6 word grammatical
+     * phrase span within the tapped clause (or the exact contiguous locked span if the tapped
+     * word is verbatim-locked), never crossing clause or paragraph boundaries.
+     */
+    fun selectNaturalPhraseRange(draft: CandidateDraft, charOffset: Int): IntRange? {
+        val (fullText, flatTokens) = flattenClauses(draft.clauses)
+        if (fullText.isEmpty() || flatTokens.isEmpty()) return null
+
+        val clamped = charOffset.coerceIn(0, fullText.lastIndex)
+        val hitGlobalIdx = flatTokens.indexOfFirst { ft ->
+            clamped in ft.textStart until ft.fullEndExclusive
+        }.takeIf { it >= 0 } ?: flatTokens.lastIndex
+
+        val hitToken = flatTokens[hitGlobalIdx]
+        if (hitToken.token.verbatimLocked) {
+            var left = hitGlobalIdx
+            while (left > 0 &&
+                flatTokens[left - 1].clauseIndex == hitToken.clauseIndex &&
+                flatTokens[left - 1].token.verbatimLocked
+            ) {
+                left--
+            }
+            var right = hitGlobalIdx
+            while (right < flatTokens.lastIndex &&
+                flatTokens[right + 1].clauseIndex == hitToken.clauseIndex &&
+                flatTokens[right + 1].token.verbatimLocked
+            ) {
+                right++
+            }
+            return flatTokens[left].textStart until flatTokens[right].textEndExclusive
+        }
+
+        val clauseTokens = flatTokens.filter { it.clauseIndex == hitToken.clauseIndex }
+        if (clauseTokens.isEmpty()) return null
+
+        val segments = splitClauseIntoNaturalSegments(clauseTokens)
+        val seg = segments.firstOrNull { s -> s.any { it.tokenIndex == hitToken.tokenIndex } }
+            ?: clauseTokens
+
+        if (seg.size <= 6) {
+            return seg.first().textStart until seg.last().textEndExclusive
+        }
+
+        val localIdx = seg.indexOfFirst { it.tokenIndex == hitToken.tokenIndex }.coerceAtLeast(0)
+        val windowSize = 4
+        val halfLeft = 1
+        var winStart = (localIdx - halfLeft).coerceAtLeast(0)
+        var winEnd = (winStart + windowSize - 1).coerceAtMost(seg.lastIndex)
+        winStart = (winEnd - windowSize + 1).coerceAtLeast(0)
+
+        return seg[winStart].textStart until seg[winEnd].textEndExclusive
+    }
+
+    /**
+     * Partitions [draft] into non-overlapping natural 3–6 word phrase spans for chunk-based tap UIs.
+     */
+    fun partitionIntoPhraseSpans(draft: CandidateDraft): List<IntRange> {
+        val (_, flatTokens) = flattenClauses(draft.clauses)
+        if (flatTokens.isEmpty()) return emptyList()
+
+        val out = mutableListOf<IntRange>()
+        val byClause = flatTokens.groupBy { it.clauseIndex }
+        for ((_, clauseTokens) in byClause) {
+            var i = 0
+            while (i < clauseTokens.size) {
+                if (clauseTokens[i].token.verbatimLocked) {
+                    val start = i
+                    while (i + 1 < clauseTokens.size && clauseTokens[i + 1].token.verbatimLocked) {
+                        i++
+                    }
+                    out += clauseTokens[start].textStart until clauseTokens[i].textEndExclusive
+                    i++
+                    continue
+                }
+                val unlockedRun = mutableListOf<FlattenedToken>()
+                while (i < clauseTokens.size && !clauseTokens[i].token.verbatimLocked) {
+                    val tok = clauseTokens[i]
+                    unlockedRun += tok
+                    i++
+                    val tokLastCh = tok.token.text.lastOrNull()
+                    if (tokLastCh != null && tokLastCh in charArrayOf(',', ';', ':') && unlockedRun.size >= 2) {
+                        break
+                    }
+                }
+                var cursor = 0
+                while (cursor < unlockedRun.size) {
+                    val remaining = unlockedRun.size - cursor
+                    val takeCount = when {
+                        remaining <= 6 -> remaining
+                        remaining == 7 -> 4
+                        else -> 4
+                    }
+                    val slice = unlockedRun.subList(cursor, cursor + takeCount)
+                    out += slice.first().textStart until slice.last().textEndExclusive
+                    cursor += takeCount
+                }
+            }
+        }
+        return out
+    }
+
+    private fun splitClauseIntoNaturalSegments(
+        clauseTokens: List<FlattenedToken>
+    ): List<List<FlattenedToken>> {
+        val segments = mutableListOf<List<FlattenedToken>>()
+        var current = mutableListOf<FlattenedToken>()
+        for (ft in clauseTokens) {
+            if (ft.token.verbatimLocked) {
+                if (current.isNotEmpty()) {
+                    segments += current.toList()
+                    current = mutableListOf()
+                }
+                segments += listOf(ft)
+                continue
+            }
+            current += ft
+            val lastCh = ft.token.text.lastOrNull()
+            if (lastCh != null && lastCh in charArrayOf(',', ';', ':') && current.size >= 2) {
+                segments += current.toList()
+                current = mutableListOf()
+            } else if (ft.token.text == "-" && current.size >= 2) {
+                val withoutDash = current.dropLast(1)
+                if (withoutDash.isNotEmpty()) segments += withoutDash
+                current = mutableListOf()
+            }
+        }
+        if (current.isNotEmpty()) {
+            segments += current.toList()
+        }
+        return segments
+    }
+
     // -------------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------------

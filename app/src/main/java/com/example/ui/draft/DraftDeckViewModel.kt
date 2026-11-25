@@ -2,6 +2,7 @@ package com.example.ui.draft
 
 import android.app.Application
 import android.content.Context
+import android.media.MediaPlayer
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.compose.runtime.Immutable
@@ -10,7 +11,9 @@ import androidx.lifecycle.viewModelScope
 import com.example.AircheckApplication
 import com.example.ai.LlmRoutingException
 import com.example.ai.LlmStageRouter
+import com.example.data.LastVideoSummary
 import com.example.data.LlmProviderChoice
+import com.example.data.LlmStage
 import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.draft.ArcBeat
 import com.example.draft.BrushNudge
@@ -18,12 +21,19 @@ import com.example.draft.CandidateDraft
 import com.example.draft.DraftApiClient
 import com.example.draft.DraftDocument
 import com.example.draft.DraftStateReducer
+import com.example.draft.DraftTone
+import com.example.draft.DraftToneContext
 import com.example.draft.EditSource
+import com.example.draft.ExistingBeatShotsContext
+import com.example.draft.FollowupDirectionCard
 import com.example.draft.LlmMetaDto
 import com.example.draft.LockedPhrase
+import com.example.draft.ShotSpec
+import com.example.draft.ShotType
 import com.example.draft.Stage
 import com.example.draft.VadAudioCaptureEngine
 import com.example.draft.XAttachment
+import com.example.engine.CoreStoryPipelineCoordinator
 import com.example.graph.GraphMatch
 import com.example.graph.XShipIntentHelper
 import kotlinx.coroutines.CancellationException
@@ -36,12 +46,17 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.util.Base64
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.roundToInt
 
 @Immutable
 data class DraftSessionSummary(
@@ -66,6 +81,7 @@ data class DraftDeckUiState(
     val busyLabel: String? = null,
     val errorMessage: String? = null,
     val statusNotice: String? = null,
+    val toastMessage: String? = null,
     val focusedClauseId: String? = null,
     val focusedGapIndex: Int? = null,
     val activeBrushRange: IntRange? = null,
@@ -82,7 +98,25 @@ data class DraftDeckUiState(
     val rigBaseUrl: String = DraftApiClient.DEFAULT_RIG_LAN_URL,
     val sessions: List<DraftSessionSummary> = emptyList(),
     val isSessionSwitcherOpen: Boolean = false,
-    val lastLlmMeta: LlmMetaDto? = null
+    val lastLlmMeta: LlmMetaDto? = null,
+    // Clip Studio v5 SPARK / Follow-up / Shot Previews / Script state
+    val anchorsSheetOpen: Boolean = false,
+    val continueSheetOpen: Boolean = false,
+    val directionsOpen: Boolean = false,
+    val followupVideo: LastVideoSummary? = null,
+    val followupAngle: String = "answer",
+    val followupDirection: String? = null,
+    val followupDirections: List<FollowupDirectionCard> = emptyList(),
+    val followupBeats: List<ArcBeat> = emptyList(),
+    val isDraftingFollowup: Boolean = false,
+    val shotPreviews: Map<String, String> = emptyMap(),
+    val inFlightShotIds: Set<String> = emptySet(),
+    val rerollingBeatIndex: Int = -1,
+    val lastSeedAudioPath: String? = null,
+    val lastSeedDurationSec: Int = 0,
+    val isPlayingSeedAudio: Boolean = false,
+    val lengthRowOpen: Boolean = false,
+    val scriptHintSeen: Boolean = false
 ) {
     val isAnyRecording: Boolean
         get() = isRecordingSeed || isRecordingSteer || isRecordingSplice
@@ -92,6 +126,35 @@ data class DraftDeckUiState(
 
     val hasAnyBackgroundThinking: Boolean
         get() = sessions.any { it.id != document.id && it.isThinking }
+
+    val tone: DraftTone
+        get() = document.tone
+
+    val steerSheetOpen: Boolean
+        get() = anchorsSheetOpen
+
+    val followupLoaded: Boolean
+        get() = document.isFollowupLoaded
+
+    val followupSourceLabel: String
+        get() = document.followupSourceLabel
+
+    val scenes: List<List<ShotType>>
+        get() = document.arcBeats.map { beat -> beat.shots.map { it.type } }
+
+    val selectedPhrase: IntRange?
+        get() = activeBrushRange
+
+    val selectedAnchorCount: Int
+        get() = document.extractedAngles.count { it.selected } +
+            document.blindspotAngles.count { it.selected }
+
+    val canUndo: Boolean
+        get() = if (document.stage == Stage.SEED && document.candidates.isEmpty()) {
+            document.canUndoArc
+        } else {
+            document.activeCandidate?.canUndoGlobal == true
+        }
 
     val activeCharCount: Int
         get() = when (document.stage) {
@@ -112,13 +175,15 @@ class DraftDeckViewModel internal constructor(
     application: Application,
     private val llmRouterOverride: LlmStageRouter?,
     private val draftApiClientFactory: ((String) -> DraftApiClient)? = null,
-    private val profileStoreOverride: com.example.data.local.AircheckProfileStore? = null
+    private val profileStoreOverride: com.example.data.local.AircheckProfileStore? = null,
+    private val casStoreOverride: com.example.data.local.CasMediaStore? = null
 ) : AndroidViewModel(application) {
 
     constructor(application: Application) : this(application, llmRouterOverride = null)
 
     private val container = (application as AircheckApplication).container
     private val profileStore = profileStoreOverride ?: container.profileStore
+    private val casStore = casStoreOverride ?: container.casStore
     private val vadAudioEngine: VadAudioCaptureEngine = container.vadAudioEngine
     private val localGraphDatabase = container.localGraphDatabase
     private val graphRadarEngine = container.graphRadarEngine
@@ -156,6 +221,15 @@ class DraftDeckViewModel internal constructor(
     private var flashJob: Job? = null
     private var graphRefreshJob: Job? = null
     private var probeJob: Job? = null
+    private var followupJob: Job? = null
+
+    private val shotIdCounter = AtomicLong(0L)
+    private val shotPreviewJobs = ConcurrentHashMap<String, Job>()
+    private val shotPreviewSemaphore = Semaphore(3)
+    private val shotPreviewCasMutex = Mutex()
+    private val followupAngleBeatCache = ConcurrentHashMap<String, List<ArcBeat>>()
+    private var seedMediaPlayer: MediaPlayer? = null
+    private val seedPlayerLock = Any()
 
     // Concurrent multi-draft async session store: switching or pulling down for a new subject
     // NEVER cancels in-flight LLM passes on prior cards.
@@ -211,6 +285,7 @@ class DraftDeckViewModel internal constructor(
 
     override fun onCleared() {
         super.onCleared()
+        releaseSeedMediaPlayer()
         if (_uiState.value.isAnyRecording) {
             vadAudioEngine.release()
         }
@@ -220,6 +295,9 @@ class DraftDeckViewModel internal constructor(
         flashJob?.cancel()
         graphRefreshJob?.cancel()
         probeJob?.cancel()
+        followupJob?.cancel()
+        shotPreviewJobs.values.forEach { it.cancel() }
+        shotPreviewJobs.clear()
     }
 
     fun probeRigHealth() {
@@ -263,11 +341,13 @@ class DraftDeckViewModel internal constructor(
         if (current.isRecordingSteer || current.isRecordingSplice) return
 
         if (!current.isRecordingSeed) {
+            releaseSeedMediaPlayer()
             seedBeforeLatch = current.document.seedTranscript.trim()
             openLatchHadIncremental = false
             _uiState.update {
                 it.copy(
                     isRecordingSeed = true,
+                    isPlayingSeedAudio = false,
                     recordingElapsedMs = 0L,
                     liveRmsLevel = 0f,
                     rawKeyboardMode = false,
@@ -297,17 +377,36 @@ class DraftDeckViewModel internal constructor(
                 }
                 transcribeMutex.withLock {
                     if (distilledWav != null) {
+                        val playbackFile = persistSeedPlaybackWav(distilledWav, _uiState.value.document.id)
+                        val wavDurationMs = runCatching {
+                            CoreStoryPipelineCoordinator.parseWavDurationAndPeaks(playbackFile).durationMs
+                        }.getOrDefault(0L)
                         _uiState.update {
-                            it.copy(isBusy = true, busyLabel = "Transcribing voice seed...", errorMessage = null)
+                            it.copy(
+                                lastSeedAudioPath = playbackFile.absolutePath,
+                                lastSeedDurationSec = ((wavDurationMs + 999L) / 1000L).toInt().coerceAtLeast(1),
+                                isBusy = true,
+                                busyLabel = "Transcribing voice seed...",
+                                errorMessage = null
+                            )
                         }
                         try {
-                            val response = draftApiClient.transcribe(distilledWav)
+                            val response = draftApiClient.transcribe(playbackFile)
+                            val durationSec = (((response.durationMs.takeIf { it > 0L } ?: wavDurationMs) + 999L) / 1000L)
+                                .toInt()
+                                .coerceAtLeast(1)
                             val cleanChunk = DraftStateReducer.sanitizeAscii(response.transcript).trim()
                             if (cleanChunk.isNotEmpty()) {
                                 val combined = joinTranscriptParts(seedBeforeLatch, cleanChunk)
                                 _uiState.update { state ->
                                     state.copy(
-                                        document = state.document.copy(seedTranscript = combined),
+                                        document = state.document.copy(
+                                            seedTranscript = combined,
+                                            isFollowupLoaded = false,
+                                            followupSourceLabel = ""
+                                        ),
+                                        lastSeedAudioPath = playbackFile.absolutePath,
+                                        lastSeedDurationSec = durationSec,
                                         lastSeedRigOnline = true,
                                         isBusy = false,
                                         busyLabel = null
@@ -316,7 +415,13 @@ class DraftDeckViewModel internal constructor(
                                 refreshAnglesFromSeedInternal(silentOnError = false)
                             } else {
                                 _uiState.update {
-                                    it.copy(lastSeedRigOnline = true, isBusy = false, busyLabel = null)
+                                    it.copy(
+                                        lastSeedAudioPath = playbackFile.absolutePath,
+                                        lastSeedDurationSec = durationSec,
+                                        lastSeedRigOnline = true,
+                                        isBusy = false,
+                                        busyLabel = null
+                                    )
                                 }
                                 val existingSeed = _uiState.value.document.seedTranscript.trim()
                                 if (existingSeed.isNotEmpty() && _uiState.value.document.extractedAngles.isEmpty()) {
@@ -328,7 +433,9 @@ class DraftDeckViewModel internal constructor(
                         } catch (e: Exception) {
                             handleApiFailure("Transcription failed", e)
                         } finally {
-                            runCatching { distilledWav.delete() }
+                            if (distilledWav.absolutePath != playbackFile.absolutePath) {
+                                runCatching { distilledWav.delete() }
+                            }
                         }
                     } else if (openLatchHadIncremental) {
                         val currentSeed = _uiState.value.document.seedTranscript.trim()
@@ -406,11 +513,18 @@ class DraftDeckViewModel internal constructor(
                 return@launch
             }
 
+            releaseSeedMediaPlayer()
+            val playbackFile = persistSeedPlaybackWav(extractedWav, _uiState.value.document.id)
             _uiState.update {
-                it.copy(isBusy = true, busyLabel = "Distilling last 15s...", errorMessage = null)
+                it.copy(
+                    isPlayingSeedAudio = false,
+                    isBusy = true,
+                    busyLabel = "Distilling last 15s...",
+                    errorMessage = null
+                )
             }
             try {
-                val response = draftApiClient.transcribe(extractedWav)
+                val response = draftApiClient.transcribe(playbackFile)
                 val distilledText = DraftStateReducer.sanitizeAscii(response.transcript).trim()
                 if (distilledText.isEmpty()) {
                     _uiState.update {
@@ -425,7 +539,13 @@ class DraftDeckViewModel internal constructor(
                 val durationSecs = (response.durationMs / 1000L).coerceAtLeast(1L)
                 _uiState.update { state ->
                     state.copy(
-                        document = state.document.copy(seedTranscript = distilledText),
+                        document = state.document.copy(
+                            seedTranscript = distilledText,
+                            isFollowupLoaded = false,
+                            followupSourceLabel = ""
+                        ),
+                        lastSeedAudioPath = playbackFile.absolutePath,
+                        lastSeedDurationSec = durationSecs.toInt(),
                         lastSeedRigOnline = true,
                         isBusy = false,
                         busyLabel = null,
@@ -438,7 +558,9 @@ class DraftDeckViewModel internal constructor(
             } catch (e: Exception) {
                 handleApiFailure("Distill last 15s failed", e)
             } finally {
-                runCatching { extractedWav.delete() }
+                if (extractedWav.absolutePath != playbackFile.absolutePath) {
+                    runCatching { extractedWav.delete() }
+                }
             }
         }
     }
@@ -835,10 +957,12 @@ class DraftDeckViewModel internal constructor(
                 )
             }
             try {
-                val response = llmStageRouter.extractAngles(
-                    seedTranscript = cleanSeed,
-                    steeringConstraints = snapshotDoc.steeringConstraints
-                )
+                val response = withContext(DraftToneContext(snapshotDoc.tone)) {
+                    llmStageRouter.extractAngles(
+                        seedTranscript = cleanSeed,
+                        steeringConstraints = snapshotDoc.steeringConstraints
+                    )
+                }
                 // Row A (Extracted Angles) ON by default; Row B (Blindspots) OFF by default.
                 val extracted = response.toExtractedAngleChips(defaultSelected = true)
                 val blindspots = response.toBlindspotAngleChips(defaultSelected = false)
@@ -899,13 +1023,15 @@ class DraftDeckViewModel internal constructor(
                 )
             }
             try {
-                val response = llmStageRouter.synthesize(
-                    seedTranscript = cleanSeed,
-                    selectedAngles = selectedAngles,
-                    steeringConstraints = doc.steeringConstraints,
-                    slot = null,
-                    existingDrafts = emptyList()
-                )
+                val response = withContext(DraftToneContext(doc.tone)) {
+                    llmStageRouter.synthesize(
+                        seedTranscript = cleanSeed,
+                        selectedAngles = selectedAngles,
+                        steeringConstraints = doc.steeringConstraints,
+                        slot = null,
+                        existingDrafts = emptyList()
+                    )
+                }
                 val candidates = response.candidates.take(3).map { dto ->
                     DraftStateReducer.createCandidateDraft(
                         postureLabel = dto.postureLabel,
@@ -982,44 +1108,77 @@ class DraftDeckViewModel internal constructor(
         val cleanSeed = DraftStateReducer.sanitizeAscii(doc.seedTranscript).trim()
         if (cleanSeed.isEmpty()) return
         val existing = if (rerollIndex != null) doc.arcBeats.map { it.text } else null
+        val existingShots = doc.arcBeats.map { it.shots }
         launchSessionJob(targetSessionId, if (rerollIndex == null) "arc" else "arc_$rerollIndex") {
             updateSession(targetSessionId) {
                 it.copy(
                     isBusy = true,
+                    rerollingBeatIndex = rerollIndex ?: -1,
                     busyLabel = if (rerollIndex == null) "Proposing 60s arc..." else "Re-rolling beat...",
                     errorMessage = null
                 )
             }
             try {
-                val response = llmStageRouter.arc(
-                    seedTranscript = cleanSeed,
-                    steeringConstraints = doc.steeringConstraints,
-                    selectedAngles = collectSelectedAngleSpecs(doc),
-                    targetSec = ARC_TARGET_SEC,
-                    rerollIndex = rerollIndex,
-                    existingBeats = existing
-                )
-                val beats = response.beats.map {
-                    ArcBeat(label = it.label, startSec = it.startSec, endSec = it.endSec, text = it.text)
+                val response = withContext(
+                    DraftToneContext(doc.tone) + ExistingBeatShotsContext(existingShots)
+                ) {
+                    llmStageRouter.arc(
+                        seedTranscript = cleanSeed,
+                        steeringConstraints = doc.steeringConstraints,
+                        selectedAngles = collectSelectedAngleSpecs(doc),
+                        targetSec = ARC_TARGET_SEC,
+                        rerollIndex = rerollIndex,
+                        existingBeats = existing
+                    )
+                }
+                val beats = response.beats.mapIndexed { bIdx, dto ->
+                    val preservedBeat = if (
+                        rerollIndex != null &&
+                        bIdx != rerollIndex &&
+                        bIdx in doc.arcBeats.indices &&
+                        doc.arcBeats[bIdx].shots.isNotEmpty()
+                    ) {
+                        doc.arcBeats[bIdx]
+                    } else {
+                        null
+                    }
+                    preservedBeat ?: dto.toArcBeat(
+                        beatIndex = bIdx,
+                        shotIdFactory = ::nextShotId
+                    )
                 }
                 if (beats.isEmpty()) throw IllegalStateException("LLM returned an empty arc.")
                 updateSession(targetSessionId) { state ->
+                    val nextUndoStack = if (rerollIndex != null && state.document.arcBeats.isNotEmpty()) {
+                        (state.document.arcUndoStack + listOf(state.document.arcBeats)).takeLast(MAX_ARC_UNDO)
+                    } else {
+                        state.document.arcUndoStack
+                    }
                     state.copy(
                         document = state.document.copy(
                             arcBeats = beats,
+                            arcUndoStack = nextUndoStack,
                             arcTargetSec = response.targetSec,
                             arcWordBudget = response.wordBudget,
                             lastRerolledBeat = rerollIndex ?: -1
                         ),
+                        rerollingBeatIndex = -1,
                         lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
                         lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
                         isBusy = false,
                         busyLabel = null
                     )
                 }
+                requestShotPreviewsForBeats(
+                    sessionId = targetSessionId,
+                    beats = beats,
+                    headline = beats.firstOrNull()?.text.orEmpty().take(40)
+                )
             } catch (e: CancellationException) {
+                updateSession(targetSessionId) { it.copy(rerollingBeatIndex = -1) }
                 throw e
             } catch (e: Exception) {
+                updateSession(targetSessionId) { it.copy(rerollingBeatIndex = -1) }
                 handleSessionApiFailure(targetSessionId, "Arc pass failed", e)
             }
         }
@@ -1042,13 +1201,15 @@ class DraftDeckViewModel internal constructor(
                 it.copy(isBusy = true, busyLabel = "Writing 60s script...", errorMessage = null, rawKeyboardMode = false)
             }
             try {
-                val response = llmStageRouter.synthesizeScript(
-                    seedTranscript = cleanSeed,
-                    selectedAngles = collectSelectedAngleSpecs(doc),
-                    steeringConstraints = doc.steeringConstraints,
-                    arcBeats = doc.arcBeats.map { it.text },
-                    targetSec = doc.arcTargetSec.takeIf { it > 0 } ?: ARC_TARGET_SEC
-                )
+                val response = withContext(DraftToneContext(doc.tone)) {
+                    llmStageRouter.synthesizeScript(
+                        seedTranscript = cleanSeed,
+                        selectedAngles = collectSelectedAngleSpecs(doc),
+                        steeringConstraints = doc.steeringConstraints,
+                        arcBeats = doc.arcBeats.map { it.text },
+                        targetSec = doc.arcTargetSec.takeIf { it > 0 } ?: ARC_TARGET_SEC
+                    )
+                }
                 val candidates = response.candidates.take(3).map { dto ->
                     DraftStateReducer.createCandidateDraft(
                         postureLabel = dto.postureLabel,
@@ -1114,12 +1275,14 @@ class DraftDeckViewModel internal constructor(
                 it.copy(isBusy = true, busyLabel = "Nudging: ${nudge.label}...", errorMessage = null)
             }
             try {
-                val response = llmStageRouter.brushSwap(
-                    markedText = markedText,
-                    steeringConstraints = state.document.steeringConstraints,
-                    nudge = nudge,
-                    excludeAlternatives = exclude
-                )
+                val response = withContext(DraftToneContext(state.document.tone)) {
+                    llmStageRouter.brushSwap(
+                        markedText = markedText,
+                        steeringConstraints = state.document.steeringConstraints,
+                        nudge = nudge,
+                        excludeAlternatives = exclude
+                    )
+                }
                 if (response.alternatives.isEmpty()) throw IllegalStateException("LLM returned no nudged alternatives.")
                 if (_uiState.value.document.id == targetSessionId && editGeneration.get() != requestGen) {
                     updateSession(targetSessionId) { it.copy(isBusy = false, busyLabel = null) }
@@ -1259,13 +1422,15 @@ class DraftDeckViewModel internal constructor(
                 )
             }
             try {
-                val response = llmStageRouter.synthesize(
-                    seedTranscript = cleanSeed,
-                    selectedAngles = selectedAngles,
-                    steeringConstraints = doc.steeringConstraints,
-                    slot = slotIdx,
-                    existingDrafts = existingTexts
-                )
+                val response = withContext(DraftToneContext(doc.tone)) {
+                    llmStageRouter.synthesize(
+                        seedTranscript = cleanSeed,
+                        selectedAngles = selectedAngles,
+                        steeringConstraints = doc.steeringConstraints,
+                        slot = slotIdx,
+                        existingDrafts = existingTexts
+                    )
+                }
                 val replacementDto = response.candidates.firstOrNull()
                     ?: throw IllegalStateException("LLM returned no replacement draft for slot $slotIdx.")
                 val replacement = DraftStateReducer.createCandidateDraft(
@@ -1322,13 +1487,15 @@ class DraftDeckViewModel internal constructor(
                 )
             }
             try {
-                val response = llmStageRouter.synthesize(
-                    seedTranscript = cleanSeed,
-                    selectedAngles = selectedAngles,
-                    steeringConstraints = doc.steeringConstraints,
-                    slot = null,
-                    existingDrafts = existingTexts
-                )
+                val response = withContext(DraftToneContext(doc.tone)) {
+                    llmStageRouter.synthesize(
+                        seedTranscript = cleanSeed,
+                        selectedAngles = selectedAngles,
+                        steeringConstraints = doc.steeringConstraints,
+                        slot = null,
+                        existingDrafts = existingTexts
+                    )
+                }
                 val candidates = response.candidates.take(3).map { dto ->
                     DraftStateReducer.createCandidateDraft(
                         postureLabel = dto.postureLabel,
@@ -1443,13 +1610,21 @@ class DraftDeckViewModel internal constructor(
 
         activePassJob = launchSessionJob(targetSessionId, "pass") {
             updateSession(targetSessionId) {
-                it.copy(isBusy = true, busyLabel = "Swapping phrase...", errorMessage = null)
+                it.copy(
+                    activeBrushRange = charRange,
+                    scriptHintSeen = true,
+                    isBusy = true,
+                    busyLabel = "Swapping phrase...",
+                    errorMessage = null
+                )
             }
             try {
-                val response = llmStageRouter.brushSwap(
-                    markedText = markedText,
-                    steeringConstraints = state.document.steeringConstraints
-                )
+                val response = withContext(DraftToneContext(state.document.tone)) {
+                    llmStageRouter.brushSwap(
+                        markedText = markedText,
+                        steeringConstraints = state.document.steeringConstraints
+                    )
+                }
                 val alternatives = response.alternatives
                 if (alternatives.isEmpty()) {
                     throw IllegalStateException("LLM returned no brush-swap alternatives.")
@@ -1724,7 +1899,12 @@ class DraftDeckViewModel internal constructor(
     }
 
     fun stepGlobalSnapshot(delta: Int) {
-        val activeCandidate = _uiState.value.document.activeCandidate ?: return
+        val current = _uiState.value
+        if (delta < 0 && current.document.stage == Stage.SEED && current.document.candidates.isEmpty() && current.document.canUndoArc) {
+            undoArcShotEdit()
+            return
+        }
+        val activeCandidate = current.document.activeCandidate ?: return
         val stepped = DraftStateReducer.stepGlobalSnapshot(activeCandidate, delta)
         if (stepped == activeCandidate) return
         clearBrushBaseline()
@@ -2168,6 +2348,618 @@ class DraftDeckViewModel internal constructor(
         _uiState.update { it.copy(statusNotice = null) }
     }
 
+    fun showToast(message: String) {
+        val clean = message.trim()
+        if (clean.isEmpty()) return
+        _uiState.update { it.copy(toastMessage = clean) }
+    }
+
+    fun dismissToast() {
+        _uiState.update { it.copy(toastMessage = null) }
+    }
+
+    // =========================================================================
+    // CLIP STUDIO v5: TONE, SHOT PLAN + REAL PREVIEWS, NOTE AUDIO, FOLLOW-UP,
+    // SINGLE-TAP PHRASE, LENGTH ±12W, & FULL-SCRIPT KEYBOARD EDIT
+    // =========================================================================
+
+    /** Sets and persists [tone] on the active [DraftDocument] and default [DraftApiClient]. */
+    fun setTone(tone: DraftTone) {
+        draftApiClient.activeTone = tone
+        updateSession(_uiState.value.document.id) { state ->
+            state.copy(document = state.document.copy(tone = tone))
+        }
+    }
+
+    fun toggleAnchorsSheet() {
+        setAnchorsSheetOpen(!_uiState.value.anchorsSheetOpen)
+    }
+
+    fun setAnchorsSheetOpen(open: Boolean) {
+        _uiState.update { it.copy(anchorsSheetOpen = open) }
+    }
+
+    /** Cycles `FACE -> PIP -> BROLL -> CARD` on [beatIndex], [shotIndex] with undo + real preview fetch. */
+    fun cycleBeatShot(beatIndex: Int, shotIndex: Int) {
+        val sessionId = _uiState.value.document.id
+        var createdShot: ShotSpec? = null
+        var beatText = ""
+        var headline = ""
+        updateSession(sessionId) { state ->
+            val doc = state.document
+            val beat = doc.arcBeats.getOrNull(beatIndex) ?: return@updateSession state
+            val oldShot = beat.shots.getOrNull(shotIndex) ?: return@updateSession state
+            val nextType = oldShot.type.nextInCycle()
+            val updatedShot = ShotSpec(
+                id = nextShotId(beatIndex, shotIndex, nextType),
+                type = nextType,
+                prompt = oldShot.prompt.ifBlank { beat.text.take(72) }
+            )
+            createdShot = updatedShot
+            beatText = beat.text
+            headline = doc.arcBeats.firstOrNull()?.text.orEmpty().take(40)
+            val updatedBeats = doc.arcBeats.mapIndexed { bIdx, b ->
+                if (bIdx != beatIndex) b
+                else b.copy(
+                    shots = b.shots.mapIndexed { sIdx, s -> if (sIdx == shotIndex) updatedShot else s }
+                )
+            }
+            val nextUndo = (doc.arcUndoStack + listOf(doc.arcBeats)).takeLast(MAX_ARC_UNDO)
+            state.copy(
+                document = doc.copy(
+                    arcBeats = updatedBeats,
+                    arcUndoStack = nextUndo
+                )
+            )
+        }
+        createdShot?.let { shot ->
+            requestShotPreviewForSingleShot(
+                sessionId = sessionId,
+                shot = shot,
+                fallbackPrompt = beatText,
+                headline = headline
+            )
+        }
+    }
+
+    /** Appends a `BROLL` [ShotSpec] to [beatIndex] with undo + real preview fetch. */
+    fun addBeatBrollShot(beatIndex: Int, prompt: String = "") {
+        val sessionId = _uiState.value.document.id
+        var createdShot: ShotSpec? = null
+        var beatText = ""
+        var headline = ""
+        updateSession(sessionId) { state ->
+            val doc = state.document
+            val beat = doc.arcBeats.getOrNull(beatIndex) ?: return@updateSession state
+            val cleanPrompt = prompt.trim().ifBlank { beat.text.take(72) }
+            val newShot = ShotSpec(
+                id = nextShotId(beatIndex, beat.shots.size, ShotType.BROLL),
+                type = ShotType.BROLL,
+                prompt = cleanPrompt
+            )
+            createdShot = newShot
+            beatText = beat.text
+            headline = doc.arcBeats.firstOrNull()?.text.orEmpty().take(40)
+            val updatedBeats = doc.arcBeats.mapIndexed { bIdx, b ->
+                if (bIdx != beatIndex) b else b.copy(shots = b.shots + newShot)
+            }
+            val nextUndo = (doc.arcUndoStack + listOf(doc.arcBeats)).takeLast(MAX_ARC_UNDO)
+            state.copy(
+                document = doc.copy(
+                    arcBeats = updatedBeats,
+                    arcUndoStack = nextUndo
+                )
+            )
+        }
+        createdShot?.let { shot ->
+            requestShotPreviewForSingleShot(
+                sessionId = sessionId,
+                shot = shot,
+                fallbackPrompt = beatText,
+                headline = headline
+            )
+        }
+    }
+
+    /** Undoes the last SPARK beat/shot modification from [DraftDocument.arcUndoStack]. */
+    fun undoArcShotEdit() {
+        val sessionId = _uiState.value.document.id
+        var restoredBeats: List<ArcBeat>? = null
+        updateSession(sessionId) { state ->
+            val doc = state.document
+            val prev = doc.arcUndoStack.lastOrNull() ?: return@updateSession state
+            restoredBeats = prev
+            state.copy(
+                document = doc.copy(
+                    arcBeats = prev,
+                    arcUndoStack = doc.arcUndoStack.dropLast(1)
+                ),
+                toastMessage = "undid last change"
+            )
+        }
+        restoredBeats?.let { beats ->
+            requestShotPreviewsForBeats(
+                sessionId = sessionId,
+                beats = beats,
+                headline = beats.firstOrNull()?.text.orEmpty().take(40)
+            )
+        }
+    }
+
+    /** Plays or pauses the real recorded SPARK voice note WAV via Android [MediaPlayer]. */
+    fun togglePlaySeedAudio() {
+        val current = _uiState.value
+        if (current.isPlayingSeedAudio) {
+            releaseSeedMediaPlayer()
+            _uiState.update { it.copy(isPlayingSeedAudio = false) }
+            return
+        }
+        val audioPath = current.lastSeedAudioPath?.trim().orEmpty()
+        val audioFile = if (audioPath.isNotEmpty()) File(audioPath) else null
+        if (audioFile == null || !audioFile.isFile || audioFile.length() <= 0L) {
+            showToast("no recorded audio for this note")
+            return
+        }
+        releaseSeedMediaPlayer()
+        try {
+            val player = MediaPlayer()
+            player.setDataSource(audioFile.absolutePath)
+            player.setOnCompletionListener {
+                releaseSeedMediaPlayer()
+                _uiState.update { it.copy(isPlayingSeedAudio = false) }
+            }
+            player.setOnErrorListener { _, _, _ ->
+                releaseSeedMediaPlayer()
+                _uiState.update {
+                    it.copy(
+                        isPlayingSeedAudio = false,
+                        errorMessage = "Unable to play recorded voice note."
+                    )
+                }
+                true
+            }
+            player.prepare()
+            synchronized(seedPlayerLock) {
+                seedMediaPlayer = player
+            }
+            player.start()
+            _uiState.update { it.copy(isPlayingSeedAudio = true, errorMessage = null) }
+        } catch (e: Exception) {
+            releaseSeedMediaPlayer()
+            _uiState.update {
+                it.copy(
+                    isPlayingSeedAudio = false,
+                    errorMessage = "Audio playback failed: ${e.localizedMessage ?: "invalid audio file"}"
+                )
+            }
+        }
+    }
+
+    /** Submits a typed or edited SPARK note (`"type it instead"` / note edit sheet), extracting angles & proposing the 4-beat arc. */
+    fun submitTypedNote(text: String) {
+        val clean = DraftStateReducer.sanitizeAscii(text).trim()
+        if (clean.isEmpty()) {
+            _uiState.update { it.copy(errorMessage = "Type an idea before continuing.") }
+            return
+        }
+        releaseSeedMediaPlayer()
+        val sessionId = _uiState.value.document.id
+        updateSession(sessionId) { state ->
+            state.copy(
+                document = state.document.copy(
+                    seedTranscript = clean,
+                    isFollowupLoaded = false,
+                    followupSourceLabel = ""
+                ),
+                isPlayingSeedAudio = false,
+                rawKeyboardMode = false,
+                errorMessage = null
+            )
+        }
+        refreshAnglesFromSeedInternal(silentOnError = false, targetSessionId = sessionId)
+    }
+
+    fun toggleDirectionsPanel(video: LastVideoSummary? = null) {
+        setDirectionsOpen(!_uiState.value.directionsOpen, video)
+    }
+
+    fun setDirectionsOpen(open: Boolean, video: LastVideoSummary? = null) {
+        val effectiveVideo = video ?: _uiState.value.followupVideo
+        _uiState.update {
+            it.copy(
+                directionsOpen = open,
+                followupVideo = effectiveVideo ?: it.followupVideo
+            )
+        }
+        if (open && effectiveVideo != null && _uiState.value.followupDirections.isEmpty() && !_uiState.value.isDraftingFollowup) {
+            requestFollowupOverview(effectiveVideo)
+        }
+    }
+
+    fun openContinueSheet(video: LastVideoSummary? = null) {
+        val effectiveVideo = video ?: _uiState.value.followupVideo ?: return
+        _uiState.update {
+            it.copy(
+                continueSheetOpen = true,
+                followupVideo = effectiveVideo,
+                followupDirection = null
+            )
+        }
+        if (_uiState.value.followupBeats.isEmpty() && !_uiState.value.isDraftingFollowup) {
+            requestFollowupOverview(effectiveVideo)
+        }
+    }
+
+    fun closeContinueSheet() {
+        _uiState.update { it.copy(continueSheetOpen = false) }
+    }
+
+    /** Calls real `POST /v1/draft/followup` (`angle = "overview"`) for [video]. */
+    fun requestFollowupOverview(video: LastVideoSummary) {
+        followupJob?.cancel()
+        val sessionId = _uiState.value.document.id
+        val tone = _uiState.value.document.tone
+        _uiState.update {
+            it.copy(
+                followupVideo = video,
+                followupAngle = "answer",
+                followupDirection = null,
+                isDraftingFollowup = true,
+                errorMessage = null
+            )
+        }
+        followupJob = viewModelScope.launch {
+            try {
+                val stageCfg = profileStore.current().llmRouting.forStage(LlmStage.DRAFTING)
+                val response = draftApiClient.followup(
+                    lastTitle = video.title,
+                    lastTranscript = video.transcript,
+                    topReply = video.topReplyQuestion,
+                    angle = "overview",
+                    targetSec = ARC_TARGET_SEC,
+                    tone = tone.wireValue,
+                    llmProvider = stageCfg.resolveWireProviderId(),
+                    llmModel = stageCfg.normalizedModelOverride()
+                )
+                val rawAnswer = response.answerBeats.ifEmpty { response.beats }
+                val answerBeats = rawAnswer.mapIndexed { idx, dto ->
+                    dto.toArcBeat(beatIndex = idx, shotIdFactory = ::nextShotId)
+                }
+                val directions = response.directions.map { dirDto ->
+                    val dirBeats = dirDto.beats.mapIndexed { idx, bDto ->
+                        bDto.toArcBeat(beatIndex = idx, shotIdFactory = ::nextShotId)
+                    }
+                    if (dirBeats.isNotEmpty()) {
+                        followupAngleBeatCache["${video.clipId}:${dirDto.id.lowercase()}"] = dirBeats
+                    }
+                    FollowupDirectionCard(
+                        id = dirDto.id.trim().lowercase(),
+                        theme = dirDto.theme.trim().uppercase(),
+                        words = dirDto.words.trim(),
+                        beats = dirBeats
+                    )
+                }
+                if (answerBeats.isNotEmpty()) {
+                    followupAngleBeatCache["${video.clipId}:answer"] = answerBeats
+                }
+                updateSession(sessionId) { state ->
+                    state.copy(
+                        followupVideo = video,
+                        followupDirections = directions,
+                        followupBeats = if (state.followupDirection != null) {
+                            directions.firstOrNull { it.id == state.followupDirection }?.beats?.ifEmpty { answerBeats }
+                                ?: answerBeats
+                        } else {
+                            answerBeats
+                        },
+                        isDraftingFollowup = false,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: state.lastLlmMeta
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val offline = isRigTransportFailure(e)
+                _uiState.update { state ->
+                    state.copy(
+                        isDraftingFollowup = false,
+                        lastSeedRigOnline = if (offline) false else state.lastSeedRigOnline,
+                        errorMessage = "Follow-up draft failed: ${e.localizedMessage ?: "unknown error"}"
+                    )
+                }
+            }
+        }
+    }
+
+    /** Switches Follow-Up Sheet angle (`"answer" | "part_2" | "update"`), calling real `POST /v1/draft/followup`. */
+    fun selectFollowupAngle(angle: String) {
+        val normalized = angle.trim().lowercase().replace(Regex("[\\s-]+"), "_")
+        require(normalized in setOf("answer", "part_2", "update")) {
+            "Unsupported follow-up angle '$angle'"
+        }
+        val video = _uiState.value.followupVideo ?: return
+        val cached = followupAngleBeatCache["${video.clipId}:$normalized"]
+        if (cached != null && cached.isNotEmpty()) {
+            _uiState.update {
+                it.copy(
+                    continueSheetOpen = true,
+                    followupAngle = normalized,
+                    followupDirection = null,
+                    followupBeats = cached,
+                    isDraftingFollowup = false,
+                    errorMessage = null
+                )
+            }
+            return
+        }
+        fetchFollowupSpecificBeats(video = video, wireAngle = normalized, isDirection = false)
+    }
+
+    /** Selects a themed follow-up direction (`"shitpost" | "solarpunk"`), opening the Follow-Up Sheet. */
+    fun selectFollowupDirection(dir: String) {
+        val normalized = dir.trim().lowercase()
+        require(normalized in setOf("shitpost", "solarpunk")) {
+            "Unsupported follow-up direction '$dir'"
+        }
+        val state = _uiState.value
+        val video = state.followupVideo ?: return
+        val preloaded = state.followupDirections.firstOrNull { it.id == normalized }?.beats
+            ?.takeIf { it.isNotEmpty() }
+            ?: followupAngleBeatCache["${video.clipId}:$normalized"]
+        if (preloaded != null && preloaded.isNotEmpty()) {
+            _uiState.update {
+                it.copy(
+                    continueSheetOpen = true,
+                    followupDirection = normalized,
+                    followupBeats = preloaded,
+                    isDraftingFollowup = false,
+                    errorMessage = null
+                )
+            }
+            return
+        }
+        fetchFollowupSpecificBeats(video = video, wireAngle = normalized, isDirection = true)
+    }
+
+    private fun fetchFollowupSpecificBeats(
+        video: LastVideoSummary,
+        wireAngle: String,
+        isDirection: Boolean
+    ) {
+        followupJob?.cancel()
+        val sessionId = _uiState.value.document.id
+        val tone = _uiState.value.document.tone
+        _uiState.update {
+            it.copy(
+                continueSheetOpen = true,
+                followupAngle = if (isDirection) it.followupAngle else wireAngle,
+                followupDirection = if (isDirection) wireAngle else null,
+                isDraftingFollowup = true,
+                errorMessage = null
+            )
+        }
+        followupJob = viewModelScope.launch {
+            try {
+                val stageCfg = profileStore.current().llmRouting.forStage(LlmStage.DRAFTING)
+                val response = draftApiClient.followup(
+                    lastTitle = video.title,
+                    lastTranscript = video.transcript,
+                    topReply = video.topReplyQuestion,
+                    angle = wireAngle,
+                    targetSec = ARC_TARGET_SEC,
+                    tone = tone.wireValue,
+                    llmProvider = stageCfg.resolveWireProviderId(),
+                    llmModel = stageCfg.normalizedModelOverride()
+                )
+                val beats = response.beats.ifEmpty { response.answerBeats }.mapIndexed { idx, dto ->
+                    dto.toArcBeat(beatIndex = idx, shotIdFactory = ::nextShotId)
+                }
+                if (beats.isNotEmpty()) {
+                    followupAngleBeatCache["${video.clipId}:$wireAngle"] = beats
+                }
+                updateSession(sessionId) { st ->
+                    st.copy(
+                        followupBeats = beats,
+                        isDraftingFollowup = false,
+                        lastSeedRigOnline = resolveRigOnlineAfterSuccess(st.lastSeedRigOnline, response.llmMeta),
+                        lastLlmMeta = response.llmMeta ?: st.lastLlmMeta
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val offline = isRigTransportFailure(e)
+                _uiState.update { st ->
+                    st.copy(
+                        isDraftingFollowup = false,
+                        lastSeedRigOnline = if (offline) false else st.lastSeedRigOnline,
+                        errorMessage = "Follow-up draft failed: ${e.localizedMessage ?: "unknown error"}"
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads the active follow-up beats + shot plan into 01 SPARK, sets `isFollowupLoaded = true`
+     * and `followupSourceLabel = "${video.title} · $angleLabel"`, and immediately starts real shot previews.
+     */
+    fun loadFollowupIntoSpark(
+        videoOverride: LastVideoSummary? = null,
+        beatsOverride: List<ArcBeat>? = null
+    ) {
+        val current = _uiState.value
+        val video = videoOverride ?: current.followupVideo ?: return
+        val beats = (beatsOverride ?: current.followupBeats).takeIf { it.isNotEmpty() } ?: return
+        val angleLabel = when (val dir = current.followupDirection) {
+            null -> when (current.followupAngle) {
+                "answer" -> {
+                    val reply = video.topReplyQuestion?.trim().orEmpty()
+                    if (reply.isNotEmpty()) "answering \"$reply\"" else "answer"
+                }
+                "part_2" -> "part 2"
+                "update" -> "update"
+                else -> current.followupAngle.replace('_', ' ')
+            }
+            else -> {
+                val dirCard = current.followupDirections.firstOrNull { it.id == dir }
+                if (dirCard != null && dirCard.words.isNotBlank()) {
+                    "${dirCard.theme.lowercase()}: ${dirCard.words}"
+                } else {
+                    dir
+                }
+            }
+        }
+        val sourceLabel = "${video.title} · $angleLabel"
+        val synthesizedSeed = buildString {
+            append("Follow-up to \"").append(video.title).append("\" (").append(angleLabel).append("): ")
+            append(beats.joinToString(" ") { it.text.trim() })
+        }.trim()
+        val targetTone = when (current.followupDirection) {
+            "shitpost" -> DraftTone.SHITPOST
+            "solarpunk" -> DraftTone.SOLARPUNK
+            else -> current.document.tone
+        }
+        draftApiClient.activeTone = targetTone
+        val sessionId = current.document.id
+        updateSession(sessionId) { st ->
+            st.copy(
+                document = st.document.copy(
+                    stage = Stage.SEED,
+                    tone = targetTone,
+                    seedTranscript = synthesizedSeed,
+                    arcBeats = beats,
+                    arcUndoStack = emptyList(),
+                    arcTargetSec = ARC_TARGET_SEC,
+                    arcWordBudget = (ARC_TARGET_SEC * 2.5).roundToInt(),
+                    isFollowupLoaded = true,
+                    followupSourceLabel = sourceLabel
+                ),
+                continueSheetOpen = false,
+                directionsOpen = false,
+                toastMessage = "follow-up loaded · edit any beat",
+                errorMessage = null
+            )
+        }
+        requestShotPreviewsForBeats(
+            sessionId = sessionId,
+            beats = beats,
+            headline = video.title.take(40)
+        )
+    }
+
+    /**
+     * 02 SCRIPT single-tap phrase selection: selects a natural 3–6 word grammatical span around
+     * [charOffset], sets `activeBrushRange`, and immediately triggers [performBrushSwap].
+     */
+    fun selectPhraseSingleTap(charOffset: Int) {
+        val candidate = _uiState.value.document.activeCandidate ?: return
+        val range = DraftStateReducer.selectNaturalPhraseRange(candidate, charOffset) ?: return
+        selectPhraseSpan(range)
+    }
+
+    /**
+     * Explicitly selects [range] in the active script candidate, sets `activeBrushRange`, and
+     * immediately requests real replacement alternatives via [performBrushSwap].
+     */
+    fun selectPhraseSpan(range: IntRange) {
+        if (range.isEmpty()) return
+        val current = _uiState.value
+        if (current.activeBrushRange == range && current.brushAlternatives.isNotEmpty()) {
+            keepSelectedPhrase()
+            return
+        }
+        clearBrushBaseline()
+        _uiState.update {
+            it.copy(
+                activeBrushRange = range,
+                brushAlternatives = emptyList(),
+                brushActiveAltIndex = 0,
+                activeBrushNudge = null,
+                scriptHintSeen = true
+            )
+        }
+        performBrushSwap(range)
+    }
+
+    /** Commits/keeps the currently previewed phrase choice and closes the phrase sheet. */
+    fun keepSelectedPhrase() {
+        dismissBrushStrip()
+        _uiState.update { it.copy(activeBrushNudge = null) }
+    }
+
+    /** Requests fresh replacement options (`more` nudge) for the currently selected phrase. */
+    fun refreshPhraseAlternatives() {
+        if (brushBaselineDraft != null && brushBaselineRange != null) {
+            performBrushNudge(BrushNudge.MORE)
+        } else {
+            val range = _uiState.value.activeBrushRange ?: return
+            performBrushSwap(range)
+        }
+    }
+
+    fun toggleLengthRow() {
+        setLengthRowOpen(!_uiState.value.lengthRowOpen)
+    }
+
+    fun setLengthRowOpen(open: Boolean) {
+        _uiState.update { it.copy(lengthRowOpen = open) }
+    }
+
+    /**
+     * Steps script length by [deltaWords] (e.g. `-12` for shorter, `+12` for longer), mapping
+     * proportionally to [commitDensityScrub].
+     */
+    fun stepScriptLength(deltaWords: Int) {
+        if (deltaWords == 0) return
+        val candidate = _uiState.value.document.activeCandidate ?: return
+        val currentWords = candidate.plainText()
+            .trim()
+            .split(Regex("\\s+"))
+            .count { it.isNotBlank() }
+            .coerceAtLeast(1)
+        val rawPercent = ((deltaWords.toFloat() / currentWords.toFloat()) * 100f).roundToInt()
+        val effectivePercent = if (deltaWords < 0) {
+            rawPercent.coerceIn(DraftApiClient.MIN_DENSITY_DELTA, -5)
+        } else {
+            rawPercent.coerceIn(5, DraftApiClient.MAX_DENSITY_DELTA)
+        }
+        commitDensityScrub(effectivePercent)
+    }
+
+    /** Saves an undo snapshot and applies a full-script manual keyboard edit to the active candidate. */
+    fun applyFullScriptKeyboardEdit(newText: String) {
+        val state = _uiState.value
+        val activeCandidate = state.document.activeCandidate
+        if (activeCandidate == null) {
+            val clean = DraftStateReducer.sanitizeAscii(newText).trim()
+            if (clean.isEmpty()) return
+            val created = DraftStateReducer.createCandidateDraft(
+                postureLabel = "DIRECT",
+                text = clean,
+                source = EditSource.MANUAL_RAW
+            )
+            updateSession(state.document.id) { cur ->
+                cur.copy(
+                    document = cur.document.copy(
+                        candidates = listOf(created),
+                        activeCandidateIndex = 0
+                    ),
+                    rawKeyboardMode = false,
+                    toastMessage = "script updated"
+                )
+            }
+            refreshGraphMatches()
+            return
+        }
+        val edited = DraftStateReducer.applyRawKeyboardEdit(activeCandidate, newText)
+        clearBrushBaseline()
+        replaceActiveCandidate(edited, dismissBrush = true)
+        _uiState.update { it.copy(rawKeyboardMode = false, toastMessage = "script updated") }
+        refreshGraphMatches()
+    }
+
     /**
      * Restores a handed-off or AppFunction-prepared plain-text draft and stage cleanly without
      * altering any UI structure.
@@ -2203,6 +2995,7 @@ class DraftDeckViewModel internal constructor(
     }
 
     fun resetNewDraft() {
+        releaseSeedMediaPlayer()
         if (_uiState.value.isAnyRecording) {
             vadAudioEngine.release()
         }
@@ -2210,6 +3003,9 @@ class DraftDeckViewModel internal constructor(
         activePassJob?.cancel()
         seamHealJob?.cancel()
         flashJob?.cancel()
+        followupJob?.cancel()
+        shotPreviewJobs.values.forEach { it.cancel() }
+        shotPreviewJobs.clear()
         clearBrushBaseline()
         editGeneration.incrementAndGet()
         seedBeforeLatch = ""
@@ -2217,7 +3013,10 @@ class DraftDeckViewModel internal constructor(
 
         _uiState.update { state ->
             DraftDeckUiState(
-                document = DraftDocument(id = UUID.randomUUID().toString()),
+                document = DraftDocument(
+                    id = UUID.randomUUID().toString(),
+                    tone = state.document.tone
+                ),
                 graphContactCount = state.graphContactCount,
                 lastSeedRigOnline = state.lastSeedRigOnline,
                 rigBaseUrl = state.rigBaseUrl
@@ -2423,8 +3222,114 @@ class DraftDeckViewModel internal constructor(
         }.getOrNull()
     }
 
+    private fun nextShotId(beatIndex: Int, shotIndex: Int, type: ShotType): String =
+        "shot_b${beatIndex}_s${shotIndex}_${type.wireValue}_${shotIdCounter.incrementAndGet()}"
+
+    private fun persistSeedPlaybackWav(sourceWav: File, sessionId: String): File {
+        val safeSession = sessionId.filter { it.isLetterOrDigit() || it == '_' || it == '-' }.take(24)
+        val out = File(vadCacheDir, "seed_playback_${safeSession.ifBlank { "active" }}.wav")
+        return if (sourceWav.absolutePath == out.absolutePath) {
+            out
+        } else {
+            runCatching { sourceWav.copyTo(out, overwrite = true) }.getOrDefault(sourceWav)
+        }
+    }
+
+    private fun releaseSeedMediaPlayer() {
+        synchronized(seedPlayerLock) {
+            val player = seedMediaPlayer
+            seedMediaPlayer = null
+            if (player != null) {
+                runCatching { if (player.isPlaying) player.stop() }
+                runCatching { player.release() }
+            }
+        }
+    }
+
+    private fun requestShotPreviewsForBeats(
+        sessionId: String,
+        beats: List<ArcBeat>,
+        headline: String
+    ) {
+        beats.forEach { beat ->
+            beat.shots.forEach { shot ->
+                requestShotPreviewForSingleShot(
+                    sessionId = sessionId,
+                    shot = shot,
+                    fallbackPrompt = beat.text,
+                    headline = headline
+                )
+            }
+        }
+    }
+
+    private fun requestShotPreviewForSingleShot(
+        sessionId: String,
+        shot: ShotSpec,
+        fallbackPrompt: String,
+        headline: String
+    ) {
+        val currentState = if (sessionId == _uiState.value.document.id) {
+            _uiState.value
+        } else {
+            synchronized(sessionsLock) { storedSessions[sessionId] } ?: return
+        }
+        if (currentState.shotPreviews.containsKey(shot.id) || shot.id in currentState.inFlightShotIds) {
+            return
+        }
+        shotPreviewJobs[shot.id]?.cancel()
+        updateSession(sessionId) { st ->
+            st.copy(inFlightShotIds = st.inFlightShotIds + shot.id)
+        }
+        val job = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val stored = shotPreviewSemaphore.withPermit {
+                    val photoB64 = if (shot.type == ShotType.FACE || shot.type == ShotType.PIP) {
+                        val photoSha = runCatching { profileStore.current().persona.defaultPhotoSha }.getOrNull()
+                        photoSha?.takeIf { it.isNotBlank() }
+                            ?.let { sha -> casStore.fileForSha(sha, "jpg") }
+                            ?.let { file -> Base64.getEncoder().encodeToString(file.readBytes()) }
+                    } else {
+                        null
+                    }
+                    val prompt = shot.prompt.trim().ifBlank { fallbackPrompt.trim().take(72) }
+                    val resp = draftApiClient.requestShotPreview(
+                        shotType = shot.type.wireValue,
+                        prompt = prompt,
+                        headline = headline.trim().ifBlank { null },
+                        photoJpegBase64 = photoB64
+                    )
+                    val bytes = draftApiClient.downloadPreviewBytes(resp.previewUrl)
+                    shotPreviewCasMutex.withLock {
+                        casStore.putBytes(bytes, "jpg")
+                    }
+                }
+                updateSession(sessionId) { st ->
+                    st.copy(
+                        shotPreviews = st.shotPreviews + (shot.id to stored.file.absolutePath),
+                        inFlightShotIds = st.inFlightShotIds - shot.id,
+                        lastSeedRigOnline = true
+                    )
+                }
+            } catch (e: CancellationException) {
+                updateSession(sessionId) { st ->
+                    st.copy(inFlightShotIds = st.inFlightShotIds - shot.id)
+                }
+                throw e
+            } catch (_: Throwable) {
+                updateSession(sessionId) { st ->
+                    st.copy(inFlightShotIds = st.inFlightShotIds - shot.id)
+                }
+            } finally {
+                shotPreviewJobs.remove(shot.id)
+            }
+        }
+        shotPreviewJobs[shot.id] = job
+    }
+
     companion object {
         private const val FLASH_DURATION_MS: Long = 180L
+        private const val MAX_ARC_UNDO: Int = 32
         const val ARC_TARGET_SEC: Int = 60
     }
 }
