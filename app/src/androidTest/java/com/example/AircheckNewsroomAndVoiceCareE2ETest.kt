@@ -371,6 +371,7 @@ class AircheckNewsroomAndVoiceCareE2ETest {
         }
         assertEquals(1, renderBodies.size)
         assertTrue(renderBodies.first().contains("\"voice_source\":\"MIC_VOICEOVER\""))
+        assertTrue(renderBodies.first().contains("\"resolution\":\"1080P\""))
         assertTrue(renderBodies.first().contains("\"chyron_headline\":\"\""))
 
         composeRule.onNodeWithTag("core_pipeline_lazy_list").performScrollToKey("stage_04_optional_overlays")
