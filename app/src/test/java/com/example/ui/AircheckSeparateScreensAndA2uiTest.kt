@@ -31,6 +31,8 @@ import com.example.AircheckApplication
 import com.example.data.CorePipelineStage
 import com.example.data.RenderJobStatus
 import com.example.ui.a2ui.createStockAircheckA2uiCatalog
+import com.example.ui.clipstudio.CutScreen
+import com.example.ui.clipstudio.NewsroomLookScreen
 import com.example.ui.draft.DraftDeckViewModel
 import com.example.ui.screens.CorePipelineScreen
 import com.example.ui.screens.NewsroomStudioScreen
@@ -779,8 +781,8 @@ class AircheckSeparateScreensAndA2uiTest {
         assertTrue(onAllNodesWithText("Voice Model Care").fetchSemanticsNodes().isEmpty())
         assertTrue(onAllNodesWithText("Create Newsroom Overlays").fetchSemanticsNodes().isEmpty())
 
-        onNodeWithTag("tactile_drafting_deck_root").assertIsDisplayed()
-        onNodeWithTag("top_settings_button").performClick()
+        onNodeWithTag("cs_spark_root").assertIsDisplayed()
+        onNodeWithTag("cs_spark_settings").performClick()
         waitForIdle()
 
         onNodeWithTag("open_core_pipeline_button")
@@ -790,9 +792,12 @@ class AircheckSeparateScreensAndA2uiTest {
         onNodeWithTag("core_pipeline_back_button").assertIsDisplayed()
         onNodeWithTag("core_pipeline_back_button").performClick()
         waitForIdle()
-        onNodeWithTag("tactile_drafting_deck_root").assertIsDisplayed()
+        onNodeWithTag("cs_spark_root").assertIsDisplayed()
 
-        onNodeWithTag("top_settings_button").performClick()
+        onNodeWithTag("cs_crumb_3").performClick()
+        waitForIdle()
+        onNodeWithTag("cs_cut_root").assertIsDisplayed()
+        onNodeWithTag("cs_cut_settings").performClick()
         waitForIdle()
 
         onNodeWithTag("open_voice_model_care_button")
@@ -852,7 +857,7 @@ class AircheckSeparateScreensAndA2uiTest {
         onNodeWithTag("core_tts_story_input").assertTextContains("Alpha one. Beta two. ")
 
         // Switch to Stage 2 (ITERATE_STORY), edit clause 0 keeping clauses.size == 2, then return to Stage 1
-        studioVm.selectCoreStage(CorePipelineStage.ITERATE_STORY)
+        onNodeWithTag("core_stage_tab_ITERATE_STORY").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             onAllNodesWithTag("core_clause_input_0").fetchSemanticsNodes().isNotEmpty()
@@ -860,12 +865,139 @@ class AircheckSeparateScreensAndA2uiTest {
         onNodeWithTag("core_clause_input_0").performTextReplacement("Gamma updated.")
         Shadows.shadowOf(Looper.getMainLooper()).idle()
 
-        studioVm.selectCoreStage(CorePipelineStage.TTS)
+        onNodeWithTag("core_stage_tab_TTS").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             onAllNodesWithTag("core_tts_story_input").fetchSemanticsNodes().isNotEmpty()
         }
         onNodeWithTag("core_tts_story_input").assertTextContains("Gamma updated. Beta two.")
+    }
+
+    @Test
+    fun clipStudioCutScreen_exercisesAllControlsAndPersistsRealRoomState() = runComposeUiTest {
+        var studioVmRef: StudioViewModel? = null
+        setContent {
+            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
+            val st by studioVm.uiState.collectAsStateWithLifecycle()
+            AircheckTheme {
+                CutScreen(
+                    state = st,
+                    vm = studioVm,
+                    onOpenSettings = {},
+                    onOpenNewsroom = {}
+                )
+            }
+        }
+        val studioVm = checkNotNull(studioVmRef)
+        studioVm.openStoryInCorePipeline("First broadcast line. Second evidence line.", headline = "CUT TEST")
+
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.clauses.size == 2 &&
+                onAllNodesWithText("Story loaded in Core Pipeline (01 TTS).").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Dismiss status notice by tapping it
+        onNodeWithText("Story loaded in Core Pipeline (01 TTS).").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.statusNotice == null
+        }
+
+        // Exercise StereoMeter, captions, aspect, punch-in, strip silence, undo, timeline B-roll toggle
+        onNodeWithTag("cs_stereo_meter").assertIsDisplayed()
+        onNodeWithTag("cs_cut_captions").performClick()
+        onNodeWithTag("cs_cut_aspect").performClick()
+        onNodeWithTag("cs_cut_punch_in").performClick()
+        onNodeWithTag("cs_cut_strip_silence").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            val saved = runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
+            saved != null && saved.renderOptions.captions && saved.renderOptions.punchIn &&
+                saved.renderOptions.stripSilence && saved.renderOptions.aspect == com.example.data.CoreRenderOptions.ASPECT_HORIZONTAL
+        }
+
+        // Undo reverts the last render option toggle (stripSilence)
+        onNodeWithTag("cs_cut_undo").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            val saved = runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
+            saved != null && !saved.renderOptions.stripSilence
+        }
+
+        // Switch to B-roll timeline mode and toggle clause 0 to B-roll cutaway
+        onNodeWithTag("cs_cut_mode_timeline").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("cs_timeline_toggle_0").fetchSemanticsNodes().isNotEmpty()
+        }
+        onNodeWithTag("cs_timeline_toggle_0").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            val saved = runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
+            saved?.clauses?.firstOrNull()?.segmentMode == com.example.data.BrollSegmentMode.BROLL_CUTAWAY
+        }
+    }
+
+    @Test
+    fun clipStudioNewsroomLookScreen_exercisesTickRulersPillsSaveDuplicateAndDefault() = runComposeUiTest {
+        var studioVmRef: StudioViewModel? = null
+        setContent {
+            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
+            val st by studioVm.uiState.collectAsStateWithLifecycle()
+            AircheckTheme {
+                NewsroomLookScreen(
+                    state = st,
+                    vm = studioVm,
+                    onBack = {},
+                    onTestOnClip = {},
+                    onOpenOverlayBuilder = {}
+                )
+            }
+        }
+        val studioVm = checkNotNull(studioVmRef)
+        val initialCount = runBlocking { app.container.localRepo.newsroomLooksOnce().size }
+
+        onNodeWithTag("cs_look_new").performScrollTo().performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            runBlocking { app.container.localRepo.newsroomLooksOnce().size } == initialCount + 1
+        }
+        val lookId = studioVm.uiState.value.newsroomLooks.first().id
+
+        onNodeWithTag("cs_scrub_ev_inc").performScrollTo().performClick()
+        onNodeWithTag("cs_scrub_ev_inc").performClick()
+        onNodeWithTag("cs_pill_warm").performScrollTo().performClick()
+        onNodeWithTag("cs_pill_grain").performClick()
+        onNodeWithTag("cs_pill_border").performClick()
+        onNodeWithTag("cs_look_save").performClick()
+
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            val saved = runBlocking { app.container.localRepo.getNewsroomLook(lookId) }
+            saved != null && saved.brightnessEv == 0.2 &&
+                saved.light == com.example.data.NewsroomLook.LIGHT_WARM &&
+                saved.grain && saved.border
+        }
+
+        // Duplicate & set default
+        onNodeWithTag("cs_look_duplicate").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            runBlocking { app.container.localRepo.newsroomLooksOnce().size } == initialCount + 2
+        }
+        onNodeWithTag("cs_look_default").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            runBlocking { app.container.localRepo.getDefaultNewsroomLook() } != null
+        }
+
+        // Canvas zones switch tabs cleanly
+        onNodeWithTag("cs_zone_card").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("cs_open_overlay_builder").fetchSemanticsNodes().isNotEmpty()
+        }
     }
 
     private val rigTasks = java.util.concurrent.ConcurrentHashMap<String, String>()

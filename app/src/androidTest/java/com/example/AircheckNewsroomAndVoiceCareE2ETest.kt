@@ -139,9 +139,9 @@ class AircheckNewsroomAndVoiceCareE2ETest {
             )
         }
 
-        // 2. Verify main script flow is untouched and uncluttered
+        // 2. Verify main Clip Studio v4 flow starts clean and uncluttered
         composeRule.waitUntil(timeoutMillis = 10_000L) {
-            composeRule.onAllNodesWithTag("tactile_drafting_deck_root").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithTag("cs_spark_root").fetchSemanticsNodes().isNotEmpty()
         }
         assertTrue(composeRule.onAllNodesWithText("Voice Model Care").fetchSemanticsNodes().isEmpty())
         assertTrue(composeRule.onAllNodesWithText("Create Newsroom Overlays").fetchSemanticsNodes().isEmpty())
@@ -282,8 +282,8 @@ class AircheckNewsroomAndVoiceCareE2ETest {
             app.container.profileStore.setTailscaleRigUrl("http://127.0.0.1:$port")
         }
 
-        // 4. Exercise Phone-Only Voice Model Care screen first
-        composeRule.onNodeWithTag("top_settings_button").performClick()
+        // 4. Exercise Phone-Only Voice Model Care screen first (from Clip Studio 01 SPARK settings key)
+        composeRule.onNodeWithTag("cs_spark_settings").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             composeRule.onAllNodesWithTag("open_voice_model_care_button").fetchSemanticsNodes().isNotEmpty()
         }
@@ -462,10 +462,10 @@ class AircheckNewsroomAndVoiceCareE2ETest {
         assertTrue(chopBodies[1].contains("CHIP YIELD +38%"))
         captureScreenshot(screenshotDir, "e2e_core_stage5_review.png")
 
-        // Back out cleanly to main script deck
+        // Back out cleanly to Clip Studio shell
         composeRule.onNodeWithTag("core_pipeline_back_button").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("tactile_drafting_deck_root").assertIsDisplayed()
+        composeRule.onNodeWithTag("cs_spark_root").assertIsDisplayed()
     }
 
     private fun captureScreenshot(dir: File, filename: String) {

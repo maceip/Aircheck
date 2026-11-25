@@ -26,8 +26,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.StudioViewModel
+import com.example.ui.clipstudio.ClipStudioScreen
+import com.example.ui.clipstudio.ClipStudioShell
 import com.example.ui.draft.DraftDeckViewModel
-import com.example.ui.draft.TactileDraftingDeckScreen
 import com.example.ui.screens.ClipReviewScreen
 import com.example.ui.screens.CorePipelineScreen
 import com.example.ui.screens.NewsroomStudioScreen
@@ -100,7 +101,7 @@ class MainActivity : ComponentActivity() {
 
 /**
  * Aircheck top-level navigation shell:
- * - Default surface: Tactile Plain-Text Drafting Engine (`01 SEED` · `02 PICK` · `03 CUT` · `04 SHIP`).
+ * - Default surface: Clip Studio v4 (`01 SPARK` · `02 SCRIPT` · `03 CUT` + `04 NEWSROOM` looks).
  * - Single canonical video pipeline (`CorePipelineScreen`):
  *   `01 TTS -> 02 Iterate Story -> 03 Speech to Talking Head -> 04 Chop into B-Roll -> 05 Final Review`.
  * - Separate optional screens kept outside the main flow:
@@ -121,6 +122,7 @@ fun AircheckApp(
     var showNewsroomStudioModal by rememberSaveable { mutableStateOf(false) }
     var showCorePipelineModal by rememberSaveable { mutableStateOf(false) }
     var activeReviewClipId by rememberSaveable { mutableStateOf<String?>(null) }
+    var clipStudioScreen by rememberSaveable { mutableStateOf(ClipStudioScreen.SPARK) }
 
     LaunchedEffect(studioState.pendingShareIntent) {
         val shareIntent = studioState.pendingShareIntent
@@ -136,7 +138,7 @@ fun AircheckApp(
         if (studioState.openCorePipelineEvent) {
             showSettingsModal = false
             showNewsroomStudioModal = false
-            showCorePipelineModal = true
+            clipStudioScreen = ClipStudioScreen.CUT
             studioViewModel.consumeOpenCorePipelineEvent()
         }
     }
@@ -245,13 +247,15 @@ fun AircheckApp(
                 }
 
                 else -> {
-                    TactileDraftingDeckScreen(
-                        uiState = draftState,
-                        viewModel = draftViewModel,
+                    ClipStudioShell(
+                        draftState = draftState,
+                        draftVm = draftViewModel,
+                        studioState = studioState,
+                        studioVm = studioViewModel,
+                        screen = clipStudioScreen,
+                        onScreen = { clipStudioScreen = it },
                         onOpenSettings = { showSettingsModal = true },
-                        onBroadcastClip = { plainText, headline ->
-                            studioViewModel.openStoryInCorePipeline(plainText, headline)
-                        }
+                        onOpenOverlayBuilder = { showNewsroomStudioModal = true }
                     )
                 }
             }
