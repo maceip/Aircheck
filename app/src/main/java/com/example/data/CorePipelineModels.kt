@@ -57,14 +57,40 @@ enum class OverlayObjectKind(val label: String) {
 }
 
 /**
+ * Broadcast breaking-news chip / kicker treatment persisted on [CoreRenderOptions] and
+ * [SavedNewsroomOverlay], previewed live in `04 NEWSROOM`, and rendered by both `studio_cut.py`
+ * and Remotion 4 (`BroadcastTemplate.tsx`).
+ */
+@Serializable
+enum class BreakingNewsStyle(
+    val wire: String,
+    val chipLabel: String,
+    val bannerText: String
+) {
+    BREAKING("breaking", "breaking news", "BREAKING NEWS"),
+    DEVELOPING("developing", "developing", "DEVELOPING"),
+    EXCLUSIVE("exclusive", "exclusive", "EXCLUSIVE"),
+    ALERT_STAT("alert_stat", "data alert", "DATA ALERT"),
+    CLEAN("clean", "clean desk", "");
+
+    companion object {
+        fun fromWire(raw: String?): BreakingNewsStyle =
+            entries.firstOrNull {
+                it.wire.equals(raw, ignoreCase = true) || it.name.equals(raw, ignoreCase = true)
+            } ?: BREAKING
+    }
+}
+
+/**
  * Reusable AI-generated (or user-refined) stock Jetpack A2UI overlay object created on the
- * optional Newsroom Overlay page and saved in Room for optional attachment to news briefs
- * during Stage 4 (`CHOP_INTO_BROLL`) of the Core Pipeline.
+ * Newsroom Overlay page and saved in Room for attachment to news briefs during Stage 4
+ * (`CHOP_INTO_BROLL`) of the Core Pipeline.
  */
 @Serializable
 data class SavedNewsroomOverlay(
     val id: String = "ovl_" + UUID.randomUUID().toString().replace("-", "").take(10),
     val kind: OverlayObjectKind = OverlayObjectKind.LOWER_THIRD,
+    val breakingStyle: BreakingNewsStyle = BreakingNewsStyle.BREAKING,
     val headline: String,
     val subline: String,
     val calloutStat: String = "",
@@ -81,6 +107,7 @@ data class CoreRenderOptions(
     val captions: Boolean = false,
     /** "9:16" (720x1280) or "16:9" (1280x720). */
     val aspect: String = ASPECT_VERTICAL,
+    val breakingStyle: BreakingNewsStyle = BreakingNewsStyle.BREAKING,
     val chyronHeadline: String = "",
     val chyronSubline: String = "",
     val showBrandBug: Boolean = false,

@@ -11,7 +11,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import { ensureBroadcastFonts } from "../fonts";
-import { CompiledTimeline, PackagingSpec } from "../timeline";
+import { BreakingStyle, CompiledTimeline, OverlayItemSpec, PackagingSpec } from "../timeline";
 
 export type AircheckTemplateProps = {
   lipsyncUrl: string;
@@ -32,6 +32,66 @@ export function isVideoMediaUrl(url: string, hint?: "image" | "video"): boolean 
     const clean = url.split(/[?#]/)[0] ?? "";
     return VIDEO_EXTENSION_RE.test(clean);
   }
+}
+
+interface StyleTheme {
+  bannerLabel: string;
+  kickerBg: string | null;
+  kickerFg: string;
+  accent: string;
+}
+
+function getStyleTheme(style?: BreakingStyle): StyleTheme {
+  switch (style) {
+    case "developing":
+      return {
+        bannerLabel: "DEVELOPING",
+        kickerBg: "#FFB800",
+        kickerFg: "#000000",
+        accent: "#FFB800",
+      };
+    case "exclusive":
+      return {
+        bannerLabel: "EXCLUSIVE",
+        kickerBg: "#FFFFFF",
+        kickerFg: "#000000",
+        accent: "#FFFFFF",
+      };
+    case "alert_stat":
+      return {
+        bannerLabel: "DATA ALERT",
+        kickerBg: "#D71921",
+        kickerFg: "#FFFFFF",
+        accent: "#FFB800",
+      };
+    case "clean":
+      return {
+        bannerLabel: "",
+        kickerBg: null,
+        kickerFg: "#EBEBEF",
+        accent: "#8E8E96",
+      };
+    case "breaking":
+    default:
+      return {
+        bannerLabel: "BREAKING NEWS",
+        kickerBg: "#D71921",
+        kickerFg: "#FFFFFF",
+        accent: "#D71921",
+      };
+  }
+}
+
+function pickActiveOverlay(
+  items: OverlayItemSpec[],
+  contentFrame: number,
+  contentDurationFrames: number,
+): OverlayItemSpec | undefined {
+  if (items.length === 0) return undefined;
+  if (items.length === 1) return items[0];
+  const slot = Math.max(1, Math.floor(contentDurationFrames / items.length));
+  const idx = Math.min(items.length - 1, Math.max(0, Math.floor(contentFrame / slot)));
+  return items[idx];
 }
 
 /**
@@ -87,8 +147,8 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
 
   // Responsive non-overlapping PiP target geometry
   const pipTarget = isLandscape
-    ? { left: 1264, top: 96, width: 600, height: 480, radius: 24 }
-    : { left: width - 44 - 320, top: 56, width: 320, height: 420, radius: 22 };
+    ? { left: 1264, top: 96, width: 600, height: 480, radius: 20 }
+    : { left: width - 44 - 320, top: 56, width: 320, height: 420, radius: 18 };
 
   const presenterLeft = interpolate(pipProgress, [0, 1], [0, pipTarget.left], {
     extrapolateLeft: "clamp",
@@ -112,6 +172,23 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
   });
 
   const contentDuration = Math.max(1, timeline.totalFrames - timeline.coverFrames);
+  const contentFrame = Math.max(0, frame - timeline.coverFrames);
+
+  const attachedOverlays = packaging.overlays ?? [];
+  const lowerOverlays = attachedOverlays.filter((o) => o.kind !== "QUOTE_BRIEF");
+  const quoteOverlays = attachedOverlays.filter((o) => o.kind === "QUOTE_BRIEF");
+  const activeLower = pickActiveOverlay(lowerOverlays, contentFrame, contentDuration);
+  const activeQuote = pickActiveOverlay(quoteOverlays, contentFrame, contentDuration);
+
+  const effectiveStyle: BreakingStyle =
+    activeLower?.breakingStyle ?? packaging.breakingStyle ?? "breaking";
+  const theme = getStyleTheme(effectiveStyle);
+  const quoteTheme = getStyleTheme(activeQuote?.breakingStyle ?? effectiveStyle);
+
+  const activeHeadline = (activeLower?.headline?.trim() || packaging.chyronHeadline || "Aircheck").toUpperCase();
+  const activeSubline = activeLower?.subline?.trim() ?? packaging.chyronSubline ?? "";
+  const activeStat = activeLower?.calloutStat?.trim() ?? "";
+
   const cornerLabel = (packaging.cornerBugText ?? "").trim();
   const showChannelChip = Boolean(cornerLabel && cornerLabel.toUpperCase() !== "LIVE");
 
@@ -144,14 +221,14 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             zIndex: 5,
           }}
         >
-          {activeEvent.bRollUrl && (
+          {activeEvent.bRollUrl ? (
             <div
               style={{
                 width: "100%",
-                height: isLandscape ? 584 : 616,
-                borderRadius: 18,
+                height: isLandscape ? 560 : 580,
+                borderRadius: 16,
                 overflow: "hidden",
-                border: "2px solid #232730",
+                border: `2px solid ${theme.accent}`,
                 backgroundColor: "#12151C",
               }}
             >
@@ -175,7 +252,42 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
                 />
               )}
             </div>
-          )}
+          ) : activeEvent.spokenText ? (
+            <div
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                padding: isLandscape ? "36px 44px" : "44px 42px",
+                borderRadius: 16,
+                backgroundColor: "#10131B",
+                border: "2px solid #2C2E38",
+                borderLeft: `8px solid ${theme.accent}`,
+              }}
+            >
+              <div
+                style={{
+                  color: theme.accent,
+                  fontSize: isLandscape ? 20 : 24,
+                  fontWeight: 700,
+                  letterSpacing: 1.2,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  marginBottom: 18,
+                }}
+              >
+                B-ROLL CUTAWAY
+              </div>
+              <div
+                style={{
+                  color: "#F4F6FA",
+                  fontSize: isLandscape ? 36 : 42,
+                  fontWeight: 700,
+                  lineHeight: 1.25,
+                }}
+              >
+                {activeEvent.spokenText}
+              </div>
+            </div>
+          ) : null}
 
           {/* Landscape 16:9 Citation Pill under B-Roll */}
           {isLandscape && activeEvent.citation && (
@@ -186,10 +298,10 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
                 alignItems: "center",
                 gap: 12,
                 padding: "8px 18px",
-                borderRadius: 12,
+                borderRadius: 10,
                 backgroundColor: "#12151C",
-                border: "2px solid #F5B700",
-                color: "#F5B700",
+                border: "2px solid #FFB800",
+                color: "#FFB800",
                 fontSize: 22,
                 fontWeight: 700,
                 fontFamily: "'JetBrains Mono', monospace",
@@ -205,15 +317,15 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             </div>
           )}
 
-          {/* Portrait 9:16 Citation + depthTextTag flex-wrap container */}
+          {/* Portrait 9:16 Citation + depthTextTag flex-wrap container (<= 2 chips) */}
           {!isLandscape && (activeEvent.citation || activeEvent.keyword) && (
             <div
               style={{
-                marginTop: 20,
+                marginTop: 18,
                 display: "flex",
                 flexWrap: "wrap",
                 alignItems: "center",
-                gap: 16,
+                gap: 14,
               }}
             >
               {activeEvent.citation && (
@@ -222,12 +334,12 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
                     display: "inline-flex",
                     alignItems: "center",
                     gap: 12,
-                    padding: "14px 24px",
-                    borderRadius: 12,
+                    padding: "12px 22px",
+                    borderRadius: 10,
                     backgroundColor: "#12151C",
-                    border: "2px solid #F5B700",
-                    color: "#F5B700",
-                    fontSize: 30,
+                    border: "2px solid #FFB800",
+                    color: "#FFB800",
+                    fontSize: 28,
                     fontWeight: 700,
                     fontFamily: "'JetBrains Mono', monospace",
                     fontVariantNumeric: "tabular-nums",
@@ -245,12 +357,12 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
                 <div
                   style={{
                     display: "inline-block",
-                    padding: "14px 24px",
-                    borderRadius: 12,
+                    padding: "12px 22px",
+                    borderRadius: 10,
                     backgroundColor: "#12151C",
-                    border: "2px solid #B8FF00",
-                    color: "#B8FF00",
-                    fontSize: 34,
+                    border: `2px solid ${theme.accent}`,
+                    color: theme.accent,
+                    fontSize: 30,
                     fontWeight: 800,
                     fontFamily: "'JetBrains Mono', monospace",
                     fontVariantNumeric: "tabular-nums",
@@ -274,12 +386,12 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             top: 598,
             width: 600,
             boxSizing: "border-box",
-            padding: "16px 24px",
-            borderRadius: 14,
+            padding: "14px 22px",
+            borderRadius: 12,
             backgroundColor: "#12151C",
-            border: "2px solid #B8FF00",
-            color: "#B8FF00",
-            fontSize: 34,
+            border: `2px solid ${theme.accent}`,
+            color: theme.accent,
+            fontSize: 32,
             fontWeight: 800,
             fontFamily: "'JetBrains Mono', monospace",
             fontVariantNumeric: "tabular-nums",
@@ -298,12 +410,12 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             position: "absolute",
             top: isLandscape ? 32 : 56,
             right: isLandscape ? 56 : 44,
-            padding: "12px 22px",
-            borderRadius: 12,
+            padding: "12px 20px",
+            borderRadius: 10,
             backgroundColor: "rgba(10,12,16,0.92)",
-            border: "2px solid #B8FF00",
-            color: "#B8FF00",
-            fontSize: isLandscape ? 32 : 36,
+            border: `2px solid ${theme.accent}`,
+            color: theme.accent,
+            fontSize: isLandscape ? 30 : 34,
             fontWeight: 800,
             fontFamily: "'JetBrains Mono', monospace",
             fontVariantNumeric: "tabular-nums",
@@ -328,7 +440,7 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             transformOrigin: "center center",
             borderRadius: presenterRadius,
             overflow: "hidden",
-            border: pipProgress > 0.05 ? "3px solid #B8FF00" : "none",
+            border: pipProgress > 0.05 ? `3px solid ${theme.accent}` : "none",
             boxShadow: pipProgress > 0.05 ? "0 18px 42px rgba(0, 0, 0, 0.55)" : "none",
             zIndex: activeEvent?.pipShrink ? 10 : 2,
           }}
@@ -344,8 +456,66 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
         {voiceUrl ? <Audio src={voiceUrl} /> : null}
       </Sequence>
 
+      {/* Upper-Left QUOTE_BRIEF Broadcast Card (non-overlapping with LIVE bug, PiP, and Lower-Third) */}
+      {!isCover && activeQuote && (
+        <div
+          style={{
+            position: "absolute",
+            top: isLandscape ? 98 : 132,
+            left: isLandscape ? 56 : 44,
+            width: isLandscape ? 560 : 580,
+            maxWidth: activeEvent?.pipShrink && !isLandscape ? width - 440 : width - 88,
+            backgroundColor: "rgba(10,12,18,0.92)",
+            border: "2px solid #2C2E38",
+            borderLeft: `8px solid ${quoteTheme.accent}`,
+            borderRadius: 12,
+            padding: isLandscape ? "16px 22px" : "20px 24px",
+            boxSizing: "border-box",
+            zIndex: 24,
+          }}
+        >
+          <div
+            style={{
+              color: quoteTheme.accent,
+              fontSize: isLandscape ? 17 : 21,
+              fontWeight: 700,
+              letterSpacing: 1.1,
+              fontFamily: "'JetBrains Mono', monospace",
+              fontVariantNumeric: "tabular-nums",
+              marginBottom: 6,
+            }}
+          >
+            {activeQuote.calloutStat?.trim()
+              ? `QUOTE CARD · ${activeQuote.calloutStat.trim().toUpperCase()}`
+              : "QUOTE CARD"}
+          </div>
+          <div
+            style={{
+              color: "#FFFFFF",
+              fontSize: isLandscape ? 25 : 31,
+              fontWeight: 700,
+              lineHeight: 1.2,
+            }}
+          >
+            {activeQuote.headline}
+          </div>
+          {activeQuote.subline && (
+            <div
+              style={{
+                color: "#9AA2B2",
+                fontSize: isLandscape ? 18 : 23,
+                marginTop: 6,
+                lineHeight: 1.25,
+              }}
+            >
+              {activeQuote.subline}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Top-Left LIVE + Brand Corner Bug */}
-      {packaging.showBrandBug && (
+      {packaging.showBrandBug && effectiveStyle !== "clean" && (
         <div
           style={{
             position: "absolute",
@@ -364,8 +534,8 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
               gap: 8,
               padding: "8px 16px",
               borderRadius: 8,
-              backgroundColor: "#D90429",
-              color: "#F4F6FA",
+              backgroundColor: "#D71921",
+              color: "#FFFFFF",
               fontSize: isLandscape ? 20 : 22,
               fontWeight: 800,
               letterSpacing: 1.4,
@@ -378,7 +548,7 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
                 width: 10,
                 height: 10,
                 borderRadius: "50%",
-                backgroundColor: "#F4F6FA",
+                backgroundColor: "#FFFFFF",
                 display: "inline-block",
               }}
             />
@@ -390,7 +560,7 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
                 padding: "8px 16px",
                 borderRadius: 8,
                 backgroundColor: "rgba(10,12,16,0.90)",
-                border: "1px solid #232730",
+                border: "1px solid #2C2E38",
                 color: "#F4F6FA",
                 fontSize: isLandscape ? 20 : 22,
                 fontWeight: 700,
@@ -405,18 +575,18 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
         </div>
       )}
 
-      {/* Word-Highlighted Kinetic Captions */}
+      {/* Word-Highlighted Kinetic Captions (clearance above breaking kicker + lower-third) */}
       {!isCover && activePhrase && (
         <div
           style={{
             position: "absolute",
-            bottom: isLandscape ? 156 : 248,
+            bottom: isLandscape ? 176 : 284,
             left: isLandscape ? 120 : 48,
             right: isLandscape ? 120 : 48,
             display: "flex",
             flexWrap: "wrap",
             justifyContent: "center",
-            gap: isLandscape ? 8 : 14,
+            gap: isLandscape ? 8 : 12,
             zIndex: 22,
           }}
         >
@@ -426,13 +596,23 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
               <span
                 key={`${w.word}_${idx}`}
                 style={{
-                  fontSize: isLandscape ? 36 : 50,
-                  lineHeight: isLandscape ? 1.15 : undefined,
+                  fontSize: isLandscape ? 34 : 46,
+                  lineHeight: 1.15,
                   fontWeight: 800,
                   padding: isLandscape ? "5px 12px" : "6px 14px",
-                  borderRadius: 10,
-                  backgroundColor: spoken ? "#B8FF00" : "rgba(0,0,0,0.78)",
-                  color: spoken ? "#000000" : "#F4F6FA",
+                  borderRadius: 8,
+                  backgroundColor: spoken
+                    ? effectiveStyle === "developing"
+                      ? "#FFB800"
+                      : effectiveStyle === "breaking"
+                        ? "#D71921"
+                        : "#FFFFFF"
+                    : "rgba(8,9,12,0.84)",
+                  color: spoken
+                    ? effectiveStyle === "breaking"
+                      ? "#FFFFFF"
+                      : "#000000"
+                    : "#F4F6FA",
                 }}
               >
                 {w.word}
@@ -442,47 +622,96 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
         </div>
       )}
 
-      {/* Clean Broadcast Lower-Third Chyron */}
+      {/* Broadcast Lower-Third Chyron + Breaking News Style Kicker Chip */}
       <div
         style={{
           position: "absolute",
-          bottom: isLandscape ? 28 : 56,
+          bottom: isLandscape ? 28 : 52,
           left: isLandscape ? 56 : 42,
           right: isLandscape ? 56 : 42,
-          backgroundColor: "rgba(10,12,16,0.92)",
-          border: "2px solid #232730",
-          borderLeft: "12px solid #B8FF00",
-          borderRadius: 14,
-          padding: isLandscape ? "12px 24px" : "20px 28px",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "flex-start",
           zIndex: 25,
         }}
       >
-        <div
-          style={{
-            color: "#F4F6FA",
-            fontSize: isLandscape ? 28 : 38,
-            fontWeight: 700,
-            ...(isLandscape
-              ? { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
-              : {}),
-          }}
-        >
-          {packaging.chyronHeadline}
-        </div>
-        {packaging.chyronSubline && (
+        {theme.kickerBg && theme.bannerLabel && (
           <div
             style={{
-              color: "#8A93A2",
-              fontSize: isLandscape ? 19 : 26,
-              marginTop: isLandscape ? 4 : 6,
-              ...(isLandscape
-                ? { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
-                : {}),
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 10,
+              padding: isLandscape ? "6px 16px" : "8px 18px",
+              borderTopLeftRadius: 8,
+              borderTopRightRadius: 8,
+              backgroundColor: theme.kickerBg,
+              color: theme.kickerFg,
+              fontSize: isLandscape ? 18 : 22,
+              fontWeight: 800,
+              letterSpacing: 1.3,
+              fontFamily: "'JetBrains Mono', monospace",
+              fontVariantNumeric: "tabular-nums",
             }}
           >
-            {packaging.chyronSubline}
+            <span
+              style={{
+                width: 9,
+                height: 9,
+                borderRadius: "50%",
+                backgroundColor: theme.kickerFg,
+                display: "inline-block",
+              }}
+            />
+            <span>
+              {activeStat && !theme.bannerLabel.toUpperCase().includes(activeStat.toUpperCase())
+                ? `${theme.bannerLabel} · ${activeStat.toUpperCase()}`
+                : theme.bannerLabel}
+            </span>
           </div>
         )}
+        <div
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            backgroundColor: "rgba(10,12,18,0.94)",
+            border: "2px solid #2C2E38",
+            borderLeft: `10px solid ${theme.accent}`,
+            borderTopLeftRadius: theme.kickerBg ? 0 : 12,
+            borderTopRightRadius: 12,
+            borderBottomLeftRadius: 12,
+            borderBottomRightRadius: 12,
+            padding: isLandscape ? "12px 24px" : "18px 26px",
+          }}
+        >
+          <div
+            style={{
+              color: "#FFFFFF",
+              fontSize: isLandscape ? 28 : 38,
+              fontWeight: 700,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {activeHeadline}
+          </div>
+          {activeSubline && (
+            <div
+              style={{
+                color: effectiveStyle === "clean" ? "#9AA2B2" : theme.accent,
+                fontSize: isLandscape ? 19 : 24,
+                fontWeight: 600,
+                fontFamily: "'JetBrains Mono', monospace",
+                marginTop: isLandscape ? 4 : 6,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {activeSubline}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Opaque 0.5s First-Frame Cover Card for Crisp Feed Thumbnails */}
@@ -501,9 +730,9 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
               width: "100%",
               maxWidth: isLandscape ? 1280 : 920,
               backgroundColor: "#12151C",
-              border: "2px solid #232730",
-              borderTop: "8px solid #B8FF00",
-              borderRadius: 20,
+              border: "2px solid #2C2E38",
+              borderTop: `8px solid ${theme.accent}`,
+              borderRadius: 18,
               padding: isLandscape ? "44px 56px" : "48px 40px",
               display: "flex",
               flexDirection: "column",
@@ -511,7 +740,7 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
               gap: 20,
             }}
           >
-            {packaging.showBrandBug && (
+            {theme.kickerBg && theme.bannerLabel && (
               <div
                 style={{
                   display: "flex",
@@ -524,24 +753,24 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
                 <span
                   style={{
                     padding: "6px 14px",
-                    borderRadius: 8,
-                    backgroundColor: "#D90429",
-                    color: "#F4F6FA",
+                    borderRadius: 6,
+                    backgroundColor: theme.kickerBg,
+                    color: theme.kickerFg,
                     fontSize: 20,
                     fontWeight: 800,
                     letterSpacing: 1.4,
                   }}
                 >
-                  LIVE
+                  {theme.bannerLabel}
                 </span>
                 {showChannelChip && (
                   <span
                     style={{
                       padding: "6px 14px",
-                      borderRadius: 8,
+                      borderRadius: 6,
                       backgroundColor: "#0A0C10",
-                      border: "1px solid #232730",
-                      color: "#B8FF00",
+                      border: "1px solid #2C2E38",
+                      color: "#EBEBEF",
                       fontSize: 20,
                       fontWeight: 700,
                       letterSpacing: 1.2,
@@ -554,24 +783,24 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             )}
             <div
               style={{
-                color: "#F4F6FA",
-                fontSize: isLandscape ? 60 : 56,
+                color: "#FFFFFF",
+                fontSize: isLandscape ? 58 : 54,
                 fontWeight: 800,
                 lineHeight: 1.12,
               }}
             >
-              {packaging.chyronHeadline}
+              {activeHeadline}
             </div>
-            {packaging.chyronSubline && (
+            {activeSubline && (
               <div
                 style={{
-                  color: "#8A93A2",
-                  fontSize: isLandscape ? 30 : 32,
+                  color: "#9AA2B2",
+                  fontSize: isLandscape ? 28 : 30,
                   fontWeight: 500,
                   lineHeight: 1.3,
                 }}
               >
-                {packaging.chyronSubline}
+                {activeSubline}
               </div>
             )}
           </div>

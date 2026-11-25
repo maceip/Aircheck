@@ -1000,6 +1000,135 @@ class AircheckSeparateScreensAndA2uiTest {
         }
     }
 
+    @Test
+    fun newsroomLookScreen_breakingNewsStyleChips_andGenerateOverlaySet_persistAndPreviewLive() = runComposeUiTest {
+        val aiBodies = CopyOnWriteArrayList<String>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/health") { exchange ->
+            val resp = """{"status":"ok","lora_version":2,"render_bridge":true}"""
+                .toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/ai-assist") { exchange ->
+            aiBodies.add(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
+            val resp = """
+                {
+                  "mode": "generate_overlay_set",
+                  "breaking_style": "developing",
+                  "overlays": [
+                    {
+                      "kind": "LOWER_THIRD",
+                      "breaking_style": "developing",
+                      "headline": "AUTO-HDR HALOS EXPOSED",
+                      "subline": "RAW LOG PIPELINE RESTORES SKIN TONES",
+                      "callout_stat": "10-BIT LOG",
+                      "duration_sec": 6
+                    },
+                    {
+                      "kind": "STAT_CALLOUT",
+                      "breaking_style": "developing",
+                      "headline": "ZERO EDGE SHARPENING",
+                      "subline": "MANUAL CAMERA BYPASS VERIFIED",
+                      "callout_stat": "0 HALOS",
+                      "duration_sec": 5
+                    },
+                    {
+                      "kind": "QUOTE_BRIEF",
+                      "breaking_style": "developing",
+                      "headline": "@CAMERA_LAB BENCH",
+                      "subline": "Default tone-mapping crushes highlight roll-off.",
+                      "callout_stat": "FIELD BRIEF",
+                      "duration_sec": 5
+                    }
+                  ]
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, resp.size.toLong())
+            exchange.responseBody.use { it.write(resp) }
+        }
+        server.start()
+        httpServer = server
+        val port = server.address.port
+
+        runBlocking {
+            app.container.profileStore.setPhoneOnlyVoiceMode(false)
+            app.container.profileStore.setTailscaleRigUrl("http://127.0.0.1:$port")
+        }
+
+        var studioVmRef: StudioViewModel? = null
+        setContent {
+            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
+            val st by studioVm.uiState.collectAsStateWithLifecycle()
+            AircheckTheme {
+                NewsroomLookScreen(
+                    state = st,
+                    vm = studioVm,
+                    onBack = {},
+                    onTestOnClip = {},
+                    onOpenOverlayBuilder = {}
+                )
+            }
+        }
+        val studioVm = checkNotNull(studioVmRef)
+        studioVm.openStoryInCorePipeline(
+            plainText = "Auto-HDR flattens skin tones and bakes edge halos on phone video.",
+            headline = "PHONE VIDEO HDR"
+        )
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.clauses.isNotEmpty()
+        }
+
+        // Switch to 03 HEADLINES tab
+        onNodeWithTag("cs_newsroom_tab_2").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("cs_bstyle_breaking").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Cycle every Breaking News Style Chip and assert real Room persistence
+        onNodeWithTag("cs_bstyle_exclusive").performScrollTo().performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
+                ?.renderOptions?.breakingStyle == com.example.data.BreakingNewsStyle.EXCLUSIVE
+        }
+
+        onNodeWithTag("cs_bstyle_clean").performScrollTo().performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
+                ?.renderOptions?.breakingStyle == com.example.data.BreakingNewsStyle.CLEAN &&
+                onAllNodesWithTag("cs_canvas_breaking_kicker", useUnmergedTree = true).fetchSemanticsNodes().isEmpty()
+        }
+
+        onNodeWithTag("cs_bstyle_developing").performScrollTo().performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
+                ?.renderOptions?.breakingStyle == com.example.data.BreakingNewsStyle.DEVELOPING &&
+                onAllNodesWithTag("cs_canvas_breaking_kicker", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Generate the 3-overlay set and verify Room persistence + live canvas preview
+        onNodeWithTag("cs_overlay_generate_set").performScrollTo().performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            aiBodies.isNotEmpty() &&
+                runBlocking { app.container.localRepo.listSavedNewsroomOverlays().size } == 3 &&
+                studioVm.uiState.value.corePipelineSession.selectedOverlayIds.size == 3
+        }
+        assertTrue(aiBodies.first().contains("\"mode\":\"generate_overlay_set\""))
+        assertTrue(aiBodies.first().contains("\"breaking_style\":\"developing\""))
+
+        // Both LookCanvas lower-third and quote-card zones display the generated overlays live
+        onNodeWithText("DEVELOPING · 10-BIT LOG", useUnmergedTree = true).assertIsDisplayed()
+        onNodeWithText("@CAMERA_LAB BENCH", useUnmergedTree = true).assertIsDisplayed()
+    }
+
     private val rigTasks = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val rigTaskSeq = java.util.concurrent.atomic.AtomicInteger(0)
 

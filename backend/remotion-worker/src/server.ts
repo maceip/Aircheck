@@ -11,7 +11,7 @@ import type { Storage as StorageClient } from "@google-cloud/storage";
 import { bundle } from "@remotion/bundler";
 import { renderMedia, selectComposition } from "@remotion/renderer";
 import { VERSION as REMOTION_VERSION } from "remotion/version";
-import { AlignedWord, BeatSpec, PackagingSpec, compileTimeline } from "./timeline";
+import { AlignedWord, BeatSpec, BreakingStyle, OverlayItemSpec, PackagingSpec, compileTimeline } from "./timeline";
 
 const execFileAsync = promisify(execFile);
 
@@ -309,6 +309,14 @@ function validateBeats(rawBeats: unknown): BeatSpec[] {
   });
 }
 
+const VALID_BREAKING_STYLES = new Set<BreakingStyle>([
+  "breaking",
+  "developing",
+  "exclusive",
+  "alert_stat",
+  "clean",
+]);
+
 function validatePackaging(rawPackaging: unknown): PackagingSpec {
   if (rawPackaging === undefined) {
     return {
@@ -316,6 +324,7 @@ function validatePackaging(rawPackaging: unknown): PackagingSpec {
       chyronSubline: "",
       cornerBugText: "LIVE",
       showBrandBug: true,
+      breakingStyle: "breaking",
     };
   }
   if (!rawPackaging || typeof rawPackaging !== "object" || Array.isArray(rawPackaging)) {
@@ -333,11 +342,49 @@ function validatePackaging(rawPackaging: unknown): PackagingSpec {
   if (p.templateId !== undefined && p.templateId !== "Newsroom916" && p.templateId !== "Explainer169") {
     throw new HttpError(400, 'inputProps.packaging.templateId must be "Newsroom916" or "Explainer169"');
   }
+  let breakingStyle: BreakingStyle = "breaking";
+  if (p.breakingStyle !== undefined) {
+    if (typeof p.breakingStyle !== "string" || !VALID_BREAKING_STYLES.has(p.breakingStyle as BreakingStyle)) {
+      throw new HttpError(400, "inputProps.packaging.breakingStyle is invalid");
+    }
+    breakingStyle = p.breakingStyle as BreakingStyle;
+  }
+  let overlays: OverlayItemSpec[] | undefined;
+  if (p.overlays !== undefined) {
+    if (!Array.isArray(p.overlays)) {
+      throw new HttpError(400, "inputProps.packaging.overlays must be an array");
+    }
+    overlays = p.overlays
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      .map((item) => {
+        const rawKind = typeof item.kind === "string" ? item.kind.toUpperCase() : "LOWER_THIRD";
+        const kind: OverlayItemSpec["kind"] =
+          rawKind === "STAT_CALLOUT" || rawKind === "QUOTE_BRIEF" ? rawKind : "LOWER_THIRD";
+        const rawStyle = typeof item.breakingStyle === "string" ? item.breakingStyle : breakingStyle;
+        const ovlStyle: BreakingStyle = VALID_BREAKING_STYLES.has(rawStyle as BreakingStyle)
+          ? (rawStyle as BreakingStyle)
+          : breakingStyle;
+        return {
+          kind,
+          breakingStyle: ovlStyle,
+          headline: typeof item.headline === "string" ? item.headline : "",
+          subline: typeof item.subline === "string" ? item.subline : "",
+          calloutStat: typeof item.calloutStat === "string" ? item.calloutStat : "",
+          durationSec:
+            typeof item.durationSec === "number" && Number.isFinite(item.durationSec)
+              ? Math.max(2, Math.min(20, Math.round(item.durationSec)))
+              : 5,
+        };
+      })
+      .filter((o) => Boolean(o.headline.trim() || o.subline?.trim() || o.calloutStat?.trim()));
+  }
   return {
     chyronHeadline: (p.chyronHeadline as string | undefined) ?? "Aircheck",
     chyronSubline: (p.chyronSubline as string | undefined) ?? "",
     cornerBugText: (p.cornerBugText as string | undefined) ?? "LIVE",
     showBrandBug: (p.showBrandBug as boolean | undefined) ?? true,
+    breakingStyle,
+    overlays,
     templateId: p.templateId as "Newsroom916" | "Explainer169" | undefined,
   };
 }

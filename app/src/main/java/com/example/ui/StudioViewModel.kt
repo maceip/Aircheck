@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.AircheckApplication
 import com.example.appfunctions.AppFunctionAvailabilitySync
 import com.example.data.BrandChannel
+import com.example.data.BreakingNewsStyle
 import com.example.data.BrollSegmentMode
 import com.example.data.ClipCardRow
 import com.example.data.ClipRecord
@@ -89,6 +90,7 @@ data class StudioUiState(
     val isRecordingCoreVoiceover: Boolean = false,
     val newsroomLooks: List<NewsroomLook> = emptyList(),
     val isGeneratingBackdrop: Boolean = false,
+    val isGeneratingOverlaySet: Boolean = false,
     val isDetectingSilence: Boolean = false,
     val coreUndoDepth: Int = 0,
     val errorMessage: String? = null,
@@ -432,7 +434,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         subline: String,
         calloutStat: String,
         durationSec: Int = 4,
-        a2uiComponentsJson: String = ""
+        a2uiComponentsJson: String = "",
+        breakingStyle: BreakingNewsStyle = _uiState.value.corePipelineSession.renderOptions.breakingStyle
     ) {
         val cleanHeadline = headline.trim()
         if (cleanHeadline.isEmpty()) {
@@ -453,6 +456,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch(Dispatchers.IO) {
             val saved = SavedNewsroomOverlay(
                 kind = kind,
+                breakingStyle = breakingStyle,
                 headline = cleanHeadline,
                 subline = cleanSubline,
                 calloutStat = cleanStat,
@@ -470,6 +474,98 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
             a2uiController.syncNewsroomSurface(remotionUnused = false, statusMessage = msg)
+        }
+    }
+
+    /**
+     * Generates a cohesive 3-piece broadcast overlay set (`LOWER_THIRD`, `STAT_CALLOUT`, `QUOTE_BRIEF`)
+     * on the studio rig (`POST /v1/ai-assist`, `mode = "generate_overlay_set"`) styled with the active
+     * [BreakingNewsStyle], persists all overlays in Room, and attaches them to the active studio cut.
+     */
+    fun generateNewsroomOverlaySet(briefTopicOverride: String = "") {
+        if (_uiState.value.isGeneratingOverlaySet) return
+        val cleanTopic = briefTopicOverride.trim().ifBlank {
+            _uiState.value.corePipelineSession.fullStoryText.ifBlank {
+                _uiState.value.activeProject.ideaSpark.trim()
+            }
+        }
+        if (cleanTopic.isEmpty()) {
+            _uiState.update {
+                it.copy(errorMessage = "Enter a brief topic or load a story before generating overlays.")
+            }
+            return
+        }
+        val activeStyle = _uiState.value.corePipelineSession.renderOptions.breakingStyle
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update {
+                it.copy(
+                    isGeneratingOverlaySet = true,
+                    errorMessage = null,
+                    statusNotice = "Generating ${activeStyle.chipLabel} overlay set on rig…"
+                )
+            }
+            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+            val remoteRes = runCatching {
+                val health = macRigGateway.resolveAndCheckHealth(rigUrl)
+                macRigGateway.generateAiOverlaySet(
+                    rigBaseUrl = health.resolvedUrl,
+                    briefPrompt = cleanTopic,
+                    breakingStyle = activeStyle
+                )
+            }
+            remoteRes.onSuccess { generatedList ->
+                val savedItems = generatedList.map { item ->
+                    SavedNewsroomOverlay(
+                        kind = item.kind,
+                        breakingStyle = item.breakingStyle,
+                        headline = item.headline.trim(),
+                        subline = item.subline.trim(),
+                        calloutStat = item.calloutStat.trim(),
+                        durationSec = item.durationSec.coerceIn(2, 15),
+                        a2uiComponentsJson = AircheckA2uiController.serializeOverlayAsA2uiComponentsJson(
+                            headline = item.headline.trim(),
+                            subline = item.subline.trim(),
+                            calloutStat = item.calloutStat.trim()
+                        )
+                    )
+                }
+                savedItems.forEach { localRepo.saveNewsroomOverlay(it) }
+                profileStore.incrementRemotionUsedCount()
+                val currentSession = _uiState.value.corePipelineSession
+                commitCoreEdit(
+                    currentSession.copy(
+                        selectedOverlayIds = savedItems.map { it.id }
+                    )
+                )
+                val primary = savedItems.firstOrNull()
+                val msg = "Generated ${savedItems.size} ${activeStyle.chipLabel} overlays & attached to cut."
+                if (primary != null) {
+                    a2uiController.updateOverlayDraftFields(
+                        headline = primary.headline,
+                        subline = primary.subline,
+                        calloutStat = primary.calloutStat,
+                        statusMessage = msg
+                    )
+                }
+                _uiState.update {
+                    it.copy(
+                        isGeneratingOverlaySet = false,
+                        errorMessage = null,
+                        statusNotice = msg,
+                        remotionStatusMessage = msg
+                    )
+                }
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                val honestMsg = "Overlay set generation failed: ${err.localizedMessage ?: "rig unreachable"}."
+                _uiState.update {
+                    it.copy(
+                        isGeneratingOverlaySet = false,
+                        errorMessage = honestMsg
+                    )
+                }
+            }
         }
     }
 
@@ -890,6 +986,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun setCorePunchIn(enabled: Boolean) = updateRenderOptions { it.copy(punchIn = enabled) }
 
     fun setCoreCaptions(enabled: Boolean) = updateRenderOptions { it.copy(captions = enabled) }
+
+    fun setCoreBreakingStyle(style: BreakingNewsStyle) = updateRenderOptions { it.copy(breakingStyle = style) }
 
     fun setCoreAspect(aspect: String) {
         require(aspect == CoreRenderOptions.ASPECT_VERTICAL || aspect == CoreRenderOptions.ASPECT_HORIZONTAL) {

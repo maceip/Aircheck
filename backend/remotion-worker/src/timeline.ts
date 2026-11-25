@@ -18,11 +18,24 @@ export interface BeatSpec {
   pipShrink?: boolean;
 }
 
+export type BreakingStyle = "breaking" | "developing" | "exclusive" | "alert_stat" | "clean";
+
+export interface OverlayItemSpec {
+  kind: "LOWER_THIRD" | "STAT_CALLOUT" | "QUOTE_BRIEF";
+  breakingStyle?: BreakingStyle;
+  headline: string;
+  subline?: string;
+  calloutStat?: string;
+  durationSec?: number;
+}
+
 export interface PackagingSpec {
   chyronHeadline: string;
   chyronSubline: string;
   cornerBugText: string;
   showBrandBug: boolean;
+  breakingStyle?: BreakingStyle;
+  overlays?: OverlayItemSpec[];
   templateId?: "Newsroom916" | "Explainer169";
 }
 
@@ -36,6 +49,7 @@ export interface AnchoredEvent {
   beatOrdinal: number;
   triggerFrame: number;
   endFrame: number;
+  spokenText?: string;
   keyword?: string;
   citation?: string;
   bRollUrl?: string;
@@ -269,6 +283,7 @@ export function compileTimeline(params: {
       beatOrdinal: beat.ordinal,
       triggerFrame,
       endFrame,
+      spokenText: beat.spokenText?.trim() || undefined,
       keyword,
       citation,
       bRollUrl,

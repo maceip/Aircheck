@@ -38,8 +38,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.BreakingNewsStyle
 import com.example.ui.StudioUiState
 import com.example.ui.a2ui.AircheckA2uiController
+import com.example.ui.clipstudio.CsBreakingChip
 import com.example.ui.components.StudioCard
 import com.example.ui.theme.LiveTallyGreen
 import com.example.ui.theme.LocalAircheckTokens
@@ -61,6 +63,8 @@ fun NewsroomStudioScreen(
     uiState: StudioUiState,
     a2uiController: AircheckA2uiController,
     onDeleteSavedOverlay: (String) -> Unit = {},
+    onSelectBreakingStyle: (BreakingNewsStyle) -> Unit = {},
+    onGenerateOverlaySet: () -> Unit = {},
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -131,6 +135,57 @@ fun NewsroomStudioScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            item(key = "breaking_style_chips_card") {
+                val activeStyle = uiState.corePipelineSession.renderOptions.breakingStyle
+                StudioCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Breaking News Style Chips",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = StudioCrisp
+                        )
+                        BreakingNewsStyle.entries.chunked(2).forEach { pair ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                pair.forEach { style ->
+                                    CsBreakingChip(
+                                        style = style,
+                                        selected = activeStyle == style,
+                                        onSelect = { onSelectBreakingStyle(style) },
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("newsroom_bstyle_${style.wire}")
+                                    )
+                                }
+                                if (pair.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = onGenerateOverlaySet,
+                            enabled = !uiState.isGeneratingOverlaySet,
+                            border = BorderStroke(1.dp, tokens.channelAccent),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(44.dp)
+                                .testTag("newsroom_generate_set_button")
+                        ) {
+                            Text(
+                                if (uiState.isGeneratingOverlaySet) {
+                                    "Generating Overlay Set…"
+                                } else {
+                                    "Generate 3-Overlay Set (${activeStyle.chipLabel})"
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
             item(key = "a2ui_newsroom_surface") {
                 if (primarySurface != null) {
                     A2uiSurface(

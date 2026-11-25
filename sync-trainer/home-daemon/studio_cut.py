@@ -36,6 +36,7 @@ WARM_TEMPERATURE_K = 4800
 COOL_TEMPERATURE_K = 7800
 GRAIN_STRENGTH = 10
 LOOK_LIGHT_VALUES = ("warm", "cool", "neutral")
+BREAKING_STYLE_VALUES = ("breaking", "developing", "exclusive", "alert_stat", "clean")
 ASPECT_SIZES: dict[str, tuple[int, int]] = {"9:16": (720, 1280), "16:9": (1280, 720)}
 
 _SILENCE_START_RE = re.compile(r"silence_start:\s*(-?[0-9.]+)")
@@ -91,6 +92,10 @@ class StudioRenderOptions:
     punch_in: bool = False
     captions: bool = False
     aspect: str = "9:16"
+    breaking_style: str = "breaking"
+    chyron_headline: str = ""
+    chyron_subline: str = ""
+    corner_bug_text: str = "LIVE"
     look: StudioLook = field(default_factory=StudioLook)
 
     @staticmethod
@@ -102,11 +107,18 @@ class StudioRenderOptions:
         aspect = str(raw.get("aspect") or "9:16").strip()
         if aspect not in ASPECT_SIZES:
             raise ValueError(f"render_options.aspect must be one of {sorted(ASPECT_SIZES)}")
+        bstyle = str(raw.get("breaking_style") or "breaking").strip().lower()
+        if bstyle not in BREAKING_STYLE_VALUES:
+            bstyle = "breaking"
         return StudioRenderOptions(
             strip_silence=bool(raw.get("strip_silence", False)),
             punch_in=bool(raw.get("punch_in", False)),
             captions=bool(raw.get("captions", False)),
             aspect=aspect,
+            breaking_style=bstyle,
+            chyron_headline=str(raw.get("chyron_headline") or "").strip()[:64],
+            chyron_subline=str(raw.get("chyron_subline") or "").strip()[:80],
+            corner_bug_text=str(raw.get("corner_bug_text") or "LIVE").strip()[:28] or "LIVE",
             look=StudioLook.from_payload(raw.get("look")),
         )
 
@@ -391,6 +403,16 @@ def generate_backdrop_plate(
 # ---------------------------------------------------------------------------
 
 
+def _truncate_words(text: str, max_chars: int) -> str:
+    clean = " ".join(str(text or "").split())
+    if len(clean) <= max_chars:
+        return clean
+    cut = clean[: max(1, max_chars - 1)]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(".,;:!?-") + "…"
+
+
 def _wrap(text: str, max_chars: int) -> list[str]:
     lines: list[str] = []
     cur = ""
@@ -407,16 +429,31 @@ def _wrap(text: str, max_chars: int) -> list[str]:
     return lines
 
 
+def _breaking_palette(style: str) -> tuple[str, tuple[int, int, int, int] | None, tuple[int, int, int, int], tuple[int, int, int, int]]:
+    s = str(style or "breaking").strip().lower()
+    if s == "developing":
+        return ("DEVELOPING", (255, 184, 0, 255), (0, 0, 0, 255), (255, 184, 0, 255))
+    if s == "exclusive":
+        return ("EXCLUSIVE", (255, 255, 255, 255), (0, 0, 0, 255), (255, 255, 255, 255))
+    if s == "alert_stat":
+        return ("DATA ALERT", (215, 25, 33, 255), (255, 255, 255, 255), (255, 184, 0, 255))
+    if s == "clean":
+        return ("", None, (235, 235, 239, 255), (142, 142, 150, 255))
+    return ("BREAKING NEWS", (215, 25, 33, 255), (255, 255, 255, 255), (215, 25, 33, 255))
+
+
 def _fonts(size_scale: float) -> tuple[Any, Any, Any]:
     from PIL import ImageFont
 
     repo_root = Path(__file__).resolve().parents[2]
     font_path = repo_root / "app" / "src" / "main" / "res" / "font" / "space_grotesk.ttf"
+    mono_path = repo_root / "app" / "src" / "main" / "res" / "font" / "jetbrains_mono.ttf"
     try:
+        mono = mono_path if mono_path.is_file() else font_path
         return (
-            ImageFont.truetype(str(font_path), int(40 * size_scale)),
-            ImageFont.truetype(str(font_path), int(28 * size_scale)),
-            ImageFont.truetype(str(font_path), int(22 * size_scale)),
+            ImageFont.truetype(str(font_path), int(36 * size_scale)),
+            ImageFont.truetype(str(font_path), int(25 * size_scale)),
+            ImageFont.truetype(str(mono), int(20 * size_scale)),
         )
     except Exception:
         d = ImageFont.load_default()
@@ -460,7 +497,17 @@ def compose_studio_cut(
         end = min(total_ms, remap_ms(int(item.get("end_ms") or total_ms), gaps))
         return (start, end) if end > start else None
 
+    total_s = max(1.0, total_ms / 1000.0)
     clause_dicts = [c for c in clauses if isinstance(c, dict)]
+    valid_overlays = [
+        o for o in overlays
+        if isinstance(o, dict)
+        and (str(o.get("headline") or "").strip() or str(o.get("subline") or "").strip() or str(o.get("callout_stat") or "").strip())
+    ]
+    lower_overlays = [o for o in valid_overlays if str(o.get("kind") or "LOWER_THIRD").upper() != "QUOTE_BRIEF"]
+    quote_overlays = [o for o in valid_overlays if str(o.get("kind") or "").upper() == "QUOTE_BRIEF"]
+    has_lower_third = bool(lower_overlays or options.chyron_headline)
+
     timed_pngs: list[tuple[Path, float, float]] = []
     broll_windows: list[tuple[float, float]] = []
     broll_count = 0
@@ -468,6 +515,8 @@ def compose_studio_cut(
     overlay_count = 0
     punch_windows: list[tuple[float, float]] = []
     talking_head_seen = 0
+
+    _, _, _, active_accent = _breaking_palette(options.breaking_style)
 
     # Corner talking-head PiP dimensions (top-right broadcast inset during B-roll cutaways)
     if width < height:
@@ -484,29 +533,31 @@ def compose_studio_cut(
         start_s, end_s = window[0] / 1000.0, window[1] / 1000.0
         mode = str(item.get("segment_mode") or "TALKING_HEAD").upper()
         if mode == "BROLL_CUTAWAY":
-            caption = str(item.get("broll_caption") or item.get("spoken_text") or "").strip()[:88]
+            caption = _truncate_words(str(item.get("broll_caption") or item.get("spoken_text") or ""), 110)
             png = work_dir / f"broll_plate_{idx}.png"
             img = Image.new("RGBA", (width, height), (10, 12, 18, 244))
             draw = ImageDraw.Draw(img)
             if width < height:
-                box = (int(width * 0.05), int(height * 0.33), int(width * 0.95), int(height * 0.74))
+                box = (int(width * 0.045), int(height * 0.31), int(width * 0.955), int(height * 0.69))
             else:
-                box = (int(width * 0.045), int(height * 0.14), int(width * 0.67), int(height * 0.74))
-            draw.rectangle([box[:2], box[2:]], fill=(18, 22, 32, 255), outline=(235, 235, 239, 220), width=3)
-            draw.text((box[0] + int(28 * scale), box[1] + int(32 * scale)), "B-ROLL CUTAWAY", font=f_tag, fill=(184, 255, 0, 255))
-            chars = max(12, int(26 * (box[2] - box[0]) / 648))
+                box = (int(width * 0.045), int(height * 0.14), int(width * 0.67), int(height * 0.68))
+            draw.rounded_rectangle([box[:2], box[2:]], radius=int(12 * scale), fill=(16, 19, 27, 255), outline=(235, 235, 239, 210), width=2)
+            draw.rectangle([(box[0], box[1]), (box[0] + int(6 * scale), box[3])], fill=active_accent)
+            draw.text((box[0] + int(26 * scale), box[1] + int(24 * scale)), "B-ROLL CUTAWAY", font=f_tag, fill=active_accent)
+            chars = max(14, int(28 * (box[2] - box[0]) / 648))
             for li, line in enumerate(_wrap(caption, chars)[:5]):
                 draw.text(
-                    (box[0] + int(28 * scale), box[1] + int(96 * scale) + li * int(54 * scale)),
+                    (box[0] + int(26 * scale), box[1] + int(76 * scale) + li * int(50 * scale)),
                     line,
                     font=f_title,
                     fill=(244, 246, 250, 255),
                 )
             # Crisp broadcast frame around top-right live talking-head PiP window
-            draw.rectangle(
+            draw.rounded_rectangle(
                 [(pip_x - 3, pip_y - 3), (pip_x + pip_w + 3, pip_y + pip_h + 3)],
+                radius=int(10 * scale),
                 fill=(0, 0, 0, 0),
-                outline=(235, 235, 239, 235),
+                outline=active_accent,
                 width=3,
             )
             img.save(png)
@@ -518,57 +569,148 @@ def compose_studio_cut(
                 punch_windows.append((start_s, end_s))
             talking_head_seen += 1
 
-        if options.captions:
+        if options.captions and mode != "BROLL_CUTAWAY":
             spoken = str(item.get("spoken_text") or "").strip()
             if spoken:
                 png = work_dir / f"caption_{idx}.png"
                 img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
                 draw = ImageDraw.Draw(img)
-                chars = max(16, int(34 * width / 720))
+                chars = max(16, int(36 * width / 720))
                 lines = _wrap(spoken, chars)[-3:]
-                line_h = int(40 * scale)
-                band_h = line_h * len(lines) + int(28 * scale)
-                top = height - band_h - int(height * 0.06)
-                left = int(width * 0.04)
-                draw.rectangle([(left, top), (width - left, top + band_h)], fill=(0, 0, 0, 230), outline=(255, 255, 255, 255), width=2)
-                draw.rectangle([(left, top), (left + int(6 * scale), top + band_h)], fill=(215, 25, 33, 255))
+                line_h = int(36 * scale)
+                band_h = line_h * len(lines) + int(24 * scale)
+                bottom_pad = int(height * (0.215 if has_lower_third else 0.06))
+                top = height - band_h - bottom_pad
+                left = int(width * 0.045)
+                draw.rounded_rectangle(
+                    [(left, top), (width - left, top + band_h)],
+                    radius=int(8 * scale),
+                    fill=(8, 9, 12, 224),
+                    outline=(60, 62, 72, 240),
+                    width=2,
+                )
+                draw.rectangle([(left, top), (left + int(5 * scale), top + band_h)], fill=active_accent)
                 for li, line in enumerate(lines):
-                    draw.text((left + int(24 * scale), top + int(14 * scale) + li * line_h), line, font=f_body, fill=(235, 235, 239, 255))
+                    draw.text((left + int(20 * scale), top + int(12 * scale) + li * line_h), line, font=f_body, fill=(235, 235, 239, 255))
                 img.save(png)
                 timed_pngs.append((png, start_s, end_s))
                 caption_count += 1
 
-    for idx, ovl in enumerate(overlays):
-        if not isinstance(ovl, dict):
-            continue
-        headline = str(ovl.get("headline") or "").strip()[:48]
-        subline = str(ovl.get("subline") or "").strip()[:64]
-        stat = str(ovl.get("callout_stat") or "").strip()[:32]
-        dur_sec = max(1, min(30, int(ovl.get("duration_sec") or 4)))
-        if not headline and not subline and not stat:
-            continue
-        start_s = min(max(0.0, idx * 1.5), max(0.0, (total_ms / 1000.0) - 0.5))
-        end_s = min(total_ms / 1000.0, start_s + float(dur_sec))
+    # Top-left LIVE tally bug when breaking style is active and broadcast packaging/overlays are attached
+    if options.breaking_style != "clean" and (valid_overlays or options.chyron_headline):
+        live_png = work_dir / "live_bug.png"
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        bug_x = int(width * 0.045)
+        bug_y = int(height * 0.042)
+        bug_h = int(38 * scale)
+        live_w = int(106 * scale)
+        draw.rounded_rectangle([(bug_x, bug_y), (bug_x + live_w, bug_y + bug_h)], radius=int(6 * scale), fill=(215, 25, 33, 248))
+        dot_r = int(5 * scale)
+        dot_cy = bug_y + bug_h // 2
+        draw.ellipse([(bug_x + int(14 * scale) - dot_r, dot_cy - dot_r), (bug_x + int(14 * scale) + dot_r, dot_cy + dot_r)], fill=(255, 255, 255, 255))
+        draw.text((bug_x + int(26 * scale), bug_y + int(8 * scale)), "LIVE", font=f_tag, fill=(255, 255, 255, 255))
+        desk_label = options.corner_bug_text.upper() if options.corner_bug_text.upper() != "LIVE" else "AIRCHECK DESK"
+        desk_x = bug_x + live_w + int(8 * scale)
+        desk_w = int((len(desk_label) * 12.5 + 28) * scale)
+        draw.rounded_rectangle(
+            [(desk_x, bug_y), (desk_x + desk_w, bug_y + bug_h)],
+            radius=int(6 * scale),
+            fill=(10, 12, 16, 232),
+            outline=(54, 56, 66, 240),
+            width=1,
+        )
+        draw.text((desk_x + int(14 * scale), bug_y + int(8 * scale)), desk_label, font=f_tag, fill=(235, 235, 239, 255))
+        img.save(live_png)
+        timed_pngs.append((live_png, 0.0, total_s))
+
+    # Upper-left QUOTE_BRIEF cards (non-overlapping with LIVE bug, top-right PiP, and lower-third)
+    for idx, ovl in enumerate(quote_overlays):
+        headline = _truncate_words(str(ovl.get("headline") or ""), 38)
+        subline = _truncate_words(str(ovl.get("subline") or ""), 54)
+        stat = _truncate_words(str(ovl.get("callout_stat") or ""), 22)
+        dur_sec = max(2, min(20, int(ovl.get("duration_sec") or 5)))
+        ovl_style = str(ovl.get("breaking_style") or options.breaking_style or "breaking")
+        _, _, _, ovl_accent = _breaking_palette(ovl_style)
+        slot_span = total_s / max(1, len(quote_overlays))
+        start_s = min(idx * slot_span + 0.35, max(0.0, total_s - 0.5))
+        end_s = min(total_s, min((idx + 1) * slot_span, start_s + float(dur_sec)))
+        png = work_dir / f"quote_ovl_{idx}.png"
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        left = int(width * 0.045)
+        right = int(width * (0.58 if width < height else 0.50))
+        top = int(height * 0.095)
+        card_h = int(148 * scale)
+        draw.rounded_rectangle(
+            [(left, top), (right, top + card_h)],
+            radius=int(8 * scale),
+            fill=(10, 12, 18, 238),
+            outline=(64, 66, 78, 245),
+            width=2,
+        )
+        draw.rectangle([(left, top), (left + int(5 * scale), top + card_h)], fill=ovl_accent)
+        kicker_txt = f"QUOTE CARD · {stat.upper()}" if stat else "QUOTE CARD"
+        draw.text((left + int(18 * scale), top + int(14 * scale)), kicker_txt, font=f_tag, fill=ovl_accent)
+        if headline:
+            draw.text((left + int(18 * scale), top + int(46 * scale)), headline, font=f_body, fill=(255, 255, 255, 255))
+        if subline:
+            for li, s_line in enumerate(_wrap(subline, 28)[:2]):
+                draw.text(
+                    (left + int(18 * scale), top + int(84 * scale) + li * int(26 * scale)),
+                    s_line,
+                    font=f_tag,
+                    fill=(176, 180, 192, 255),
+                )
+        img.save(png)
+        timed_pngs.append((png, start_s, max(start_s + 0.25, end_s)))
+        overlay_count += 1
+
+    # Lower-third LOWER_THIRD / STAT_CALLOUT chyrons with Breaking News Style Kicker Chips
+    for idx, ovl in enumerate(lower_overlays):
+        headline = _truncate_words(str(ovl.get("headline") or ""), 36).upper()
+        subline = _truncate_words(str(ovl.get("subline") or ""), 44)
+        stat = _truncate_words(str(ovl.get("callout_stat") or ""), 20)
+        dur_sec = max(2, min(30, int(ovl.get("duration_sec") or 5)))
+        ovl_style = str(ovl.get("breaking_style") or options.breaking_style or "breaking")
+        kicker_lbl, kicker_bg, kicker_fg, ovl_accent = _breaking_palette(ovl_style)
+        slot_span = total_s / max(1, len(lower_overlays))
+        start_s = idx * slot_span
+        end_s = min(total_s, max(start_s + float(dur_sec), min((idx + 1) * slot_span, start_s + float(dur_sec) + 2.0)))
+        if len(lower_overlays) == 1:
+            start_s, end_s = 0.0, total_s
         png = work_dir / f"saved_ovl_{idx}.png"
         img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         left = int(width * 0.045)
-        top = int(height * 0.04)
-        draw.rectangle(
-            [(left, top), (int(width * 0.62), top + int(170 * scale))],
-            fill=(17, 17, 19, 235),
-            outline=(235, 235, 239, 255),
+        right = width - left
+        deck_h = int(118 * scale)
+        deck_bottom = height - int(height * 0.042)
+        deck_top = deck_bottom - deck_h
+        if kicker_bg is not None and kicker_lbl:
+            show_stat = bool(stat) and stat.upper() not in kicker_lbl.upper()
+            full_kicker = f"{kicker_lbl} · {stat.upper()}" if show_stat else kicker_lbl
+            kw = min(right - left, int((len(full_kicker) * 12.8 + 44) * scale))
+            kh = int(34 * scale)
+            ky = deck_top - kh
+            draw.rounded_rectangle([(left, ky), (left + kw, deck_top + int(4 * scale))], radius=int(6 * scale), fill=kicker_bg)
+            dot_r = int(4 * scale)
+            dot_cy = ky + kh // 2
+            draw.ellipse([(left + int(14 * scale) - dot_r, dot_cy - dot_r), (left + int(14 * scale) + dot_r, dot_cy + dot_r)], fill=kicker_fg)
+            draw.text((left + int(26 * scale), ky + int(6 * scale)), full_kicker, font=f_tag, fill=kicker_fg)
+        draw.rounded_rectangle(
+            [(left, deck_top), (right, deck_bottom)],
+            radius=int(8 * scale),
+            fill=(9, 11, 16, 242),
+            outline=(56, 60, 72, 245),
             width=2,
         )
-        y = top + int(16 * scale)
-        if stat:
-            draw.text((left + int(20 * scale), y), stat.upper(), font=f_tag, fill=(142, 142, 150, 255))
-            y += int(34 * scale)
+        draw.rectangle([(left, deck_top), (left + int(7 * scale), deck_bottom)], fill=ovl_accent)
         if headline:
-            draw.text((left + int(20 * scale), y), headline, font=f_title, fill=(255, 255, 255, 255))
-            y += int(52 * scale)
-        if subline:
-            draw.text((left + int(20 * scale), y), subline, font=f_body, fill=(200, 200, 208, 255))
+            draw.text((left + int(22 * scale), deck_top + int(18 * scale)), headline, font=f_title, fill=(255, 255, 255, 255))
+        sub_text = subline or (stat.upper() if stat and kicker_bg is None else "")
+        if sub_text:
+            draw.text((left + int(22 * scale), deck_top + int(72 * scale)), sub_text, font=f_tag, fill=ovl_accent if ovl_style != "clean" else (188, 192, 204, 255))
         img.save(png)
         timed_pngs.append((png, start_s, max(start_s + 0.25, end_s)))
         overlay_count += 1

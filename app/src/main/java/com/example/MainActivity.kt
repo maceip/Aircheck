@@ -179,6 +179,8 @@ fun AircheckApp(
                         uiState = studioState,
                         a2uiController = studioViewModel.a2uiController,
                         onDeleteSavedOverlay = studioViewModel::deleteSavedNewsroomOverlay,
+                        onSelectBreakingStyle = studioViewModel::setCoreBreakingStyle,
+                        onGenerateOverlaySet = { studioViewModel.generateNewsroomOverlaySet() },
                         onBack = { showNewsroomStudioModal = false }
                     )
                 }

@@ -104,6 +104,7 @@ VALID_AI_ASSIST_MODES = frozenset({
     "polish_subline",
     "polish_segment",
     "generate_overlay_brief",
+    "generate_overlay_set",
 })
 
 _TAILSCALE_IPV4_NET = ipaddress.ip_network("100.64.0.0/10")
@@ -1379,7 +1380,8 @@ class RenderJobManager:
 
         chyron_headline = str(payload.get("chyron_headline") or "").strip()[:72]
         chyron_subline = str(payload.get("chyron_subline") or "").strip()[:96]
-        show_brand_bug = bool(payload.get("show_brand_bug", True))
+        default_bug = bool(chyron_headline or chyron_subline) and voice_source != "MIC_VOICEOVER"
+        show_brand_bug = bool(payload["show_brand_bug"]) if "show_brand_bug" in payload else default_bug
 
         work_spec: dict[str, Any] = {
             "job_id": job_id,
@@ -1797,7 +1799,7 @@ class RenderJobManager:
 
         chyron_headline = str(spec.get("chyron_headline") or "").strip()
         chyron_subline = str(spec.get("chyron_subline") or "").strip()
-        show_brand_bug = bool(spec.get("show_brand_bug", True))
+        show_brand_bug = bool(spec.get("show_brand_bug", False))
         if chyron_headline or chyron_subline or show_brand_bug:
             report_progress(
                 status="PACKAGING",
@@ -2210,17 +2212,51 @@ class RenderJobManager:
             input_props["beats"] = beats
 
             first_ovl = next((o for o in overlays if isinstance(o, Mapping)), {})
+            breaking_style = str(
+                render_opts_raw.get("breaking_style")
+                or first_ovl.get("breaking_style")
+                or "breaking"
+            ).strip().lower()
+            if breaking_style not in ("breaking", "developing", "exclusive", "alert_stat", "clean"):
+                breaking_style = "breaking"
             headline = str(
                 render_opts_raw.get("chyron_headline") or first_ovl.get("headline") or title or "Aircheck"
             ).strip() or "Aircheck"
             subline = str(render_opts_raw.get("chyron_subline") or first_ovl.get("subline") or "").strip()
             corner_bug = str(render_opts_raw.get("corner_bug_text") or "LIVE").strip() or "LIVE"
-            show_bug = bool(render_opts_raw.get("show_brand_bug", True))
+            show_bug = breaking_style != "clean" and bool(render_opts_raw.get("show_brand_bug", True))
+            remotion_overlays: list[dict[str, Any]] = []
+            for ovl_item in overlays:
+                if not isinstance(ovl_item, Mapping):
+                    continue
+                ovl_h = str(ovl_item.get("headline") or "").strip()
+                ovl_s = str(ovl_item.get("subline") or "").strip()
+                ovl_stat = str(ovl_item.get("callout_stat") or "").strip()
+                if not ovl_h and not ovl_s and not ovl_stat:
+                    continue
+                ovl_kind = str(ovl_item.get("kind") or "LOWER_THIRD").strip().upper()
+                if ovl_kind not in ("LOWER_THIRD", "STAT_CALLOUT", "QUOTE_BRIEF"):
+                    ovl_kind = "LOWER_THIRD"
+                ovl_bstyle = str(ovl_item.get("breaking_style") or breaking_style).strip().lower()
+                if ovl_bstyle not in ("breaking", "developing", "exclusive", "alert_stat", "clean"):
+                    ovl_bstyle = breaking_style
+                remotion_overlays.append(
+                    {
+                        "kind": ovl_kind,
+                        "breakingStyle": ovl_bstyle,
+                        "headline": ovl_h[:48],
+                        "subline": ovl_s[:64],
+                        "calloutStat": ovl_stat[:28],
+                        "durationSec": max(2, min(20, int(ovl_item.get("duration_sec") or 5))),
+                    }
+                )
             input_props["packaging"] = {
                 "chyronHeadline": headline,
                 "chyronSubline": subline,
                 "cornerBugText": corner_bug,
                 "showBrandBug": show_bug,
+                "breakingStyle": breaking_style,
+                "overlays": remotion_overlays,
                 "templateId": template_id,
             }
 
@@ -2773,6 +2809,27 @@ def _run_ai_assist(
             f'{{"kind":"LOWER_THIRD","headline":"ALL CAPS MAX 32 CHARS",'
             f'"subline":"CONCISE SUBLINE MAX 48 CHARS","callout_stat":"SHORT TAG OR METRIC MAX 20 CHARS","duration_sec":4}}'
         )
+    elif mode == "generate_overlay_set":
+        seed = text or context
+        bstyle = str(payload.get("breaking_style") or "breaking").strip().lower()
+        if bstyle not in ("breaking", "developing", "exclusive", "alert_stat", "clean"):
+            bstyle = "breaking"
+        user_prompt = (
+            f"Design a cohesive 3-piece television newsroom graphic overlay package in the '{bstyle.upper()}' "
+            f"broadcast style for this story:\n"
+            f"STORY: {seed}\n\n"
+            f"Produce EXACTLY 3 distinct overlays grounded strictly in the story:\n"
+            f"1) kind='LOWER_THIRD': main anchor headline + ticker subline + concise alert tag\n"
+            f"2) kind='STAT_CALLOUT': sharp factual takeaway or key contrast + crisp callout_stat badge\n"
+            f"3) kind='QUOTE_BRIEF': editorial field brief or source card summarizing the core claim\n"
+            f"Never invent fake numbers if none are in the story; use concise uppercase editorial tags when no number is stated.\n\n"
+            f"Return STRICT JSON ONLY with this exact schema:\n"
+            f'{{"overlays":['
+            f'{{"kind":"LOWER_THIRD","headline":"ALL CAPS MAX 32 CHARS","subline":"MAX 46 CHARS","callout_stat":"MAX 16 CHARS","duration_sec":6}},'
+            f'{{"kind":"STAT_CALLOUT","headline":"ALL CAPS MAX 32 CHARS","subline":"MAX 46 CHARS","callout_stat":"MAX 16 CHARS","duration_sec":5}},'
+            f'{{"kind":"QUOTE_BRIEF","headline":"MAX 34 CHARS","subline":"MAX 50 CHARS","callout_stat":"DESK BRIEF","duration_sec":5}}'
+            f']}}'
+        )
     else:  # polish_segment
         user_prompt = (
             f"Rewrite or flesh out this single spoken news anchor segment (14-22 words, deadpan serious cable news tone, "
@@ -2879,6 +2936,64 @@ def _run_ai_assist(
             "subline": subline,
             "callout_stat": callout_stat,
             "duration_sec": dur_sec,
+            "llm_meta": res.llm_meta,
+        }
+
+    if mode == "generate_overlay_set":
+        bstyle = str(payload.get("breaking_style") or "breaking").strip().lower()
+        if bstyle not in ("breaking", "developing", "exclusive", "alert_stat", "clean"):
+            bstyle = "breaking"
+        raw_list = inner.get("overlays")
+        if not isinstance(raw_list, list) or not raw_list:
+            raise LlmProviderError(
+                "AI overlay set missing overlays array.",
+                provider=res.provider,
+                stage="ai_assist",
+                model=res.model,
+                status_code=502,
+                error_code="llm_invalid_response",
+            )
+        expected_kinds = ("LOWER_THIRD", "STAT_CALLOUT", "QUOTE_BRIEF")
+        validated_overlays: list[dict[str, Any]] = []
+        for idx, item in enumerate(raw_list[:4]):
+            if not isinstance(item, Mapping):
+                continue
+            raw_h = str(item.get("headline") or "").strip()
+            if not raw_h:
+                continue
+            kind = str(item.get("kind") or expected_kinds[min(idx, 2)]).strip().upper()
+            if kind not in expected_kinds:
+                kind = expected_kinds[min(idx, 2)]
+            h_out = raw_h.upper()[:40] if kind != "QUOTE_BRIEF" else raw_h[:40]
+            s_out = str(item.get("subline") or "").strip()[:56]
+            stat_out = str(item.get("callout_stat") or "").strip()[:20]
+            try:
+                dur_sec = max(2, min(15, int(item.get("duration_sec") or 5)))
+            except (TypeError, ValueError):
+                dur_sec = 5
+            validated_overlays.append(
+                {
+                    "kind": kind,
+                    "breaking_style": bstyle,
+                    "headline": h_out,
+                    "subline": s_out,
+                    "callout_stat": stat_out,
+                    "duration_sec": dur_sec,
+                }
+            )
+        if not validated_overlays:
+            raise LlmProviderError(
+                "AI overlay set produced zero valid overlay objects.",
+                provider=res.provider,
+                stage="ai_assist",
+                model=res.model,
+                status_code=502,
+                error_code="llm_invalid_response",
+            )
+        return {
+            "mode": mode,
+            "breaking_style": bstyle,
+            "overlays": validated_overlays,
             "llm_meta": res.llm_meta,
         }
 

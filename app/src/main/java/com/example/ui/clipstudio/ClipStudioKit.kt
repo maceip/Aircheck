@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.data.BreakingNewsStyle
 
 // =============================================================================
 // Clip Studio v4 tokens (from Clip Studio Android v4 design handoff)
@@ -322,6 +323,96 @@ fun CsChip(
             Box(Modifier.size(4.dp).background(role.text))
         }
         Text(label, style = mono(size, role.text, tracking = 0.02f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** Accent color for a [BreakingNewsStyle] using Clip Studio v4 broadcast tokens. */
+fun breakingAccentColor(style: BreakingNewsStyle): Color = when (style) {
+    BreakingNewsStyle.BREAKING -> Cs.Red
+    BreakingNewsStyle.DEVELOPING -> Cs.AmberBright
+    BreakingNewsStyle.EXCLUSIVE -> Cs.White
+    BreakingNewsStyle.ALERT_STAT -> Cs.Red
+    BreakingNewsStyle.CLEAN -> Cs.Muted
+}
+
+/**
+ * Broadcast breaking-news style chip with hardware bevel, left accent tally bar, and live indicator
+ * dot. Uses strictly 1 text label inside the chip to honor the label density rule.
+ */
+@Composable
+fun CsBreakingChip(
+    style: BreakingNewsStyle,
+    selected: Boolean,
+    onSelect: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val accent = breakingAccentColor(style)
+    val role = when {
+        !selected -> KeyRole.STD
+        style == BreakingNewsStyle.BREAKING -> KeyRole.VOICE
+        style == BreakingNewsStyle.DEVELOPING -> KeyRole.REPAIR
+        style == BreakingNewsStyle.EXCLUSIVE -> KeyRole.COMMIT
+        else -> KeyRole.ACTIVE
+    }
+    Row(
+        modifier = modifier
+            .height(36.dp)
+            .offset(y = if (pressed) 1.dp else 0.dp)
+            .keyBevel(role, pressed, 4.dp, enabled = true)
+            .then(
+                if (selected && style == BreakingNewsStyle.ALERT_STAT) {
+                    Modifier.border(1.dp, Cs.Red, RoundedCornerShape(4.dp))
+                } else {
+                    Modifier
+                }
+            )
+            .clip(RoundedCornerShape(4.dp))
+            .toggleable(
+                value = selected,
+                interactionSource = interaction,
+                indication = null,
+                role = Role.RadioButton
+            ) { onSelect() }
+            .drawBehind {
+                // Left broadcast tally bar inside bevel
+                val barW = 3.dp.toPx()
+                val vInset = 5.dp.toPx()
+                drawRect(
+                    color = if (selected && (style == BreakingNewsStyle.BREAKING || style == BreakingNewsStyle.EXCLUSIVE)) {
+                        role.text
+                    } else {
+                        accent
+                    },
+                    topLeft = Offset(4.dp.toPx(), vInset),
+                    size = Size(barW, (size.height - 2f * vInset).coerceAtLeast(4f))
+                )
+            }
+            .padding(start = 13.dp, end = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        val dotColor = when {
+            selected && style == BreakingNewsStyle.BREAKING -> Cs.White
+            selected && style == BreakingNewsStyle.EXCLUSIVE -> Cs.Black
+            selected && style == BreakingNewsStyle.CLEAN -> Cs.Black
+            else -> accent
+        }
+        Box(
+            Modifier
+                .size(6.dp)
+                .background(
+                    color = dotColor,
+                    shape = if (style == BreakingNewsStyle.BREAKING) RoundedCornerShape(50) else RoundedCornerShape(1.dp)
+                )
+        )
+        Text(
+            text = style.chipLabel.uppercase(),
+            style = mono(11.sp, role.text, FontWeight.Medium, 0.03f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

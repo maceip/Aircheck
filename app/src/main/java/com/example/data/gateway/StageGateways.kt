@@ -1,6 +1,7 @@
 package com.example.data.gateway
 
 import com.example.data.AlignedWord
+import com.example.data.BreakingNewsStyle
 import com.example.data.CoreRenderOptions
 import com.example.data.NewsroomLook
 import com.example.data.RigQualityMetrics
@@ -91,7 +92,8 @@ data class GeneratedOverlayBriefResult(
     val headline: String,
     val subline: String,
     val calloutStat: String,
-    val durationSec: Int
+    val durationSec: Int,
+    val breakingStyle: BreakingNewsStyle = BreakingNewsStyle.BREAKING
 )
 
 data class MacRigJobSnapshot(
@@ -185,6 +187,14 @@ interface MacRigRenderGateway {
         rigBaseUrl: String,
         briefPrompt: String
     ): GeneratedOverlayBriefResult
+
+    suspend fun generateAiOverlaySet(
+        rigBaseUrl: String,
+        briefPrompt: String,
+        breakingStyle: BreakingNewsStyle = BreakingNewsStyle.BREAKING
+    ): List<GeneratedOverlayBriefResult> = listOf(
+        generateAiOverlayBrief(rigBaseUrl, briefPrompt).copy(breakingStyle = breakingStyle)
+    )
 
     suspend fun requestRemotionInstall(
         rigBaseUrl: String,

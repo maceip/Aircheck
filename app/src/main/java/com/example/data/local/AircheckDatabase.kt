@@ -20,6 +20,7 @@ import androidx.room.withTransaction
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.AlignedWord
+import com.example.data.BreakingNewsStyle
 import com.example.data.ClipCardRow
 import com.example.data.ClipRecord
 import com.example.data.CorePipelineSession
@@ -263,6 +264,8 @@ data class VoicePreferenceEntity(
 data class SavedNewsroomOverlayEntity(
     @PrimaryKey val id: String,
     val kind: String,
+    @ColumnInfo(defaultValue = "BREAKING")
+    val breakingStyle: String = "BREAKING",
     val headline: String,
     val subline: String,
     val calloutStat: String,
@@ -496,7 +499,7 @@ interface CorePipelineSessionDao {
         CorePipelineSessionEntity::class,
         NewsroomLookEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AircheckDatabase : RoomDatabase() {
@@ -611,6 +614,14 @@ abstract class AircheckDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6: Migration = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `saved_newsroom_overlays` ADD COLUMN `breakingStyle` TEXT NOT NULL DEFAULT 'BREAKING'"
+                )
+            }
+        }
+
         fun getInstance(context: Context): AircheckDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -619,7 +630,7 @@ abstract class AircheckDatabase : RoomDatabase() {
                     "aircheck_v2.db"
                 )
                     .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }
@@ -1083,6 +1094,7 @@ private fun SavedNewsroomOverlay.toEntity(): SavedNewsroomOverlayEntity =
     SavedNewsroomOverlayEntity(
         id = id,
         kind = kind.name,
+        breakingStyle = breakingStyle.name,
         headline = headline,
         subline = subline,
         calloutStat = calloutStat,
@@ -1095,6 +1107,7 @@ private fun SavedNewsroomOverlayEntity.toDomain(): SavedNewsroomOverlay =
     SavedNewsroomOverlay(
         id = id,
         kind = OverlayObjectKind.fromRaw(kind),
+        breakingStyle = BreakingNewsStyle.fromWire(breakingStyle),
         headline = headline,
         subline = subline,
         calloutStat = calloutStat,

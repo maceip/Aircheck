@@ -18,6 +18,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.test.espresso.Espresso
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.example.data.BreakingNewsStyle
 import com.example.data.BrollSegmentMode
 import com.example.data.CoreRenderOptions
 import com.example.data.NewsroomLook
@@ -222,7 +223,8 @@ class AircheckRunningAppE2ETest {
             persisted().clauses[0].spokenText.contains("Phone sensors grow")
         }
 
-        // 4. 04 NEWSROOM: open look studio, create look, adjust draggable EV tick ruler, warm/grain/border, save, set default
+        // 4. 04 NEWSROOM: open look studio, create look, generate real broadcast backdrop plate, adjust EV/warm/grain/border,
+        //    exercise Breaking News Style Chips + live AI Overlay Set generator, and capture screenshots!
         composeRule.onNodeWithTag("cs_cut_look").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             composeRule.onAllNodesWithTag("cs_newsroom_root").fetchSemanticsNodes().isNotEmpty()
@@ -234,20 +236,70 @@ class AircheckRunningAppE2ETest {
         }
         val newLook = runBlocking { app.container.localRepo.newsroomLooksOnce().maxBy { it.createdAtMillis } }
         composeRule.onNodeWithTag("cs_look_tile_${newLook.id}").performScrollTo().performClick()
+
+        // Generate a real broadcast newsroom backdrop plate on the Mac rig
+        composeRule.onNodeWithTag("cs_backdrop_prompt").performScrollTo().performClick()
+        composeRule.onNodeWithTag("cs_backdrop_prompt").performTextClearance()
+        composeRule.onNodeWithTag("cs_backdrop_prompt").performTextInput(
+            "sleek dark obsidian television newsroom anchor desk, crimson and cobalt LED ticker walls, shallow depth of field"
+        )
+        Espresso.closeSoftKeyboard()
+        composeRule.onNodeWithTag("cs_backdrop_generate").performClick()
+        composeRule.waitUntil(timeoutMillis = 120_000L) {
+            val l = runBlocking { app.container.localRepo.getNewsroomLook(newLook.id) }
+            l != null && !l.plateId.isNullOrBlank() && !studioVm.uiState.value.isGeneratingBackdrop
+        }
+
+        composeRule.onNodeWithTag("cs_scrub_blur_inc").performScrollTo().performClick()
+        composeRule.onNodeWithTag("cs_scrub_blur_inc").performClick()
         composeRule.onNodeWithTag("cs_scrub_ev_inc").performScrollTo().performClick()
-        composeRule.onNodeWithTag("cs_scrub_ev_inc").performClick()
         composeRule.onNodeWithTag("cs_pill_warm").performScrollTo().performClick()
         composeRule.onNodeWithTag("cs_pill_grain").performScrollTo().performClick()
         composeRule.onNodeWithTag("cs_pill_border").performScrollTo().performClick()
         composeRule.onNodeWithTag("cs_look_save").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             val l = runBlocking { app.container.localRepo.getNewsroomLook(newLook.id) }
-            l != null && l.brightnessEv == 0.2 && l.light == NewsroomLook.LIGHT_WARM && l.grain && l.border
+            l != null && l.blurPercent == 10 && l.brightnessEv == 0.1 && l.light == NewsroomLook.LIGHT_WARM && l.grain && l.border
         }
         composeRule.onNodeWithTag("cs_look_default").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             runBlocking { app.container.localRepo.getDefaultNewsroomLook() }?.id == newLook.id
         }
+
+        // Switch to 03 HEADLINES: exercise Breaking News Style Chips + generate live 3-overlay set
+        composeRule.onNodeWithTag("cs_newsroom_tab_2").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodesWithTag("cs_bstyle_breaking").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("cs_bstyle_developing").performScrollTo().performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            persisted().renderOptions.breakingStyle == BreakingNewsStyle.DEVELOPING
+        }
+        captureScreenshot(screenshotDir, "v4_04b_newsroom_developing_chip.png")
+
+        composeRule.onNodeWithTag("cs_bstyle_breaking").performScrollTo().performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            persisted().renderOptions.breakingStyle == BreakingNewsStyle.BREAKING
+        }
+        composeRule.onNodeWithTag("cs_overlay_generate_set").performScrollTo().performClick()
+        composeRule.waitUntil(timeoutMillis = 90_000L) {
+            !studioVm.uiState.value.isGeneratingOverlaySet &&
+                persisted().selectedOverlayIds.size >= 3 &&
+                runBlocking { app.container.localRepo.listSavedNewsroomOverlays().size } >= 3
+        }
+        // Let Coil finish painting the generated backdrop plate onto LookCanvas
+        Thread.sleep(1_200L)
+        composeRule.waitForIdle()
+        captureScreenshot(screenshotDir, "v4_04_newsroom_headlines_generated.png")
+
+        // Switch to 04 CARDS to inspect & screenshot the generated Quote Card overlay too
+        composeRule.onNodeWithTag("cs_newsroom_tab_3").performClick()
+        composeRule.waitForIdle()
+        captureScreenshot(screenshotDir, "v4_04c_newsroom_cards_generated.png")
+
+        // Switch back to 01 BACKDROP to screenshot the complete backdrop + live overlays on canvas
+        composeRule.onNodeWithTag("cs_newsroom_tab_0").performClick()
+        composeRule.waitForIdle()
         captureScreenshot(screenshotDir, "v4_04_newsroom.png")
 
         // Return to 03 CUT and open Settings modal to verify live Mac :8443 rig health

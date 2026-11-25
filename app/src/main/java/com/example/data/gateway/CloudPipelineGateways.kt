@@ -1,6 +1,7 @@
 package com.example.data.gateway
 
 import com.example.data.AlignedWord
+import com.example.data.BreakingNewsStyle
 import com.example.data.CoreRenderOptions
 import com.example.data.CoreStoryClause
 import com.example.data.NewsroomLook
@@ -506,6 +507,7 @@ class DirectMacRigGateway(
                 JSONObject()
                     .put("id", ovl.id)
                     .put("kind", ovl.kind.name)
+                    .put("breaking_style", ovl.breakingStyle.wire)
                     .put("headline", ovl.headline)
                     .put("subline", ovl.subline)
                     .put("callout_stat", ovl.calloutStat)
@@ -537,6 +539,7 @@ class DirectMacRigGateway(
                 .put("punch_in", renderOptions.punchIn)
                 .put("captions", renderOptions.captions)
                 .put("aspect", renderOptions.aspect)
+                .put("breaking_style", renderOptions.breakingStyle.wire)
                 .put("chyron_headline", renderOptions.chyronHeadline)
                 .put("chyron_subline", renderOptions.chyronSubline)
                 .put("show_brand_bug", renderOptions.showBrandBug)
@@ -759,11 +762,58 @@ class DirectMacRigGateway(
             ?: throw IllegalStateException("AI overlay brief missing headline.")
         GeneratedOverlayBriefResult(
             kind = OverlayObjectKind.fromRaw(json.optNullableString("kind")),
+            breakingStyle = BreakingNewsStyle.fromWire(json.optNullableString("breaking_style")),
             headline = headline,
             subline = json.optNullableString("subline").orEmpty(),
             calloutStat = json.optNullableString("callout_stat").orEmpty(),
             durationSec = json.optInt("duration_sec", 4).coerceIn(2, 15)
         )
+    }
+
+    override suspend fun generateAiOverlaySet(
+        rigBaseUrl: String,
+        briefPrompt: String,
+        breakingStyle: BreakingNewsStyle
+    ): List<GeneratedOverlayBriefResult> = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val cleanPrompt = briefPrompt.trim()
+        require(cleanPrompt.isNotEmpty()) { "Enter a news brief topic before generating overlays." }
+
+        val payload = JSONObject()
+            .put("mode", "generate_overlay_set")
+            .put("text", cleanPrompt)
+            .put("breaking_style", breakingStyle.wire)
+
+        val json = postRigJson(
+            url = "$baseUrl/v1/ai-assist",
+            body = payload,
+            label = "AI overlay set generation",
+            readTimeoutSec = 90L
+        )
+        val arr = json.optJSONArray("overlays")
+            ?: throw IllegalStateException("Server /v1/ai-assist did not return an overlays array.")
+        val items = buildList {
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val headline = obj.optNullableString("headline") ?: continue
+                add(
+                    GeneratedOverlayBriefResult(
+                        kind = OverlayObjectKind.fromRaw(obj.optNullableString("kind")),
+                        breakingStyle = BreakingNewsStyle.fromWire(
+                            obj.optNullableString("breaking_style") ?: breakingStyle.wire
+                        ),
+                        headline = headline,
+                        subline = obj.optNullableString("subline").orEmpty(),
+                        calloutStat = obj.optNullableString("callout_stat").orEmpty(),
+                        durationSec = obj.optInt("duration_sec", 5).coerceIn(2, 15)
+                    )
+                )
+            }
+        }
+        if (items.isEmpty()) {
+            throw IllegalStateException("AI overlay set returned zero valid overlays.")
+        }
+        items
     }
 
     override suspend fun requestRemotionInstall(

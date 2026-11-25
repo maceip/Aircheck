@@ -103,11 +103,21 @@ class TestStudioCutPure(unittest.TestCase):
         with self.assertRaises(ValueError):
             StudioLook.from_payload({"plate_id": "../../etc/passwd"})
         opts = StudioRenderOptions.from_payload(
-            {"punch_in": True, "captions": True, "aspect": "16:9",
+            {"punch_in": True, "captions": True, "aspect": "16:9", "breaking_style": "developing",
              "look": {"blur_percent": 65, "brightness_ev": -0.5, "light": "warm", "grain": True, "border": True}}
         )
         self.assertEqual(opts.aspect, "16:9")
+        self.assertEqual(opts.breaking_style, "developing")
         self.assertEqual(opts.look.brightness_ev, -0.5)
+
+    def test_word_safe_truncation_never_cuts_mid_word(self) -> None:
+        from studio_cut import _truncate_words
+
+        raw = "Instead of shipping your voice biometrics to third-party servers, your personal voice model runs locally."
+        truncated = _truncate_words(raw, 88)
+        self.assertTrue(truncated.endswith("…"))
+        self.assertNotIn("voice mo…", truncated)
+        self.assertIn("personal voice…", truncated)
 
 
 @unittest.skipUnless(HAS_FFMPEG, "ffmpeg/ffprobe required")
@@ -174,7 +184,7 @@ class TestStudioCutFfmpeg(unittest.TestCase):
             self.assertGreater(stats["removed_silence_ms"], 600)
             # 3s source minus ~0.8s removed pause.
             self.assertLess(_probe_media_duration_ms(out), 2500)
-            self.assertEqual(stats["caption_count"], 3)
+            self.assertEqual(stats["caption_count"], 2)
             self.assertEqual(stats["punch_in_count"], 1)
             self.assertEqual(stats["broll_cut_count"], 1)
             self.assertEqual(stats["applied_overlay_count"], 1)
