@@ -797,6 +797,81 @@ class ClipStudioV5ViewModelTest {
     }
 
     @Test
+    fun openStoryInCorePipeline_sanitizesCardPromptChrome_truncatesAtWordBoundary_andCreatesDistinctCardPerStory() = runTest {
+        val studioVm = buildStudioVm("http://127.0.0.1:9")
+        waitFor { studioVm.uiState.value.projects.isNotEmpty() }
+
+        assertEquals(
+            "Stop paying. Start editing locally.",
+            StudioViewModel.sanitizeCardQuoteHeadline("Text card reading: 'Stop paying. Start editing locally.'")
+        )
+        assertEquals(
+            "Own the silicon once.",
+            StudioViewModel.sanitizeCardQuoteHeadline("Quote card reading: \"Own the silicon once.\"")
+        )
+        assertEquals(
+            "Card fees drop 50% locally.",
+            StudioViewModel.sanitizeCardQuoteHeadline("Card fees drop 50% locally.")
+        )
+        val truncated = StudioViewModel.sanitizeCardQuoteHeadline(
+            "On-screen text: Stop paying monthly for cloud servers when your phone edits locally on silicon."
+        )
+        assertTrue("Expected <= 56 chars, got ${truncated.length}: $truncated", truncated.length <= 56)
+        assertTrue("Expected word-boundary ellipsis, got: $truncated", truncated.endsWith("…"))
+        assertFalse("Must not contain prompt prefix: $truncated", truncated.lowercase().contains("on-screen text"))
+
+        // Story 1: creates clean QUOTE_BRIEF without "Text card reading:" prefix
+        studioVm.openStoryInCorePipeline(
+            plainText = "Hook one. Detail two. Shift three. Payoff four.",
+            headline = "Story One",
+            shotPlan = listOf(
+                listOf(ShotSpec(id = "a0", type = ShotType.FACE, prompt = "Anchor")),
+                listOf(ShotSpec(id = "a1", type = ShotType.CARD, prompt = "Text card reading: 'Stop paying. Start editing locally.'"))
+            )
+        )
+        waitFor {
+            studioVm.uiState.value.corePipelineSession.title == "Story One" &&
+                studioVm.uiState.value.corePipelineSession.selectedOverlayIds.isNotEmpty()
+        }
+        val firstOverlayId = studioVm.uiState.value.corePipelineSession.selectedOverlayIds.single()
+        val firstOverlay = localRepo.listSavedNewsroomOverlays().first { it.id == firstOverlayId }
+        assertEquals("Stop paying. Start editing locally.", firstOverlay.headline)
+
+        // Story 2 with a DIFFERENT card prompt: must create and select a NEW overlay, never reuse Story 1's card!
+        studioVm.consumeOpenCorePipelineEvent()
+        studioVm.openStoryInCorePipeline(
+            plainText = "Second story hook. Second story payoff.",
+            headline = "Story Two",
+            shotPlan = listOf(
+                listOf(ShotSpec(id = "b0", type = ShotType.FACE, prompt = "Anchor")),
+                listOf(ShotSpec(id = "b1", type = ShotType.CARD, prompt = "Title card: \"Buy the silicon once.\""))
+            )
+        )
+        waitFor {
+            studioVm.uiState.value.openCorePipelineEvent &&
+                studioVm.uiState.value.corePipelineSession.title == "Story Two"
+        }
+        val secondOverlayId = studioVm.uiState.value.corePipelineSession.selectedOverlayIds.single()
+        assertFalse("New story card must not blindly reuse prior story's overlay", firstOverlayId == secondOverlayId)
+        val allSaved = localRepo.listSavedNewsroomOverlays()
+        assertEquals(2, allSaved.size)
+        assertEquals("Buy the silicon once.", allSaved.first { it.id == secondOverlayId }.headline)
+
+        // Re-opening with identical card headline reuses the matching overlay without duplicating
+        studioVm.consumeOpenCorePipelineEvent()
+        studioVm.openStoryInCorePipeline(
+            plainText = "Second story revised.",
+            headline = "Story Two Revised",
+            shotPlan = listOf(
+                listOf(ShotSpec(id = "c0", type = ShotType.CARD, prompt = "Buy the silicon once."))
+            )
+        )
+        waitFor { studioVm.uiState.value.openCorePipelineEvent }
+        assertEquals(secondOverlayId, studioVm.uiState.value.corePipelineSession.selectedOverlayIds.single())
+        assertEquals(2, localRepo.listSavedNewsroomOverlays().size)
+    }
+
+    @Test
     fun sparkSeedAudioPlayback_showsHonestToastWhenMissing_andPlaysRealWavFileCleanly() = runTest {
         val vm = buildDraftVm("http://127.0.0.1:9")
         assertFalse(vm.uiState.value.isPlayingSeedAudio)

@@ -692,15 +692,21 @@ class StudioViewModel internal constructor(
             } else {
                 val cardShot = shotPlan.flatten().firstOrNull { it.type == ShotType.CARD }
                 if (cardShot != null) {
+                    val fallbackQuote = mappedClauses.lastOrNull()?.spokenText ?: effectiveHeadline
+                    val quoteHeadline = sanitizeCardQuoteHeadline(
+                        rawPrompt = cardShot.prompt,
+                        fallbackText = fallbackQuote,
+                        maxChars = 56
+                    )
+                    val quoteSubline = truncateOnWordBoundary(effectiveHeadline, maxChars = 56)
                     val existingOverlays = localRepo.listSavedNewsroomOverlays()
-                    val existingQuote = existingOverlays.firstOrNull { it.kind == OverlayObjectKind.QUOTE_BRIEF }
+                    val existingQuote = existingOverlays.firstOrNull {
+                        it.kind == OverlayObjectKind.QUOTE_BRIEF &&
+                            it.headline.equals(quoteHeadline, ignoreCase = true)
+                    }
                     if (existingQuote != null) {
                         selectedOverlayIds = listOf(existingQuote.id)
-                    } else {
-                        val quoteHeadline = cardShot.prompt.trim()
-                            .ifBlank { mappedClauses.lastOrNull()?.spokenText ?: effectiveHeadline }
-                            .take(48)
-                        val quoteSubline = effectiveHeadline.take(56)
+                    } else if (quoteHeadline.isNotEmpty()) {
                         val cardOverlay = SavedNewsroomOverlay(
                             kind = OverlayObjectKind.QUOTE_BRIEF,
                             breakingStyle = BreakingNewsStyle.CLEAN,
@@ -1905,6 +1911,44 @@ class StudioViewModel internal constructor(
     companion object {
         const val MAC_RIG_POLL_INTERVAL_MS: Long = 2_500L
         private const val MAX_CORE_UNDO: Int = 40
+        private val CARD_PROMPT_PREFIX_REGEX = Regex(
+            "(?i)^(?:(?:text|quote|stat|title)\\s+card(?:\\s+(?:reading|saying|showing|with))?|" +
+                "on[-\\s]screen\\s+(?:text|quote|card)(?:\\s+(?:reading|saying|showing|with))?|" +
+                "card\\s+(?:reading|saying|showing|text)|" +
+                "card\\s*[:\\-–—])\\s*[:\\-–—]?\\s*"
+        )
+        private val QUOTE_CHARS = charArrayOf('"', '\'', '“', '”', '‘', '’')
+
+        internal fun sanitizeCardQuoteHeadline(
+            rawPrompt: String,
+            fallbackText: String = "",
+            maxChars: Int = 56
+        ): String {
+            val primary = stripCardPromptChrome(rawPrompt)
+            val chosen = primary.ifEmpty { stripCardPromptChrome(fallbackText) }
+            return truncateOnWordBoundary(chosen, maxChars = maxChars)
+        }
+
+        private fun stripCardPromptChrome(raw: String): String {
+            var current = raw.trim().replace(Regex("\\s+"), " ")
+            repeat(3) {
+                val unquoted = current.trim(*QUOTE_CHARS).trim()
+                val stripped = CARD_PROMPT_PREFIX_REGEX.replaceFirst(unquoted, "").trim(*QUOTE_CHARS).trim()
+                if (stripped == current) return@repeat
+                current = stripped
+            }
+            return current
+        }
+
+        internal fun truncateOnWordBoundary(text: String, maxChars: Int = 56): String {
+            val normalized = text.trim().replace(Regex("\\s+"), " ")
+            if (normalized.length <= maxChars) return normalized
+            val budget = (maxChars - 1).coerceAtLeast(1)
+            val slice = normalized.substring(0, budget)
+            val lastSpace = slice.lastIndexOf(' ')
+            val cut = if (lastSpace >= 12) slice.substring(0, lastSpace) else slice
+            return cut.trimEnd(' ', ',', ';', ':', '-', '–', '—') + "…"
+        }
 
         internal fun applyShotPlanToClauses(
             clauses: List<CoreStoryClause>,

@@ -712,14 +712,12 @@ private fun TranscriptWordsPane(
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = "edited · voice not synced",
+                            text = if (broll) "edited · voice not synced · b-roll" else "edited · voice not synced",
                             style = mono(12.sp, Cs.Amber),
                             maxLines = 1
                         )
                     }
-                }
-
-                if (broll && editingClause != idx) {
+                } else if (broll && editingClause != idx) {
                     Row(
                         modifier = Modifier
                             .padding(start = 52.dp, top = 6.dp)

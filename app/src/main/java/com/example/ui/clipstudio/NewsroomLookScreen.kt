@@ -207,7 +207,7 @@ fun NewsroomLookScreen(
                 onDismissNotice = vm::dismissNotice
             )
 
-            // 232dp sunken #000 live preview
+            // 206dp sunken #000 live preview (sized so BLUR + BRIGHTNESS + 3-way LIGHT all fit unclipped above the dock)
             VideoLookPreviewPanel(
                 look = draft,
                 breakingStyle = breakingStyle,
@@ -217,7 +217,7 @@ fun NewsroomLookScreen(
 
             // Sunken 3-way `background` · `title` · `cards` segmented control
             CsSegmentedRow(
-                modifier = Modifier.padding(start = 10.dp, top = 12.dp, end = 10.dp)
+                modifier = Modifier.padding(start = 10.dp, top = 10.dp, end = 10.dp)
             ) {
                 val tabs = listOf(
                     Triple(0, "background", Icons.Sharp.Wallpaper),
@@ -228,7 +228,7 @@ fun NewsroomLookScreen(
                     CsSegment(
                         selected = tab == idx,
                         onClick = { tab = idx },
-                        height = 48.dp,
+                        height = 44.dp,
                         modifier = Modifier.testTag("cs_newsroom_tab_$idx")
                     ) { tint ->
                         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
@@ -243,8 +243,8 @@ fun NewsroomLookScreen(
                     .weight(1f)
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
-                    .padding(start = 12.dp, top = 16.dp, end = 12.dp, bottom = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                    .padding(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 when (tab) {
                     0 -> LookBackgroundTab(
@@ -350,7 +350,7 @@ private fun VideoLookPreviewPanel(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 10.dp)
-            .height(232.dp)
+            .height(206.dp)
             .sunkenPanel(radius = 18.dp)
             .testTag("cs_look_canvas")
     ) {
@@ -478,7 +478,7 @@ private fun LookBackgroundTab(
     )
 
     // 3. LIGHT 3-way segmented control (`warm` · `neutral` · `cool`)
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("LIGHT", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
         CsSegmentedRow {
             val lightChoices = listOf(
@@ -595,7 +595,7 @@ private fun LookStepperSlider(
         modifier = Modifier
             .fillMaxWidth()
             .testTag(tag),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Row(
             modifier = Modifier
@@ -615,7 +615,7 @@ private fun LookStepperSlider(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(48.dp),
+                .height(44.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
@@ -623,9 +623,9 @@ private fun LookStepperSlider(
                 icon = Icons.Sharp.Remove,
                 contentDescription = "Decrease $label",
                 onClick = onDecrement,
-                size = 48.dp,
-                radius = 24.dp,
-                iconSize = 24.dp,
+                size = 44.dp,
+                radius = 22.dp,
+                iconSize = 22.dp,
                 modifier = Modifier.testTag("${tag}_dec")
             )
 
@@ -653,9 +653,9 @@ private fun LookStepperSlider(
                 icon = Icons.Sharp.Add,
                 contentDescription = "Increase $label",
                 onClick = onIncrement,
-                size = 48.dp,
-                radius = 24.dp,
-                iconSize = 24.dp,
+                size = 44.dp,
+                radius = 22.dp,
+                iconSize = 22.dp,
                 modifier = Modifier.testTag("${tag}_inc")
             )
         }
@@ -805,11 +805,23 @@ private fun LookCardsTab(
                 style = sans(14.sp, Cs.Muted, 20.sp)
             )
         } else {
+            val hasVoicedTiming = session.clauses.any { it.endMs > 0L }
             attachedOverlays.forEachIndexed { idx, ovl ->
-                val startMs = resolveCardAppearanceMs(session.clauses, idx, attachedOverlays.size)
+                val cleanHeadline = StudioViewModel.sanitizeCardQuoteHeadline(
+                    rawPrompt = ovl.headline,
+                    fallbackText = ovl.headline,
+                    maxChars = 56
+                )
+                val summaryLine = if (hasVoicedTiming) {
+                    val startMs = resolveCardAppearanceMs(session.clauses, idx, attachedOverlays.size)
+                    "\"$cleanHeadline\" appears at ${mmss(startMs)} for ${ovl.durationSec} seconds."
+                } else {
+                    "\"$cleanHeadline\" · shown for ${ovl.durationSec} seconds once voiced."
+                }
                 Text(
-                    text = "\"${ovl.headline}\" appears at ${mmss(startMs)} for ${ovl.durationSec} seconds.",
-                    style = sans(14.sp, Cs.Muted, 20.sp)
+                    text = summaryLine,
+                    style = sans(14.sp, Cs.Muted, 20.sp),
+                    modifier = Modifier.testTag("cs_attached_card_line_$idx")
                 )
             }
         }
@@ -820,6 +832,11 @@ private fun LookCardsTab(
             Text("SAVED CARDS", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
             allCards.forEach { ovl ->
                 val attached = ovl.id in session.selectedOverlayIds
+                val cleanHeadline = StudioViewModel.sanitizeCardQuoteHeadline(
+                    rawPrompt = ovl.headline,
+                    fallbackText = ovl.headline,
+                    maxChars = 56
+                )
                 CsKey(
                     onClick = { vm.toggleSavedOverlayForPipeline(ovl.id) },
                     role = if (attached) KeyRole.DOWN else KeyRole.STD,
@@ -838,7 +855,7 @@ private fun LookCardsTab(
                         modifier = Modifier.size(18.dp)
                     )
                     Text(
-                        text = ovl.headline,
+                        text = cleanHeadline,
                         style = sans(15.sp, tint, 20.sp),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
