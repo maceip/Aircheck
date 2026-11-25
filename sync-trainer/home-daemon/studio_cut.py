@@ -583,7 +583,7 @@ def compose_studio_cut(
             draw.rounded_rectangle([box[:2], box[2:]], radius=int(12 * scale), fill=(16, 19, 27, 255), outline=(235, 235, 239, 210), width=2)
             draw.rectangle([(box[0], box[1]), (box[0] + int(6 * scale), box[3])], fill=active_accent)
             draw.text((box[0] + int(26 * scale), box[1] + int(24 * scale)), "B-ROLL CUTAWAY", font=f_tag, fill=active_accent)
-            chars = max(14, int(28 * (box[2] - box[0]) / 648))
+            chars = max(14, int(26 * (box[2] - box[0]) / max(1.0, 648.0 * scale)))
             for li, line in enumerate(_wrap(caption, chars)[:5]):
                 draw.text(
                     (box[0] + int(26 * scale), box[1] + int(76 * scale) + li * int(50 * scale)),
@@ -614,7 +614,7 @@ def compose_studio_cut(
                 png = work_dir / f"caption_{idx}.png"
                 img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
                 draw = ImageDraw.Draw(img)
-                chars = max(16, int(36 * width / 720))
+                chars = max(16, int(34 * width / max(1.0, 720.0 * scale)))
                 lines = _wrap(spoken, chars)[-3:]
                 line_h = int(36 * scale)
                 band_h = line_h * len(lines) + int(24 * scale)
@@ -680,7 +680,10 @@ def compose_studio_cut(
         left = int(width * 0.045)
         right = int(width * (0.58 if width < height else 0.50))
         top = int(height * 0.095)
-        card_h = int(148 * scale)
+        h_lines = _wrap(headline, 23)[:2] if headline else []
+        s_lines = _wrap(subline, 28)[:2] if subline else []
+        sub_y = top + int(46 * scale) + len(h_lines) * int(32 * scale) + int(4 * scale)
+        card_h = max(int(148 * scale), (sub_y - top) + len(s_lines) * int(26 * scale) + int(16 * scale))
         draw.rounded_rectangle(
             [(left, top), (right, top + card_h)],
             radius=int(8 * scale),
@@ -691,16 +694,20 @@ def compose_studio_cut(
         draw.rectangle([(left, top), (left + int(5 * scale), top + card_h)], fill=ovl_accent)
         kicker_txt = f"QUOTE CARD · {stat.upper()}" if stat else "QUOTE CARD"
         draw.text((left + int(18 * scale), top + int(14 * scale)), kicker_txt, font=f_tag, fill=ovl_accent)
-        if headline:
-            draw.text((left + int(18 * scale), top + int(46 * scale)), headline, font=f_body, fill=(255, 255, 255, 255))
-        if subline:
-            for li, s_line in enumerate(_wrap(subline, 28)[:2]):
-                draw.text(
-                    (left + int(18 * scale), top + int(84 * scale) + li * int(26 * scale)),
-                    s_line,
-                    font=f_tag,
-                    fill=(176, 180, 192, 255),
-                )
+        for li, h_line in enumerate(h_lines):
+            draw.text(
+                (left + int(18 * scale), top + int(44 * scale) + li * int(32 * scale)),
+                h_line,
+                font=f_body,
+                fill=(255, 255, 255, 255),
+            )
+        for li, s_line in enumerate(s_lines):
+            draw.text(
+                (left + int(18 * scale), sub_y + li * int(26 * scale)),
+                s_line,
+                font=f_tag,
+                fill=(176, 180, 192, 255),
+            )
         img.save(png)
         timed_pngs.append((png, start_s, max(start_s + 0.25, end_s)))
         overlay_count += 1
