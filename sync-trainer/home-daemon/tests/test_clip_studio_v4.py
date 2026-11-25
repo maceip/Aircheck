@@ -205,6 +205,48 @@ class TestStudioCutFfmpeg(unittest.TestCase):
                     plates_dir=root / "plates", probe_duration_ms=_probe_media_duration_ms,
                 )
 
+    def test_compose_studio_cut_preserves_1080p_and_48khz(self) -> None:
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "head_1080p.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=navy:s=1080x1920:r=25:d=2.400",
+                    "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=2.400",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-ar", "48000", "-b:a", "256k",
+                    str(src),
+                ],
+                check=True,
+                timeout=30,
+            )
+            out = root / "cut_1080p.mp4"
+            stats = compose_studio_cut(
+                src_mp4=src,
+                out_mp4=out,
+                work_dir=root,
+                clauses=[
+                    {"id": "c0", "spoken_text": "Anchor lead.", "start_ms": 0, "end_ms": 1200},
+                    {"id": "c1", "spoken_text": "Cutaway proof.", "start_ms": 1200, "end_ms": 2400, "segment_mode": "BROLL_CUTAWAY"},
+                ],
+                overlays=[{"kind": "LOWER_THIRD", "breaking_style": "breaking", "headline": "1080P DESK", "subline": "STUDIO VERIFIED", "duration_sec": 3}],
+                options=StudioRenderOptions.from_payload({"captions": True, "aspect": "9:16"}),
+                plates_dir=root / "plates",
+                probe_duration_ms=_probe_media_duration_ms,
+            )
+            self.assertEqual(_probe_dims(out), (1080, 1920))
+            self.assertEqual(stats["broll_cut_count"], 1)
+            self.assertEqual(stats["applied_overlay_count"], 1)
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "default=nw=1:nk=1", str(out)],
+                capture_output=True, text=True, check=True, timeout=15,
+            )
+            self.assertEqual(probe.stdout.strip(), "48000")
+
 
 class _RigServerBase(unittest.TestCase):
     setUp = _tdp.TestDraftingPassesHttpServer.setUp

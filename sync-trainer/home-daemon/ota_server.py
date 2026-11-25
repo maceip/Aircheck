@@ -2334,7 +2334,7 @@ class RenderJobManager:
                         "-acodec",
                         "pcm_s16le",
                         "-ar",
-                        "44100",
+                        "48000",
                         "-ac",
                         "1",
                         str(staged_wav),
@@ -2646,6 +2646,15 @@ def _distribute_clause_timings(
     return out
 
 
+def _probe_mp4_canvas_916(mp4_path: Path) -> tuple[int, int, float]:
+    from studio_cut import _probe_video_dims
+
+    sw, sh = _probe_video_dims(mp4_path)
+    if max(sw, sh) >= 1920 or min(sw, sh) >= 1080:
+        return (1080, 1920, 1.5)
+    return (720, 1280, 1.0)
+
+
 def _compose_broll_and_saved_overlays_mp4(
     *,
     src_mp4: Path,
@@ -2657,13 +2666,19 @@ def _compose_broll_and_saved_overlays_mp4(
     """Chops talking head into B-roll cutaway windows + optional saved news-brief overlays via PIL + ffmpeg."""
     from PIL import Image, ImageDraw, ImageFont
 
+    cw, ch, sc = _probe_mp4_canvas_916(src_mp4)
+    pip_w = int(round(236 * sc)) - (int(round(236 * sc)) % 2)
+    pip_h = int(round(316 * sc)) - (int(round(316 * sc)) % 2)
+    pip_x = cw - pip_w - int(round(36 * sc))
+    pip_y = int(round(56 * sc))
+
     total_ms = max(1000, _probe_media_duration_ms(src_mp4))
     repo_root = Path(__file__).resolve().parents[2]
     font_bold_path = repo_root / "app" / "src" / "main" / "res" / "font" / "space_grotesk.ttf"
     try:
-        f_title = ImageFont.truetype(str(font_bold_path), 40)
-        f_body = ImageFont.truetype(str(font_bold_path), 28)
-        f_tag = ImageFont.truetype(str(font_bold_path), 22)
+        f_title = ImageFont.truetype(str(font_bold_path), int(round(40 * sc)))
+        f_body = ImageFont.truetype(str(font_bold_path), int(round(28 * sc)))
+        f_tag = ImageFont.truetype(str(font_bold_path), int(round(22 * sc)))
     except Exception:
         f_title = ImageFont.load_default()
         f_body = ImageFont.load_default()
@@ -2685,11 +2700,17 @@ def _compose_broll_and_saved_overlays_mp4(
             continue
         caption = str(item.get("broll_caption") or item.get("spoken_text") or "").strip()[:88]
         png_path = work_dir / f"broll_plate_{idx}.png"
-        img = Image.new("RGBA", (720, 1280), (10, 12, 18, 245))
+        img = Image.new("RGBA", (cw, ch), (10, 12, 18, 245))
         draw = ImageDraw.Draw(img)
         # B-roll evidence card framed below the top-right corner talking-head PiP window
-        draw.rounded_rectangle([(36, 420), (684, 960)], radius=18, fill=(18, 22, 32, 255), outline=(184, 255, 0, 220), width=3)
-        draw.text((64, 456), "B-ROLL CUTAWAY", font=f_tag, fill=(184, 255, 0, 255))
+        draw.rounded_rectangle(
+            [(int(36 * sc), int(420 * sc)), (int(684 * sc), int(960 * sc))],
+            radius=int(18 * sc),
+            fill=(18, 22, 32, 255),
+            outline=(184, 255, 0, 220),
+            width=max(2, int(round(3 * sc))),
+        )
+        draw.text((int(64 * sc), int(456 * sc)), "B-ROLL CUTAWAY", font=f_tag, fill=(184, 255, 0, 255))
         words = caption.split()
         lines: list[str] = []
         cur = ""
@@ -2704,9 +2725,20 @@ def _compose_broll_and_saved_overlays_mp4(
         if cur:
             lines.append(cur)
         for line_i, line_txt in enumerate(lines[:5]):
-            draw.text((64, 524 + line_i * 58), line_txt, font=f_title, fill=(244, 246, 250, 255))
-        # Crisp broadcast frame for the live top-right corner talking-head PiP (236x316 at x=448, y=56)
-        draw.rounded_rectangle([(444, 52), (688, 376)], radius=16, fill=(0, 0, 0, 0), outline=(184, 255, 0, 235), width=3)
+            draw.text(
+                (int(64 * sc), int((524 + line_i * 58) * sc)),
+                line_txt,
+                font=f_title,
+                fill=(244, 246, 250, 255),
+            )
+        # Crisp broadcast frame for the live top-right corner talking-head PiP
+        draw.rounded_rectangle(
+            [(pip_x - 4, pip_y - 4), (pip_x + pip_w + 4, pip_y + pip_h + 4)],
+            radius=int(16 * sc),
+            fill=(0, 0, 0, 0),
+            outline=(184, 255, 0, 235),
+            width=max(2, int(round(3 * sc))),
+        )
         img.save(png_path)
         timed_pngs.append((png_path, start_ms / 1000.0, end_ms / 1000.0, True))
         broll_count += 1
@@ -2723,15 +2755,21 @@ def _compose_broll_and_saved_overlays_mp4(
         start_s = min(max(0.0, idx * 1.5), max(0.0, (total_ms / 1000.0) - 0.5))
         end_s = min(total_ms / 1000.0, start_s + float(dur_sec))
         png_path = work_dir / f"saved_ovl_{idx}.png"
-        img = Image.new("RGBA", (720, 1280), (0, 0, 0, 0))
+        img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.rounded_rectangle([(32, 1020), (688, 1208)], radius=14, fill=(12, 15, 22, 232), outline=(0, 136, 255, 220), width=2)
+        draw.rounded_rectangle(
+            [(int(32 * sc), int(1020 * sc)), (int(688 * sc), int(1208 * sc))],
+            radius=int(14 * sc),
+            fill=(12, 15, 22, 232),
+            outline=(0, 136, 255, 220),
+            width=max(2, int(round(2 * sc))),
+        )
         if stat:
-            draw.text((54, 1038), stat.upper(), font=f_tag, fill=(184, 255, 0, 255))
+            draw.text((int(54 * sc), int(1038 * sc)), stat.upper(), font=f_tag, fill=(184, 255, 0, 255))
         if headline:
-            draw.text((54, 1074), headline.upper(), font=f_title, fill=(255, 255, 255, 255))
+            draw.text((int(54 * sc), int(1074 * sc)), headline.upper(), font=f_title, fill=(255, 255, 255, 255))
         if subline:
-            draw.text((54, 1134), subline, font=f_body, fill=(180, 192, 210, 255))
+            draw.text((int(54 * sc), int(1134 * sc)), subline, font=f_body, fill=(180, 192, 210, 255))
         img.save(png_path)
         timed_pngs.append((png_path, start_s, max(start_s + 0.25, end_s), False))
         overlay_count += 1
@@ -2747,11 +2785,11 @@ def _compose_broll_and_saved_overlays_mp4(
     has_pip_cutaway = any(is_cutaway for _, _, _, is_cutaway in timed_pngs)
     if has_pip_cutaway:
         filter_parts = [
-            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30,split=2[v0][vsrc_pip]",
-            "[vsrc_pip]scale=236:316:force_original_aspect_ratio=increase,crop=236:316[vpip]",
+            f"[0:v]scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch},fps=30,split=2[v0][vsrc_pip]",
+            f"[vsrc_pip]scale={pip_w}:{pip_h}:force_original_aspect_ratio=increase,crop={pip_w}:{pip_h}[vpip]",
         ]
     else:
-        filter_parts = ["[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30[v0]"]
+        filter_parts = [f"[0:v]scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch},fps=30[v0]"]
 
     step_label = "v0"
     broll_enable_terms: list[str] = []
@@ -2768,7 +2806,7 @@ def _compose_broll_and_saved_overlays_mp4(
         pip_enable = "+".join(broll_enable_terms)
         final_v = "vfinal_pip"
         filter_parts.append(
-            f"[{step_label}][vpip]overlay=448:56:shortest=1:enable='{pip_enable}'[{final_v}]"
+            f"[{step_label}][vpip]overlay={pip_x}:{pip_y}:shortest=1:enable='{pip_enable}'[{final_v}]"
         )
     else:
         final_v = step_label
@@ -2791,14 +2829,16 @@ def _compose_broll_and_saved_overlays_mp4(
             "yuv420p",
             "-c:a",
             "aac",
+            "-ar",
+            "48000",
             "-b:a",
-            "192k",
+            "256k",
             "-movflags",
             "+faststart",
             str(out_mp4),
         ]
     )
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300)
     if proc.returncode != 0 or not out_mp4.is_file() or out_mp4.stat().st_size == 0:
         raise RuntimeError(_summarize_subprocess_error("ffmpeg chop-broll", proc))
     return out_mp4, broll_count, overlay_count
@@ -2815,8 +2855,9 @@ def _burn_breaking_news_chyron(
     """Burns a broadcast LIVE bug + BREAKING NEWS lower-third chyron onto a 9:16 MP4."""
     from PIL import Image, ImageDraw, ImageFont
 
+    cw, ch, sc = _probe_mp4_canvas_916(src_mp4)
     overlay_png = out_mp4.with_suffix(".chyron.png")
-    img = Image.new("RGBA", (720, 1280), (0, 0, 0, 0))
+    img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -2828,34 +2869,34 @@ def _burn_breaking_news_chyron(
             return ImageFont.truetype(str(p), size)
         return ImageFont.load_default()
 
-    f_live = _load_font(font_mono_path, 22)
-    f_loc = _load_font(font_mono_path, 20)
-    f_tag = _load_font(font_mono_path, 20)
-    f_head = _load_font(font_bold_path, 30)
-    f_sub = _load_font(font_mono_path, 20)
+    f_live = _load_font(font_mono_path, int(round(22 * sc)))
+    f_loc = _load_font(font_mono_path, int(round(20 * sc)))
+    f_tag = _load_font(font_mono_path, int(round(20 * sc)))
+    f_head = _load_font(font_bold_path, int(round(30 * sc)))
+    f_sub = _load_font(font_mono_path, int(round(20 * sc)))
 
     if show_live_bug:
-        draw.rectangle([28, 46, 152, 88], fill=(217, 4, 41, 245))
-        draw.ellipse([42, 60, 56, 74], fill=(255, 255, 255, 255))
-        draw.text((64, 54), "LIVE", font=f_live, fill=(255, 255, 255, 255))
-        draw.rectangle([152, 46, 396, 88], fill=(10, 12, 16, 224))
-        draw.text((168, 55), "AIRCHECK NEWS", font=f_loc, fill=(232, 238, 245, 255))
+        draw.rectangle([int(28 * sc), int(46 * sc), int(152 * sc), int(88 * sc)], fill=(217, 4, 41, 245))
+        draw.ellipse([int(42 * sc), int(60 * sc), int(56 * sc), int(74 * sc)], fill=(255, 255, 255, 255))
+        draw.text((int(64 * sc), int(54 * sc)), "LIVE", font=f_live, fill=(255, 255, 255, 255))
+        draw.rectangle([int(152 * sc), int(46 * sc), int(396 * sc), int(88 * sc)], fill=(10, 12, 16, 224))
+        draw.text((int(168 * sc), int(55 * sc)), "AIRCHECK NEWS", font=f_loc, fill=(232, 238, 245, 255))
 
     clean_head = headline.strip().upper()[:38]
     clean_sub = subline.strip().upper()[:48]
     if clean_head or clean_sub:
-        draw.rectangle([24, 1040, 260, 1080], fill=(217, 4, 41, 245))
-        draw.text((40, 1048), "BREAKING NEWS", font=f_tag, fill=(255, 255, 255, 255))
-        draw.rectangle([24, 1080, 696, 1204], fill=(9, 12, 18, 232))
-        draw.rectangle([24, 1080, 32, 1204], fill=(184, 255, 0, 255))
+        draw.rectangle([int(24 * sc), int(1040 * sc), int(260 * sc), int(1080 * sc)], fill=(217, 4, 41, 245))
+        draw.text((int(40 * sc), int(1048 * sc)), "BREAKING NEWS", font=f_tag, fill=(255, 255, 255, 255))
+        draw.rectangle([int(24 * sc), int(1080 * sc), int(696 * sc), int(1204 * sc)], fill=(9, 12, 18, 232))
+        draw.rectangle([int(24 * sc), int(1080 * sc), int(32 * sc), int(1204 * sc)], fill=(184, 255, 0, 255))
         if clean_head:
-            draw.text((48, 1096), clean_head, font=f_head, fill=(255, 255, 255, 255))
+            draw.text((int(48 * sc), int(1096 * sc)), clean_head, font=f_head, fill=(255, 255, 255, 255))
         if clean_sub:
-            draw.text((48, 1148), clean_sub, font=f_sub, fill=(184, 255, 0, 255))
+            draw.text((int(48 * sc), int(1148 * sc)), clean_sub, font=f_sub, fill=(184, 255, 0, 255))
 
     img.save(overlay_png)
     filter_complex = (
-        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30[bg];"
+        f"[0:v]scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch},fps=30[bg];"
         "[bg][1:v]overlay=0:0:shortest=1[v];"
         "[0:a]loudnorm=I=-16:TP=-1.5:LRA=9[a]"
     )
@@ -2887,9 +2928,9 @@ def _burn_breaking_news_chyron(
             "-c:a",
             "aac",
             "-b:a",
-            "192k",
+            "256k",
             "-ar",
-            "44100",
+            "48000",
             "-ac",
             "1",
             "-movflags",
@@ -2899,6 +2940,7 @@ def _burn_breaking_news_chyron(
         capture_output=True,
         text=True,
         check=False,
+        timeout=300,
     )
     if proc.returncode != 0 or not out_mp4.is_file() or out_mp4.stat().st_size == 0:
         raise RuntimeError(_summarize_subprocess_error("ffmpeg chyron burn", proc))

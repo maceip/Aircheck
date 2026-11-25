@@ -38,6 +38,37 @@ GRAIN_STRENGTH = 10
 LOOK_LIGHT_VALUES = ("warm", "cool", "neutral")
 BREAKING_STYLE_VALUES = ("breaking", "developing", "exclusive", "alert_stat", "clean")
 ASPECT_SIZES: dict[str, tuple[int, int]] = {"9:16": (720, 1280), "16:9": (1280, 720)}
+ASPECT_SIZES_1080P: dict[str, tuple[int, int]] = {"9:16": (1080, 1920), "16:9": (1920, 1080)}
+
+
+def _probe_video_dims(mp4_path: Path) -> tuple[int, int]:
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
+            str(mp4_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        return (0, 0)
+    try:
+        streams = json.loads(proc.stdout or "{}").get("streams") or []
+        if streams:
+            return (int(streams[0].get("width") or 0), int(streams[0].get("height") or 0))
+    except Exception:
+        pass
+    return (0, 0)
 
 _SILENCE_START_RE = re.compile(r"silence_start:\s*(-?[0-9.]+)")
 _SILENCE_END_RE = re.compile(r"silence_end:\s*(-?[0-9.]+)")
@@ -477,7 +508,9 @@ def compose_studio_cut(
 ) -> dict[str, Any]:
     from PIL import Image, ImageDraw
 
-    width, height = ASPECT_SIZES[options.aspect]
+    src_w, src_h = _probe_video_dims(src_mp4)
+    size_map = ASPECT_SIZES_1080P if (max(src_w, src_h) >= 1920 or min(src_w, src_h) >= 1080) else ASPECT_SIZES
+    width, height = size_map[options.aspect]
     scale = min(width, height) / 720.0
     f_title, f_body, f_tag = _fonts(scale)
     total_ms = max(1000, int(probe_duration_ms(src_mp4)))
@@ -520,11 +553,17 @@ def compose_studio_cut(
 
     # Corner talking-head PiP dimensions (top-right broadcast inset during B-roll cutaways)
     if width < height:
-        pip_w, pip_h = 236, 316
-        pip_x, pip_y = width - pip_w - 36, 56
+        pip_w = int(round(236 * scale))
+        pip_h = int(round(316 * scale))
+        pip_w -= pip_w % 2
+        pip_h -= pip_h % 2
+        pip_x, pip_y = width - pip_w - int(round(36 * scale)), int(round(56 * scale))
     else:
-        pip_w, pip_h = 320, 220
-        pip_x, pip_y = width - pip_w - 40, 36
+        pip_w = int(round(320 * scale))
+        pip_h = int(round(220 * scale))
+        pip_w -= pip_w % 2
+        pip_h -= pip_h % 2
+        pip_x, pip_y = width - pip_w - int(round(40 * scale)), int(round(36 * scale))
 
     for idx, item in enumerate(clause_dicts):
         window = remapped_window(item)
@@ -842,14 +881,16 @@ def compose_studio_cut(
             "yuv420p",
             "-c:a",
             "aac",
+            "-ar",
+            "48000",
             "-b:a",
-            "192k",
+            "256k",
             "-movflags",
             "+faststart",
             str(out_mp4),
         ]
     )
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=300)
     if proc.returncode != 0 or not out_mp4.is_file() or out_mp4.stat().st_size == 0:
         tail = (proc.stderr or "").strip().splitlines()[-4:]
         raise RuntimeError("ffmpeg studio cut failed: " + " | ".join(tail))
