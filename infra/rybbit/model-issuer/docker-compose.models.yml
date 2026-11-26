@@ -1,0 +1,29 @@
+# Presigned-URL issuer for Aircheck on-device model weights (private DO Spaces bucket).
+#
+# Joins the Rybbit compose network so Caddy can reach it at model-issuer:8090; it publishes no host
+# port. Credentials come from /opt/rybbit-deploy/model-issuer/.env (a READ-ONLY Spaces key scoped to
+# the aircheck-models bucket), never from the repo.
+#
+# Usage (from /opt/rybbit-deploy/model-issuer):
+#   docker compose -f docker-compose.models.yml up -d --build
+services:
+  model-issuer:
+    build: .
+    container_name: model-issuer
+    restart: unless-stopped
+    env_file: .env
+    networks: [rybbit_default]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/models/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  rybbit_default:
+    external: true
