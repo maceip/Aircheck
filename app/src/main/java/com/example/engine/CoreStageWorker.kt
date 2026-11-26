@@ -83,7 +83,7 @@ class CoreStageWorker(context: Context, params: WorkerParameters) : CoroutineWor
             .setContentText(label)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setProgress(100, (progress * 100).toInt(), progress <= 0f)
+            .setProgress(100, (progress * 100).toInt().coerceIn(0, 100), progress <= 0f)
             .setContentIntent(openAppIntent())
             .build()
         return ForegroundInfo(NOTIF_PROGRESS_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING)

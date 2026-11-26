@@ -62,7 +62,8 @@ class CoreStageRunner(
     suspend fun tts(localMicWav: File?, onProgress: (Float, String) -> Unit): String {
         val base = session()
         val progressLabel = if (localMicWav != null) "Preparing recorded voiceover…" else "Voicing script on your Mac studio…"
-        onProgress(0.1f, progressLabel)
+        // No measured progress yet: report "unknown" (negative) so the UI shows no invented percent.
+        onProgress(PROGRESS_UNKNOWN, progressLabel)
         val result = coordinator.synthesizeStage1Tts(
             session = base,
             rigBaseUrl = rigUrl(),
@@ -70,9 +71,10 @@ class CoreStageRunner(
             task = handle(
                 base,
                 KEY_TTS,
-                onProgress = { detail -> onProgress(0.4f, detail.ifBlank { progressLabel }) },
+                // Label-only updates (on-phone voice, rig stage text) carry no fraction.
+                onProgress = { detail -> onProgress(PROGRESS_UNKNOWN, detail.ifBlank { progressLabel }) },
                 onProgressFraction = { fraction, detail ->
-                    onProgress(fraction.coerceIn(0.1f, 0.98f), detail.ifBlank { progressLabel })
+                    onProgress(fraction.coerceIn(0.01f, 0.98f), detail.ifBlank { progressLabel })
                 }
             )
         )
@@ -123,7 +125,7 @@ class CoreStageRunner(
         val base = session()
         val look: NewsroomLook? = lookIdOverride?.let { localRepo.getNewsroomLook(it) } ?: localRepo.getDefaultNewsroomLook()
         val signature = base.cutSignature(look)
-        onProgress(0.05f, "Preparing studio cut…")
+        onProgress(PROGRESS_UNKNOWN, "Preparing studio cut…")
         val result = coordinator.chopTalkingHeadIntoBrollStage4(
             session = base,
             rigBaseUrl = rigUrl(),
@@ -133,9 +135,9 @@ class CoreStageRunner(
             task = handle(
                 base,
                 KEY_CUT,
-                onProgress = { detail -> onProgress(0.5f, detail.ifBlank { "Rendering studio cut on rig…" }) },
+                onProgress = { detail -> onProgress(PROGRESS_UNKNOWN, detail.ifBlank { "Rendering studio cut on rig…" }) },
                 onProgressFraction = { fraction, detail ->
-                    onProgress(fraction.coerceIn(0.1f, 0.98f), detail.ifBlank { "Rendering studio cut on rig…" })
+                    onProgress(fraction.coerceIn(0.01f, 0.98f), detail.ifBlank { "Rendering studio cut on rig…" })
                 }
             )
         )
@@ -156,7 +158,7 @@ class CoreStageRunner(
     suspend fun backdrop(lookId: String, prompt: String, onProgress: (Float, String) -> Unit): String {
         val key = "backdrop:$lookId"
         val base = session()
-        onProgress(0.2f, "Generating backdrop plate on rig…")
+        onProgress(PROGRESS_UNKNOWN, "Generating backdrop plate on rig…")
         val health = gateway.resolveAndCheckHealth(rigUrl())
         val plate = try {
             gateway.generateBackdropPlate(health.resolvedUrl, prompt, base.renderOptions.aspect, handle(base, key, onProgress = {}))
@@ -173,12 +175,15 @@ class CoreStageRunner(
 
     /** Re-voices edited clauses, then re-renders the talking head to match. */
     suspend fun resync(photoSha: String?, onProgress: (Float, String) -> Unit): String {
-        tts(null) { p, l -> onProgress(p * 0.3f, l) }
-        head(photoSha) { p, l -> onProgress(0.3f + p * 0.7f, l) }
+        // Two sequential stages: forward each stage's own measured fraction (or "unknown").
+        tts(null) { p, l -> onProgress(p, l) }
+        head(photoSha) { p, l -> onProgress(p, l) }
         return "Edited words re-voiced and talking head re-rendered."
     }
 
     companion object {
+        /** Progress value meaning "running, but no measured fraction": the UI shows no percent. */
+        const val PROGRESS_UNKNOWN = -1f
         const val KEY_TTS = "tts"
         const val KEY_CUT = "chop"
     }

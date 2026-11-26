@@ -401,7 +401,8 @@ fun CutScreen(
                 state.exportState == ExportState.EXPORTING -> "exporting…"
                 else -> state.coreStageStatusLabel ?: "rendering…"
             }
-            val busyFraction = if (state.isCoreStageBusy) state.coreStageProgress else null
+            // Only a measured fraction is shown; unknown progress (<= 0) renders the label with no percent.
+            val busyFraction = if (state.isCoreStageBusy) state.coreStageProgress.takeIf { it > 0f } else null
 
             val dockSpec = resolveCutPrimarySpec(
                 hasClauses = session.clauses.isNotEmpty(),
