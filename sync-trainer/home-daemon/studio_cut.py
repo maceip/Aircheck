@@ -624,8 +624,9 @@ def generate_broll_images(
         work.mkdir(parents=True, exist_ok=True)
         try:
             full_prompt = (
-                f"{prompt}. Photorealistic broadcast news b-roll still, cinematic lighting, "
-                "no text, no captions, no logos, no watermark."
+                f"{prompt}. Photorealistic broadcast news b-roll still, cinematic lighting. "
+                "No news presenter or anchor, no person talking to camera, no words, letters, titles, "
+                "captions, logos or watermark anywhere in the image."
             )
             _generate_image_into(full_prompt, aspect, work, bl_bin=bl_bin, runner=runner)
             produced = sorted(p for p in work.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
