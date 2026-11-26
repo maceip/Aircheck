@@ -117,8 +117,7 @@ android {
 
   packaging {
     jniLibs {
-      // true: libomni_runner.so (on-phone voice runner) must be extracted to nativeLibraryDir to be executable
-      useLegacyPackaging = true
+      useLegacyPackaging = false
     }
     resources {
       excludes += "/META-INF/{AL2.0,LGPL2.1}"

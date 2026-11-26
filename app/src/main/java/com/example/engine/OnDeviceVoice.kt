@@ -6,8 +6,8 @@ import java.util.concurrent.TimeUnit
 
 /**
  * On-phone voice: Ryan's run9 Qwen3-TTS fine-tune (trained off-device on Azure), exported to LiteRT
- * and run by Google's LiteRT-LM `omni_runner`, shipped in the APK as `libomni_runner.so` and executed
- * from `nativeLibraryDir` (no Termux, no proot).
+ * and run by Google's LiteRT-LM `omni_runner`, shipped uncompressed in the APK as `libomni_runner.so`
+ * and executed through `/system/bin/linker64` straight from the APK (no Termux, no proot, no extraction).
  *
  * Model files live in `noBackupFilesDir/voice/run9_litert/` (talker, MTP drafter, codec decoder,
  * embeddings, tokenizer, `voices/demo_speaker.bin` = Ryan's 1024-d speaker vector).
@@ -16,12 +16,16 @@ class OnDeviceVoice(private val context: Context) {
 
     val modelDir: File get() = File(context.noBackupFilesDir, "voice/run9_litert")
 
-    private val runner: File get() = File(context.applicationInfo.nativeLibraryDir, "libomni_runner.so")
+    private val apk: File get() = File(context.applicationInfo.sourceDir)
+    private val runnerInApk: String get() = "${apk.absolutePath}!/lib/arm64-v8a/libomni_runner.so"
+    private fun runnerPresent(): Boolean = runCatching {
+        java.util.zip.ZipFile(apk).use { it.getEntry("lib/arm64-v8a/libomni_runner.so") != null }
+    }.getOrDefault(false)
 
     fun missingFiles(): List<String> = REQUIRED_FILES.filter { name ->
         val f = File(modelDir, name)
         !f.isFile || f.length() == 0L
-    } + (if (runner.isFile) emptyList() else listOf("libomni_runner.so"))
+    } + (if (runnerPresent()) emptyList() else listOf("libomni_runner.so"))
 
     fun isInstalled(): Boolean = missingFiles().isEmpty()
 
@@ -33,7 +37,8 @@ class OnDeviceVoice(private val context: Context) {
         val cache = File(context.cacheDir, "omni_cache").apply { mkdirs() }
         onProgress("Synthesizing your voice on this phone…")
         val proc = ProcessBuilder(
-            runner.absolutePath,
+            "/system/bin/linker64",
+            runnerInApk,
             "--model_name=qwen3-tts",
             "--model_path=${modelDir.absolutePath}",
             "--backend=cpu",
