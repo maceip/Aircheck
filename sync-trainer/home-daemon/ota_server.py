@@ -2228,6 +2228,8 @@ class RenderJobManager:
                 options=options,
                 plates_dir=self.plates_dir,
                 probe_duration_ms=_probe_media_duration_ms,
+                bl_bin=DEFAULT_BL_BIN,
+                image_runner=self._plate_runner,
             )
             studio_stats["remotion_used"] = False
             studio_stats["renderer"] = "ffmpeg"

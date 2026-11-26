@@ -418,6 +418,68 @@ def _generate_backdrop_via_openai(
     return out_file
 
 
+def _generate_image_into(
+    full_prompt: str,
+    aspect: str,
+    work: Path,
+    *,
+    bl_bin: Path,
+    runner: Any = None,
+    openai_base_url: str | None = None,
+) -> None:
+    """Generates one image for ``full_prompt`` into ``work`` (Bailian `bl`, then OpenAI if `bl` fails)."""
+    if runner is not None:
+        runner(full_prompt, aspect, work)
+    else:
+        bl_error: str | None = None
+        resolved = bl_bin if bl_bin.is_file() else Path(shutil.which("bl") or "")
+        if resolved.is_file():
+            proc = subprocess.run(
+                [
+                    str(resolved),
+                    "image",
+                    "generate",
+                    "--prompt",
+                    full_prompt,
+                    "--size",
+                    aspect,
+                    "--n",
+                    "1",
+                    "--watermark",
+                    "false",
+                    "--out-dir",
+                    str(work),
+                    "--out-prefix",
+                    "plate",
+                    "--output",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=240,
+            )
+            if proc.returncode != 0:
+                tail = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()[-3:]
+                bl_error = "bl image generate failed: " + " | ".join(tail)
+        else:
+            bl_error = "Bailian CLI `bl` is not available on this Mac rig."
+
+        if bl_error is not None:
+            if os.environ.get("OPENAI_API_KEY", "").strip():
+                try:
+                    _generate_backdrop_via_openai(
+                        full_prompt,
+                        aspect,
+                        work,
+                        base_url=openai_base_url,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(f"{bl_error}; OpenAI image provider failed: {exc}") from exc
+            else:
+                raise RuntimeError(bl_error)
+
+
 def generate_backdrop_plate(
     *,
     prompt: str,
@@ -444,56 +506,7 @@ def generate_backdrop_plate(
             f"{clean_prompt}. Empty studio backdrop for a news presenter, no people, no text, "
             "photographic, shallow depth of field."
         )
-        if runner is not None:
-            runner(full_prompt, aspect, work)
-        else:
-            bl_error: str | None = None
-            resolved = bl_bin if bl_bin.is_file() else Path(shutil.which("bl") or "")
-            if resolved.is_file():
-                proc = subprocess.run(
-                    [
-                        str(resolved),
-                        "image",
-                        "generate",
-                        "--prompt",
-                        full_prompt,
-                        "--size",
-                        aspect,
-                        "--n",
-                        "1",
-                        "--watermark",
-                        "false",
-                        "--out-dir",
-                        str(work),
-                        "--out-prefix",
-                        "plate",
-                        "--output",
-                        "json",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=240,
-                )
-                if proc.returncode != 0:
-                    tail = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()[-3:]
-                    bl_error = "bl image generate failed: " + " | ".join(tail)
-            else:
-                bl_error = "Bailian CLI `bl` is not available on this Mac rig."
-
-            if bl_error is not None:
-                if os.environ.get("OPENAI_API_KEY", "").strip():
-                    try:
-                        _generate_backdrop_via_openai(
-                            full_prompt,
-                            aspect,
-                            work,
-                            base_url=openai_base_url,
-                        )
-                    except Exception as exc:
-                        raise RuntimeError(f"{bl_error}; OpenAI image provider failed: {exc}") from exc
-                else:
-                    raise RuntimeError(bl_error)
+        _generate_image_into(full_prompt, aspect, work, bl_bin=bl_bin, runner=runner, openai_base_url=openai_base_url)
         produced = sorted(
             p for p in work.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
         )
@@ -586,6 +599,49 @@ def _between(windows: Sequence[tuple[float, float]]) -> str:
     return "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in windows)
 
 
+def generate_broll_images(
+    prompts: list[str],
+    aspect: str,
+    cache_dir: Path,
+    *,
+    bl_bin: Path,
+    runner: Any = None,
+) -> dict[str, Path]:
+    """One photoreal b-roll still per shot prompt, cached by prompt so re-cuts don't regenerate."""
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    from PIL import Image
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def one(prompt: str) -> tuple[str, Path]:
+        key = hashlib.sha1(f"{aspect}|{prompt}".encode("utf-8")).hexdigest()[:16]
+        target = cache_dir / f"broll_{key}.png"
+        if target.is_file():
+            return prompt, target
+        work = cache_dir / f".work_{key}_{uuid.uuid4().hex[:6]}"
+        work.mkdir(parents=True, exist_ok=True)
+        try:
+            full_prompt = (
+                f"{prompt}. Photorealistic broadcast news b-roll still, cinematic lighting, "
+                "no text, no captions, no logos, no watermark."
+            )
+            _generate_image_into(full_prompt, aspect, work, bl_bin=bl_bin, runner=runner)
+            produced = sorted(p for p in work.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
+            if not produced:
+                raise RuntimeError(f"No b-roll image was produced for: {prompt[:80]}")
+            with Image.open(produced[0]) as img:
+                img.convert("RGB").save(target, format="PNG")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        return prompt, target
+
+    unique = list(dict.fromkeys(p for p in prompts if p.strip()))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return dict(pool.map(one, unique))
+
+
 def compose_studio_cut(
     *,
     src_mp4: Path,
@@ -596,8 +652,10 @@ def compose_studio_cut(
     options: StudioRenderOptions,
     plates_dir: Path,
     probe_duration_ms: Any,
+    bl_bin: Path | None = None,
+    image_runner: Any = None,
 ) -> dict[str, Any]:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageOps
 
     src_w, src_h = _probe_video_dims(src_mp4)
     size_map = ASPECT_SIZES_1080P if (max(src_w, src_h) >= 1920 or min(src_w, src_h) >= 1080) else ASPECT_SIZES
@@ -670,6 +728,20 @@ def compose_studio_cut(
         pip_h -= pip_h % 2
         pip_x, pip_y = width - pip_w - int(round(40 * scale)), int(round(36 * scale))
 
+    broll_prompts = [
+        str(it.get("broll_caption") or it.get("spoken_text") or "").strip()
+        for it in clause_dicts
+        if str(it.get("segment_mode") or "").upper() == "BROLL_CUTAWAY"
+    ]
+    broll_images: dict[str, Path] = {}
+    if broll_prompts:
+        if bl_bin is None and image_runner is None:
+            raise RuntimeError("B-roll needs an image generator, but none is configured on the rig.")
+        broll_images = generate_broll_images(
+            broll_prompts, options.aspect, plates_dir / "broll_cache",
+            bl_bin=bl_bin or Path("bl"), runner=image_runner,
+        )
+
     for idx, item in enumerate(clause_dicts):
         window = remapped_window(item)
         if window is None:
@@ -677,35 +749,11 @@ def compose_studio_cut(
         start_s, end_s = window[0] / 1000.0, window[1] / 1000.0
         mode = str(item.get("segment_mode") or "TALKING_HEAD").upper()
         if mode == "BROLL_CUTAWAY":
-            caption = _truncate_words(str(item.get("broll_caption") or item.get("spoken_text") or ""), 110)
+            shot_prompt = str(item.get("broll_caption") or item.get("spoken_text") or "").strip()
             png = work_dir / f"broll_plate_{idx}.png"
-            img = Image.new("RGBA", (width, height), (10, 12, 18, 244))
+            with Image.open(broll_images[shot_prompt]) as still:
+                img = ImageOps.fit(still.convert("RGBA"), (width, height), method=Image.LANCZOS)
             draw = ImageDraw.Draw(img)
-            if framing == "split":
-                if width < height:
-                    box = (int(width * 0.045), int(height * 0.10), int(width * 0.955), int(height * 0.46))
-                else:
-                    box = (int(width * 0.03), int(height * 0.14), int(width * 0.47), int(height * 0.72))
-            elif framing == "full":
-                if width < height:
-                    box = (int(width * 0.045), int(height * 0.16), int(width * 0.955), int(height * 0.72))
-                else:
-                    box = (int(width * 0.045), int(height * 0.14), int(width * 0.955), int(height * 0.72))
-            elif width < height:
-                box = (int(width * 0.045), int(height * 0.31), int(width * 0.955), int(height * 0.69))
-            else:
-                box = (int(width * 0.045), int(height * 0.14), int(width * 0.67), int(height * 0.68))
-            draw.rounded_rectangle([box[:2], box[2:]], radius=int(12 * scale), fill=(16, 19, 27, 255), outline=(235, 235, 239, 210), width=2)
-            draw.rectangle([(box[0], box[1]), (box[0] + int(6 * scale), box[3])], fill=active_accent)
-            draw.text((box[0] + int(26 * scale), box[1] + int(24 * scale)), "B-ROLL CUTAWAY", font=f_tag, fill=active_accent)
-            chars = max(14, int(26 * (box[2] - box[0]) / max(1.0, 648.0 * scale)))
-            for li, line in enumerate(_wrap(caption, chars)[:5]):
-                draw.text(
-                    (box[0] + int(26 * scale), box[1] + int(76 * scale) + li * int(50 * scale)),
-                    line,
-                    font=f_title,
-                    fill=(244, 246, 250, 255),
-                )
             if framing == "pip":
                 # Crisp broadcast frame around top-right live talking-head PiP window
                 draw.rounded_rectangle(

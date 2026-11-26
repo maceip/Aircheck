@@ -60,6 +60,14 @@ def _probe_dims(path: Path) -> tuple[int, int]:
     return int(w), int(h)
 
 
+
+def _fake_image_runner(full_prompt: str, aspect: str, work: Path) -> None:
+    """Stands in for Bailian/OpenAI image generation in tests (no network)."""
+    from PIL import Image
+
+    Image.new("RGB", (576, 1024) if aspect == "9:16" else (1024, 576), (20, 60, 90)).save(work / "img.png")
+
+
 class TestStudioCutPure(unittest.TestCase):
     def test_parse_silencedetect_ignores_edges_and_pads(self) -> None:
         log = (
@@ -177,6 +185,7 @@ class TestStudioCutFfmpeg(unittest.TestCase):
                 ),
                 plates_dir=plates,
                 probe_duration_ms=_probe_media_duration_ms,
+                image_runner=_fake_image_runner,
             )
             self.assertTrue(out.is_file())
             self.assertEqual(_probe_dims(out), (1280, 720))
@@ -237,6 +246,7 @@ class TestStudioCutFfmpeg(unittest.TestCase):
                 options=StudioRenderOptions.from_payload({"captions": True, "aspect": "9:16"}),
                 plates_dir=root / "plates",
                 probe_duration_ms=_probe_media_duration_ms,
+                image_runner=_fake_image_runner,
             )
             self.assertEqual(_probe_dims(out), (1080, 1920))
             self.assertEqual(stats["broll_cut_count"], 1)
