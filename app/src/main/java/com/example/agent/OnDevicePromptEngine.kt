@@ -25,9 +25,13 @@ import com.google.mlkit.genai.prompt.CreateCachedContextRequest
 import com.google.mlkit.genai.prompt.GenerateContentRequest
 import com.google.mlkit.genai.prompt.Generation
 import com.google.mlkit.genai.prompt.GenerativeModel
+import com.google.mlkit.genai.prompt.ModelPreference
+import com.google.mlkit.genai.prompt.ModelReleaseStage
 import com.google.mlkit.genai.prompt.PromptPrefix
 import com.google.mlkit.genai.prompt.TextPart
 import com.google.mlkit.genai.prompt.generateTypedContentRequest
+import com.google.mlkit.genai.prompt.generationConfig
+import com.google.mlkit.genai.prompt.modelConfig
 import com.google.mlkit.genai.schema.annotations.Generable
 import com.google.mlkit.genai.schema.annotations.Guide
 import kotlinx.coroutines.CancellationException
@@ -188,10 +192,12 @@ class OnDevicePromptEngine internal constructor(
     private val modelProvider: () -> GenerativeModel,
     private val completionOverride: (suspend (prompt: String) -> String)?,
     private val availabilityOverride: (suspend () -> OnDevicePromptAvailability)? = null,
+    /** Attribution stamped on every result, so a fallback-served draft is never labelled as AICore. */
+    private val engineLlmMeta: LlmMetaDto = NANO_LLM_META,
 ) : OnDeviceLlmBackend {
 
     constructor(
-        modelProvider: () -> GenerativeModel = { Generation.getClient() }
+        modelProvider: () -> GenerativeModel = { aicoreFullModelClient() }
     ) : this(modelProvider = modelProvider, completionOverride = null, availabilityOverride = null)
 
     @Volatile
@@ -208,6 +214,22 @@ class OnDevicePromptEngine internal constructor(
         val existing = cachedModel
         if (existing != null) return existing
         return modelProvider().also { cachedModel = it }
+    }
+
+    /**
+     * The AICore base model actually serving this engine (e.g. `nano-v4-full`), or null when the
+     * system model is unavailable. Read from AICore; never guessed.
+     */
+    suspend fun baseModelName(): String? {
+        if (completionOverride != null) return null
+        return try {
+            val gm = model()
+            if (gm.checkStatus() == FeatureStatus.AVAILABLE) gm.getBaseModelName() else null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     override suspend fun checkAvailability(): OnDevicePromptAvailability {
@@ -414,7 +436,7 @@ class OnDevicePromptEngine internal constructor(
             AnglesResponse(
                 extractedAngles = extracted,
                 blindspots = blindspots,
-                llmMeta = NANO_LLM_META
+                llmMeta = engineLlmMeta
             )
         }
     }
@@ -468,7 +490,7 @@ class OnDevicePromptEngine internal constructor(
                 targetSec = payload.targetSec.takeIf { it > 0 } ?: clampedSec,
                 wordBudget = payload.wordBudget.takeIf { it > 0 } ?: expectedWordBudget,
                 beats = beats,
-                llmMeta = NANO_LLM_META
+                llmMeta = engineLlmMeta
             )
         }
     }
@@ -521,7 +543,7 @@ class OnDevicePromptEngine internal constructor(
             }
             SynthesizeResponse(
                 candidates = candidates,
-                llmMeta = NANO_LLM_META
+                llmMeta = engineLlmMeta
             )
         }
     }
@@ -571,7 +593,7 @@ class OnDevicePromptEngine internal constructor(
                 targetSec = payload.targetSec.takeIf { it > 0 } ?: clampedSec,
                 wordBudget = payload.wordBudget.takeIf { it > 0 } ?: expectedWordBudget,
                 candidates = candidates,
-                llmMeta = NANO_LLM_META
+                llmMeta = engineLlmMeta
             )
         }
     }
@@ -610,7 +632,7 @@ class OnDevicePromptEngine internal constructor(
             BrushSwapResponse(
                 alternatives = alts,
                 nudge = nudge?.wire,
-                llmMeta = NANO_LLM_META
+                llmMeta = engineLlmMeta
             )
         }
     }
@@ -648,7 +670,7 @@ class OnDevicePromptEngine internal constructor(
             SeamHealResponse(
                 text = verifiedText,
                 lockParityPreserved = true,
-                llmMeta = NANO_LLM_META
+                llmMeta = engineLlmMeta
             )
         }
     }
@@ -680,7 +702,7 @@ class OnDevicePromptEngine internal constructor(
             DensityResponse(
                 text = verifiedText,
                 lockParityPreserved = true,
-                llmMeta = NANO_LLM_META
+                llmMeta = engineLlmMeta
             )
         }
     }
@@ -711,7 +733,7 @@ class OnDevicePromptEngine internal constructor(
             RewriteResponse(
                 text = verifiedText,
                 lockParityPreserved = true,
-                llmMeta = NANO_LLM_META
+                llmMeta = engineLlmMeta
             )
         }
     }
@@ -916,6 +938,27 @@ Respond ONLY with valid ASCII JSON:
     }
 
     companion object {
+        /**
+         * AICore client pinned to the FULL (highest-quality, TPU-accelerated) stable system model.
+         * On Pixel 11 Pro XL this resolves to `nano-v4-full`; the default client resolves to the
+         * smaller `nano-v4-fast`.
+         */
+        fun aicoreFullModelClient(): GenerativeModel = Generation.getClient(
+            generationConfig {
+                modelConfig = modelConfig {
+                    preference = ModelPreference.FULL
+                    releaseStage = ModelReleaseStage.STABLE
+                }
+            }
+        )
+
+        /** Attribution for drafts served by the downloaded LiteRT-LM Gemma fallback. */
+        val LITERT_GEMMA_LLM_META: LlmMetaDto = LlmMetaDto(
+            provider = "local_aicore_nano",
+            model = "gemma-4-E2B-it (LiteRT-LM fallback)",
+            isLocal = true
+        )
+
         val NANO_LLM_META: LlmMetaDto = LlmMetaDto(
             provider = "local_aicore_nano",
             model = "gemini-nano",

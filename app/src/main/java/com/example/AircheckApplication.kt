@@ -167,12 +167,13 @@ class AircheckContainer(context: Context) {
     }
     private val liteRtBackedPromptEngine: OnDevicePromptEngine by lazy {
         OnDevicePromptEngine(
-            modelProvider = { Generation.getClient() },
+            modelProvider = { OnDevicePromptEngine.aicoreFullModelClient() }, // unused: completion is overridden
             // Weights load lazily on the first fallback pass, only once the verified file exists.
             completionOverride = { prompt ->
                 liteRtDraftingEngine.generate(modelDownloadManager.modelFile(), prompt)
             },
             availabilityOverride = { liteRtAvailability(modelDownloadManager.isReady()) },
+            engineLlmMeta = OnDevicePromptEngine.LITERT_GEMMA_LLM_META,
         )
     }
     val onDeviceLlmBackend: OnDeviceLlmBackend by lazy {
@@ -182,6 +183,16 @@ class AircheckContainer(context: Context) {
             fallbackReady = { modelDownloadManager.isReady() },
         )
     }
+    /** Stop any transfer, unload the engine, then remove the Gemma weights and partial files. */
+    fun deleteGemmaFallback() {
+        com.example.engine.ModelDownloadWorker.pause(appContext)
+        appScope.launch {
+            runCatching { liteRtDraftingEngine.release() }
+            modelDownloadManager.delete()
+            pipelineLogger.info("model", "gemma fallback deleted")
+        }
+    }
+
     val llmStageRouter: LlmStageRouter by lazy {
         LlmStageRouter(
             profileStore = profileStore,

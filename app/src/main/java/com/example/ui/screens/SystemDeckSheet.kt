@@ -84,6 +84,7 @@ fun SystemDeckSheet(
     onTestRigConnection: (String) -> Unit,
     onOpenNewsroomStudio: () -> Unit = {},
     onLoadActivity: (suspend () -> List<String>)? = null,
+    onDeviceModels: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
@@ -330,6 +331,11 @@ fun SystemDeckSheet(
                         }
                     }
                 }
+            }
+
+            // On-device drafting models (AICore system model + downloadable Gemma fallback)
+            if (onDeviceModels != null) {
+                item(key = "on_device_models_card") { onDeviceModels() }
             }
 
             // 3. Storage & Reset

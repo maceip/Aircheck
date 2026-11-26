@@ -93,14 +93,14 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
         private const val CHANNEL_ID = "aircheck_models"
         private const val NOTIF_ID = 4711
 
-        /** Start or resume the download; an already-running download is kept. */
+        /** Start or resume now. REPLACE so a tap also skips a pending retry backoff; bytes on disk are kept. */
         fun enqueue(context: Context) {
             val req = OneTimeWorkRequestBuilder<ModelDownloadWorker>()
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.SECONDS)
                 .addTag(UNIQUE)
                 .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE, ExistingWorkPolicy.KEEP, req)
+            WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE, ExistingWorkPolicy.REPLACE, req)
         }
 
         /** Pause: stops the transfer and keeps the partial file for a later resume. */

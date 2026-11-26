@@ -201,6 +201,26 @@ fun AircheckApp(
                             showNewsroomStudioModal = true
                         },
                         onLoadActivity = { studioViewModel.loadActivityLog() },
+                        onDeviceModels = {
+                            val appCtx = androidx.compose.ui.platform.LocalContext.current.applicationContext
+                            val container = (appCtx as AircheckApplication).container
+                            val download by container.modelDownloadManager.state.collectAsStateWithLifecycle()
+                            val aicore by androidx.compose.runtime.produceState(
+                                initialValue = com.example.ui.screens.AicoreModelStatus(checked = false, baseModelName = null)
+                            ) {
+                                value = com.example.ui.screens.AicoreModelStatus(
+                                    checked = true,
+                                    baseModelName = container.onDevicePromptEngine.baseModelName()
+                                )
+                            }
+                            com.example.ui.screens.OnDeviceModelsCard(
+                                aicore = aicore,
+                                download = download,
+                                onDownload = { com.example.engine.ModelDownloadWorker.enqueue(appCtx) },
+                                onPause = { com.example.engine.ModelDownloadWorker.pause(appCtx) },
+                                onDelete = { container.deleteGemmaFallback() }
+                            )
+                        },
                         onClose = { showSettingsModal = false }
                     )
                 }
