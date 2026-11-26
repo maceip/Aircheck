@@ -96,6 +96,7 @@ data class StudioUiState(
     val coreStageStatusLabel: String? = null,
     val coreStageOp: String? = null,
     val isRecordingCoreVoiceover: Boolean = false,
+    val coreVoiceoverRmsLevel: Float = 0f,
     val newsroomLooks: List<NewsroomLook> = emptyList(),
     val isGeneratingBackdrop: Boolean = false,
     val isGeneratingOverlaySet: Boolean = false,
@@ -245,6 +246,18 @@ class StudioViewModel internal constructor(
         viewModelScope.launch {
             casStore.totalBytesFlow.collect { bytes ->
                 _uiState.update { it.copy(casTotalBytes = bytes) }
+            }
+        }
+
+        viewModelScope.launch {
+            vadAudioEngine.liveRmsLevel.collect { rms ->
+                _uiState.update { state ->
+                    if (state.isRecordingCoreVoiceover || rms == 0f) {
+                        state.copy(coreVoiceoverRmsLevel = rms)
+                    } else {
+                        state
+                    }
+                }
             }
         }
 
@@ -864,13 +877,14 @@ class StudioViewModel internal constructor(
 
     fun startCoreVoiceoverRecording() {
         if (_uiState.value.isRecordingCoreVoiceover) return
-        _uiState.update { it.copy(isRecordingCoreVoiceover = true, errorMessage = null) }
+        _uiState.update { it.copy(isRecordingCoreVoiceover = true, coreVoiceoverRmsLevel = 0f, errorMessage = null) }
         vadAudioEngine.startMomentaryClutch(
             scope = viewModelScope,
             onError = { err ->
                 _uiState.update {
                     it.copy(
                         isRecordingCoreVoiceover = false,
+                        coreVoiceoverRmsLevel = 0f,
                         errorMessage = err
                     )
                 }
@@ -883,7 +897,7 @@ class StudioViewModel internal constructor(
         viewModelScope.launch(Dispatchers.IO) {
             val scratchWav = casStore.createTempScratchFile("core_voiceover_", "wav")
             val saved = vadAudioEngine.stopMomentaryClutch(scratchWav)
-            _uiState.update { it.copy(isRecordingCoreVoiceover = false) }
+            _uiState.update { it.copy(isRecordingCoreVoiceover = false, coreVoiceoverRmsLevel = 0f) }
             if (saved == null || !saved.exists()) {
                 _uiState.update { it.copy(errorMessage = "No voiced speech captured from microphone.") }
                 return@launch

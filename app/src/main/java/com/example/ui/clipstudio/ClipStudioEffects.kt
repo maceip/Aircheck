@@ -557,10 +557,151 @@ private val VOICE_PALETTE_DARK = arrayOf(
 )
 
 /**
+ * Maps raw 16-bit PCM microphone RMS (`0..1`, where real smartphone conversational speech ranges
+ * from `~0.015` soft voice to `~0.14+` loud/max voice) into a perceptual `0..1` voice energy value.
+ * Ambient room noise below `0.006` RMS stays cleanly gated at `0f`.
+ */
+internal fun mapMicRmsToVoiceEnergy(rawRms: Float): Float {
+    val clamped = rawRms.coerceIn(0f, 1f)
+    if (clamped <= 0.006f) return 0f
+    return ((clamped - 0.006f) / 0.134f).coerceIn(0f, 1f).pow(0.55f)
+}
+
+internal data class VoiceDitherLayout(
+    val voiceEnergy: Float,
+    val targetVisibleHeightPx: Float,
+    val maxFieldHeightPx: Float,
+    val haloHeightPx: Float,
+    val rangeRxPx: Float,
+    val rangeRyPx: Float,
+    val centerLobeHeightPx: Float,
+    val horizontalScale: Float,
+    val spread: Float
+)
+
+/**
+ * Computes screen-proportional geometry for [VoiceGlowDitherOverlay] so the dither field scales
+ * identically across every screen resolution & DPI (including 1344x2992 Pixel 11 Pro XL):
+ * - Silence (`voiceEnergy = 0`): calm listening rim (`~8.5%` of screen height).
+ * - Normal speech (`voiceEnergy ~ 0.55`): dynamic waves (`~26%` of screen height).
+ * - Max voice (`voiceEnergy = 1.0`): surges cleanly above `1/3` of screen height (`~38–40%` visible lit dither).
+ */
+internal fun computeVoiceDitherLayout(
+    canvasWidthPx: Float,
+    canvasHeightPx: Float,
+    voiceEnergy01: Float
+): VoiceDitherLayout {
+    val v = voiceEnergy01.coerceIn(0f, 1f)
+    val targetVisibleH = canvasHeightPx * (0.085f + 0.365f * v)
+    val maxFieldH = (targetVisibleH * 1.24f).coerceAtMost(canvasHeightPx * 0.58f)
+    val haloH = (targetVisibleH * 1.15f).coerceAtMost(canvasHeightPx * 0.52f)
+    val spread = 0.90f + 0.55f * v
+    return VoiceDitherLayout(
+        voiceEnergy = v,
+        targetVisibleHeightPx = targetVisibleH,
+        maxFieldHeightPx = maxFieldH,
+        haloHeightPx = haloH,
+        rangeRxPx = max(1f, canvasWidthPx * (0.58f + 0.24f * v)),
+        rangeRyPx = max(1f, maxFieldH),
+        centerLobeHeightPx = max(16f, targetVisibleH / 0.62f),
+        horizontalScale = (canvasWidthPx / 360f).coerceAtLeast(0.75f),
+        spread = spread
+    )
+}
+
+/** Balanced per-lobe height multiplier so sideways lobe flow stays organic without center-peak collapse. */
+private fun voiceLobeRelativeHeight(lb: VoiceLobe): Float = 0.86f + 0.14f * (lb.h / 46f)
+
+/** Shared 3-band voice modulation used by both [VoiceGlowDitherOverlay] and [measureVoiceDitherLitReachFraction]. */
+private fun computeVoiceBands(v: Float, clockSec: Float): FloatArray = floatArrayOf(
+    0.60f + 0.40f * v,
+    (0.55f + 0.45f * v) * (0.90f + 0.14f * sin(clockSec * 9.1f)),
+    (0.50f + 0.50f * v) * (0.86f + 0.18f * sin(clockSec * 13.7f + 2f))
+)
+
+/**
+ * Evaluates the highest lit Bayer dither pixel height as a fraction of [canvasHeightPx] (`0..1`)
+ * for a given [voiceEnergy01] and [clockSec], using the exact same field math rendered by
+ * [VoiceGlowDitherOverlay]. Used to verify mathematically & in unit tests that max voice rises
+ * strictly `>= 1/3` of screen height across all resolutions.
+ */
+internal fun measureVoiceDitherLitReachFraction(
+    canvasWidthPx: Float,
+    canvasHeightPx: Float,
+    voiceEnergy01: Float,
+    cellPitchPx: Float = 15f,
+    clockSec: Float = 0.5f
+): Float {
+    if (canvasWidthPx <= 1f || canvasHeightPx <= 1f || cellPitchPx <= 1f) return 0f
+    val layout = computeVoiceDitherLayout(canvasWidthPx, canvasHeightPx, voiceEnergy01)
+    val v = layout.voiceEnergy
+    val bands = computeVoiceBands(v, clockSec)
+    val flowOffset = (clockSec * 56f * (0.28f + 1.25f * v)) % (36f * VOICE_LOBES.size)
+    val halfRing = 36f * VOICE_LOBES.size * 0.5f
+    val lobeX = FloatArray(VOICE_LOBES.size)
+    val lobeInvW = FloatArray(VOICE_LOBES.size)
+    val lobeInvH = FloatArray(VOICE_LOBES.size)
+    for (i in VOICE_LOBES.indices) {
+        val lb = VOICE_LOBES[i]
+        var wrappedX = ((lb.xOff + flowOffset + halfRing) % (halfRing * 2f))
+        if (wrappedX < 0f) wrappedX += halfRing * 2f
+        wrappedX -= halfRing
+        lobeX[i] = canvasWidthPx * 0.5f + wrappedX * layout.spread * layout.horizontalScale * 1.05f
+        val rw = max(16f, lb.w * 1.15f * layout.spread * layout.horizontalScale)
+        val relH = voiceLobeRelativeHeight(lb)
+        val rh = max(16f, layout.centerLobeHeightPx * relH * bands[lb.band])
+        lobeInvW[i] = 1f / rw
+        lobeInvH[i] = 1f / rh
+    }
+    val cols = ceil(canvasWidthPx / cellPitchPx).toInt()
+    val rows = ceil(layout.maxFieldHeightPx / cellPitchPx).toInt()
+    val xStart = (canvasWidthPx - cols * cellPitchPx) * 0.5f
+    val domeFactor = 0.55f * 2.0f
+    val invHalfW = 2f / max(1f, canvasWidthPx)
+    val softness = 0.78f
+    var highestLitHeightPx = 0f
+    for (row in 0 until rows) {
+        val heightFromBottom = (row + 0.5f) * cellPitchPx
+        val dyBottom = -heightFromBottom
+        for (col in 0 until cols) {
+            val px = xStart + (col + 0.5f) * cellPitchPx
+            val nx = (px - canvasWidthPx * 0.5f) * invHalfW
+            val dome = 1f + domeFactor * nx * nx
+            val rx = (px - canvasWidthPx * 0.5f) / layout.rangeRxPx
+            val ry = (dyBottom / layout.rangeRyPx) * dome
+            val dMask = sqrt(rx * rx + ry * ry)
+            if (dMask >= 1f) continue
+            val maskGain = if (dMask < 0.45f) {
+                1f - 0.45f * (dMask / 0.45f)
+            } else {
+                0.55f * (1f - (dMask - 0.45f) / 0.55f)
+            }
+            var prod = 1f
+            for (i in VOICE_LOBES.indices) {
+                val lx = (px - lobeX[i]) * lobeInvW[i]
+                val ly = dyBottom * lobeInvH[i] * dome
+                val dist = sqrt(lx * lx + ly * ly) / softness
+                val b = if (dist < 1f) 1f - dist else 0f
+                prod *= (1f - b * 0.94f)
+            }
+            val rawX = (1f - prod) * maskGain * (0.55f + 0.75f * v)
+            if (rawX <= 0.005f) continue
+            val rBright = min(1f, rawX.pow(0.55f) * 1.32f)
+            val bayer = BAYER_4X4[(row and 3) * 4 + (col and 3)]
+            if (rBright >= bayer * 0.90f + 0.03f && heightFromBottom > highestLitHeightPx) {
+                highestLitHeightPx = heightFromBottom
+            }
+        }
+    }
+    return (highestLitHeightPx / canvasHeightPx).coerceIn(0f, 1f)
+}
+
+/**
  * Exact Jetpack Compose port of `libraries.dev/voice` (`voice-glow@0.5.0`, `type="mobile"`, `look="dither"`):
  * rises from the bottom edge of the screen whenever any microphone is active, driven by real live
  * microphone RMS [level] (0..1) with 4x4 ordered Bayer dithering, 5-level per-channel color quantization,
  * dome curvature, sideways lobe flow, and soft pixel-glow bloom beneath the active dither pixels.
+ * Screen-proportional geometry ensures calm low rim on silence and `>= 1/3` screen rise on max voice.
  */
 @Composable
 fun VoiceGlowDitherOverlay(
@@ -570,14 +711,14 @@ fun VoiceGlowDitherOverlay(
 ) {
     val fade by animateFloatAsState(
         targetValue = if (active) 1f else 0f,
-        animationSpec = tween(durationMillis = if (active) 320 else 420, easing = LinearEasing),
+        animationSpec = tween(durationMillis = if (active) 260 else 380, easing = LinearEasing),
         label = "voice_dither_fade"
     )
     if (fade <= 0.01f) return
 
     val latestLevel by rememberUpdatedState(level)
     var clockSec by remember { mutableFloatStateOf(0f) }
-    var smoothedLevel by remember { mutableFloatStateOf(0.12f) }
+    var smoothedEnergy by remember { mutableFloatStateOf(mapMicRmsToVoiceEnergy(level)) }
     LaunchedEffect(active) {
         var lastNanos = -1L
         while (true) {
@@ -585,14 +726,10 @@ fun VoiceGlowDitherOverlay(
                 val dt = if (lastNanos < 0L) 0.016f else ((nanos - lastNanos) / 1_000_000_000.0).toFloat().coerceIn(0f, 0.05f)
                 lastNanos = nanos
                 clockSec += dt
-                // Real live mic RMS from AudioRecord (conversational speech is ~0.015..0.16 RMS):
-                // read via rememberUpdatedState so every frame reacts immediately to live voice!
-                val raw = latestLevel.coerceIn(0f, 1f)
-                val gated = ((raw - 0.008f) / 0.135f).coerceIn(0f, 1f)
-                val perceptual = gated.pow(0.58f)
-                val target = 0.10f + 0.90f * perceptual
-                val rate = if (target > smoothedLevel) 1f / 0.055f else 1f / 0.24f
-                smoothedLevel += (target - smoothedLevel) * (1f - exp(-dt * rate))
+                // Real live 50 Hz mic RMS read through rememberUpdatedState so every frame tracks voice live!
+                val target = mapMicRmsToVoiceEnergy(latestLevel)
+                val rate = if (target > smoothedEnergy) 1f / 0.045f else 1f / 0.26f
+                smoothedEnergy += (target - smoothedEnergy) * (1f - exp(-dt * rate))
             }
         }
     }
@@ -603,21 +740,15 @@ fun VoiceGlowDitherOverlay(
             val ch = size.height
             if (cw <= 1f || ch <= 1f) return@Canvas
 
-            val densityScale = (cw / 390f).coerceIn(0.75f, 1.8f)
             val t = clockSec
-            val breathe = 0.03f * sin(t * (2f * PI.toFloat() / 5.2f))
-            val lvl = (smoothedLevel + breathe).coerceIn(0.08f, 1f)
+            val breathe = 0.025f * sin(t * (2f * PI.toFloat() / 4.8f))
+            val v = (smoothedEnergy + breathe * (1f - 0.5f * smoothedEnergy)).coerceIn(0f, 1f)
+            val layout = computeVoiceDitherLayout(cw, ch, v)
 
-            // 3 frequency bands driven from live smoothed RMS (matches voice-glow@0.5.0 band synthesis)
-            val b0 = lvl
-            val b1 = lvl * (0.72f + 0.28f * sin(t * 9.1f))
-            val b2 = lvl * (0.60f + 0.40f * sin(t * 13.7f + 2f))
-            val bands = floatArrayOf(b0, b1, b2)
+            // 3 frequency bands driven from live smoothed voice energy (shared with unit verifier)
+            val bands = computeVoiceBands(v, t)
 
-            // Mobile preset geometry — low calm rim when silent, dramatic surge when speaking
-            val reach = 0.72f + 2.75f * lvl
-            val spread = 0.88f + 0.62f * lvl
-            val flowOffset = (t * 54f * (0.25f + 1.15f * lvl)) % (36f * VOICE_LOBES.size)
+            val flowOffset = (t * 56f * (0.28f + 1.25f * v)) % (36f * VOICE_LOBES.size)
             val halfRing = 36f * VOICE_LOBES.size * 0.5f
 
             val lobeX = FloatArray(VOICE_LOBES.size)
@@ -629,24 +760,26 @@ fun VoiceGlowDitherOverlay(
                 var wrappedX = ((lb.xOff + flowOffset + halfRing) % (halfRing * 2f))
                 if (wrappedX < 0f) wrappedX += halfRing * 2f
                 wrappedX -= halfRing
-                lobeX[i] = cw * 0.5f + wrappedX * spread * densityScale * 1.15f
-                val rw = max(12f, lb.w * 1.15f * spread * densityScale)
-                val bandL = bands[lb.band].coerceAtLeast(0.12f)
-                val rh = max(14f, lb.h * 1.65f * reach * bandL * densityScale)
+                lobeX[i] = cw * 0.5f + wrappedX * layout.spread * layout.horizontalScale * 1.05f
+                val rw = max(16f, lb.w * 1.15f * layout.spread * layout.horizontalScale)
+                val bandL = bands[lb.band]
+                val relH = voiceLobeRelativeHeight(lb)
+                val rh = max(16f, layout.centerLobeHeightPx * relH * bandL)
                 lobeInvW[i] = 1f / rw
                 lobeInvH[i] = 1f / rh
                 lobeLvl[i] = bandL
             }
 
             // Soft pixel-glow ambient halo behind the dither field (voice-glow `pixelGlow`)
-            val haloHeight = min(ch * 0.40f, (135f * reach) * densityScale)
+            val haloHeight = layout.haloHeightPx
+            val haloIntensity = 0.28f + 0.72f * v
             drawRect(
                 brush = Brush.verticalGradient(
                     colors = listOf(
                         Color.Transparent,
-                        Color(0xFFFF4678).copy(alpha = 0.08f * fade * lvl),
-                        Color(0xFF3CBEFF).copy(alpha = 0.16f * fade * lvl),
-                        Color(0xFFAF46FF).copy(alpha = 0.24f * fade * lvl)
+                        Color(0xFFFF4678).copy(alpha = 0.09f * fade * haloIntensity),
+                        Color(0xFF3CBEFF).copy(alpha = 0.18f * fade * haloIntensity),
+                        Color(0xFFAF46FF).copy(alpha = 0.28f * fade * haloIntensity)
                     ),
                     startY = ch - haloHeight,
                     endY = ch
@@ -655,22 +788,19 @@ fun VoiceGlowDitherOverlay(
                 size = Size(cw, haloHeight)
             )
 
-            // 4x4 Ordered Bayer Dither Grid (exact voice-glow@0.5.0 look="dither" pixel cell engine)
-            val cellPitch = (4.8.dp.toPx()).coerceAtLeast(6f)
-            val dotSize = max(2f, cellPitch - max(1.5f, cellPitch * 0.22f))
-            val faintDotSize = dotSize * 0.42f
+            // 4x4 Ordered Bayer Dither Grid scaled proportionally across all display DPIs
+            val cellPitch = (5.2.dp.toPx()).coerceAtLeast(8f)
+            val dotSize = max(2.5f, cellPitch - max(1.6f, cellPitch * 0.22f))
+            val faintDotSize = dotSize * 0.44f
             val cols = ceil(cw / cellPitch).toInt()
-            val maxFieldH = min(ch * 0.44f, (168f * reach) * densityScale)
-            val rows = ceil(maxFieldH / cellPitch).toInt()
+            val rows = ceil(layout.maxFieldHeightPx / cellPitch).toInt()
             val xStart = (cw - cols * cellPitch) * 0.5f
 
-            val rangeRx = max(1f, 215f * spread * densityScale)
-            val rangeRy = max(1f, maxFieldH * 0.96f)
-            val domeFactor = 0.6f * 2.2f // mobile pixelDome=0.6
+            val domeFactor = 0.55f * 2.0f
             val invHalfW = 2f / max(1f, cw)
             val quantLevels = 5f
             val quantMax = quantLevels - 1f
-            val softness = 0.75f
+            val softness = 0.78f
 
             for (row in 0 until rows) {
                 val py = ch - (row + 0.5f) * cellPitch
@@ -681,14 +811,14 @@ fun VoiceGlowDitherOverlay(
                     val dome = 1f + domeFactor * nx * nx
 
                     // Elliptical range mask
-                    val rx = (px - cw * 0.5f) / rangeRx
-                    val ry = (dyBottom / rangeRy) * dome
+                    val rx = (px - cw * 0.5f) / layout.rangeRxPx
+                    val ry = (dyBottom / layout.rangeRyPx) * dome
                     val dMask = sqrt(rx * rx + ry * ry)
                     if (dMask >= 1f) continue
                     val maskGain = if (dMask < 0.45f) {
-                        1f - 0.5f * (dMask / 0.45f)
+                        1f - 0.45f * (dMask / 0.45f)
                     } else {
-                        0.5f * (1f - (dMask - 0.45f) / 0.55f)
+                        0.55f * (1f - (dMask - 0.45f) / 0.55f)
                     }
 
                     // Evaluate 7-lobe field + weighted RGB color blend
@@ -703,8 +833,8 @@ fun VoiceGlowDitherOverlay(
                         val sq = lx * lx + ly * ly
                         val dist = sqrt(sq) / softness
                         val b = if (dist < 1f) 1f - dist else 0f
-                        prod *= (1f - b * 0.92f)
-                        val wCol = exp(-sq / (0.62f * 0.62f)) * lobeLvl[i]
+                        prod *= (1f - b * 0.94f)
+                        val wCol = exp(-sq / (0.66f * 0.66f)) * lobeLvl[i]
                         if (wCol > 1e-4f) {
                             val rgb = VOICE_PALETTE_DARK[i]
                             wSum += wCol
@@ -714,23 +844,23 @@ fun VoiceGlowDitherOverlay(
                         }
                     }
 
-                    val rawX = (1f - prod) * maskGain * min(1f, (0.45f + 0.75f * lvl))
+                    val rawX = (1f - prod) * maskGain * (0.55f + 0.75f * v)
                     if (rawX <= 0.005f || wSum <= 1e-5f) continue
 
-                    val rBright = min(1f, rawX.pow(0.65f) * 1.18f)
+                    val rBright = min(1f, rawX.pow(0.55f) * 1.32f)
                     val bayer = BAYER_4X4[(row and 3) * 4 + (col and 3)]
-                    val isLit = rBright >= bayer * 0.92f + 0.03f
-                    if (!isLit && rBright < 0.07f) continue
+                    val isLit = rBright >= bayer * 0.90f + 0.03f
+                    if (!isLit && rBright < 0.06f) continue
 
-                    // Saturation boost (aa = 1.35) + white-hot core lift + 5-level Bayer color quantization
+                    // Saturation boost (1.38) + white-hot core lift + 5-level Bayer color quantization
                     val nr = rAcc / wSum
                     val ng = gAcc / wSum
                     val nb = bAcc / wSum
                     val lum = 0.2126f * nr + 0.7152f * ng + 0.0722f * nb
-                    val sr = (lum + (nr - lum) * 1.35f).coerceIn(0f, 1f)
-                    val sg = (lum + (ng - lum) * 1.35f).coerceIn(0f, 1f)
-                    val sb = (lum + (nb - lum) * 1.35f).coerceIn(0f, 1f)
-                    val hot = (max(0f, rBright - 0.7f) / 0.3f) * 0.6f
+                    val sr = (lum + (nr - lum) * 1.38f).coerceIn(0f, 1f)
+                    val sg = (lum + (ng - lum) * 1.38f).coerceIn(0f, 1f)
+                    val sb = (lum + (nb - lum) * 1.38f).coerceIn(0f, 1f)
+                    val hot = (max(0f, rBright - 0.68f) / 0.32f) * 0.65f
 
                     val qr = min(quantMax, floor((sr + (1f - sr) * hot) * quantMax + bayer)) / quantMax
                     val qg = min(quantMax, floor((sg + (1f - sg) * hot) * quantMax + bayer)) / quantMax

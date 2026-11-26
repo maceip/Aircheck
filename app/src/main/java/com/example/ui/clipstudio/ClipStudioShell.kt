@@ -111,83 +111,88 @@ fun ClipStudioShell(
 
     val activeToast = draftState.toastMessage ?: studioState.toastMessage
     val isAnyRecording = draftState.isAnyRecording || studioState.isRecordingCoreVoiceover
-    val liveMicLevel = if (draftState.isAnyRecording) {
-        draftState.liveRmsLevel
-    } else if (studioState.isRecordingCoreVoiceover) {
-        0.35f
-    } else {
-        0f
+    val liveMicLevel = when {
+        draftState.isAnyRecording -> draftState.liveRmsLevel
+        studioState.isRecordingCoreVoiceover -> studioState.coreVoiceoverRmsLevel
+        else -> 0f
     }
 
     Box(
         modifier
             .fillMaxSize()
             .background(Cs.Body)
-            .windowInsetsPadding(WindowInsets.safeDrawing)
             .testTag("clip_studio_shell")
     ) {
-        when (screen) {
-            ClipStudioScreen.SPARK -> SparkScreen(
-                state = draftState,
-                vm = draftVm,
-                onRequestMic = requestMic,
-                onOpenSettings = onOpenSettings,
-                onNavigate = navigate,
-                lastCompletedVideo = studioState.lastCompletedVideo,
-                renderGlobalOverlays = false
-            )
-            ClipStudioScreen.SCRIPT -> ScriptScreen(
-                state = draftState,
-                vm = draftVm,
-                onRequestMic = requestMic,
-                onNavigate = navigate,
-                onCreateVideo = { text ->
-                    val quote = draftState.document.attachment as? XAttachment.QuotePost
-                    studioVm.openStoryInCorePipeline(
-                        plainText = text,
-                        headline = draftState.document.arcBeats.firstOrNull()?.text.orEmpty().take(40),
-                        postCard = quote?.let { PostCardSource(it.handle, it.tweetId, it.snippet) },
-                        shotPlan = draftState.document.shotPlan
-                    )
-                    // Auto-start voicing on "make the video" so the user skips a tap + a serial wait;
-                    // the dock shows real progress and advances to the talking-head step when ready.
-                    studioVm.runCoreStage1Tts()
-                    onScreen(ClipStudioScreen.CUT)
-                },
-                renderGlobalOverlays = false
-            )
-            ClipStudioScreen.CUT -> CutScreen(
-                state = studioState,
-                vm = studioVm,
-                onOpenSettings = onOpenSettings,
-                onOpenNewsroom = { onScreen(ClipStudioScreen.NEWSROOM) },
-                onNavigate = navigate,
-                renderGlobalOverlays = false
-            )
-            ClipStudioScreen.NEWSROOM -> NewsroomLookScreen(
-                state = studioState,
-                vm = studioVm,
-                onBack = { onScreen(ClipStudioScreen.CUT) },
-                onTestOnClip = { lookId ->
-                    studioVm.runCoreStage4ChopBroll(lookIdOverride = lookId)
-                    onScreen(ClipStudioScreen.CUT)
-                },
-                onOpenOverlayBuilder = onOpenOverlayBuilder,
-                renderGlobalOverlays = false
+        Box(
+            Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+        ) {
+            when (screen) {
+                ClipStudioScreen.SPARK -> SparkScreen(
+                    state = draftState,
+                    vm = draftVm,
+                    onRequestMic = requestMic,
+                    onOpenSettings = onOpenSettings,
+                    onNavigate = navigate,
+                    lastCompletedVideo = studioState.lastCompletedVideo,
+                    renderGlobalOverlays = false
+                )
+                ClipStudioScreen.SCRIPT -> ScriptScreen(
+                    state = draftState,
+                    vm = draftVm,
+                    onRequestMic = requestMic,
+                    onNavigate = navigate,
+                    onCreateVideo = { text ->
+                        val quote = draftState.document.attachment as? XAttachment.QuotePost
+                        studioVm.openStoryInCorePipeline(
+                            plainText = text,
+                            headline = draftState.document.arcBeats.firstOrNull()?.text.orEmpty().take(40),
+                            postCard = quote?.let { PostCardSource(it.handle, it.tweetId, it.snippet) },
+                            shotPlan = draftState.document.shotPlan
+                        )
+                        // Auto-start voicing on "make the video" so the user skips a tap + a serial wait;
+                        // the dock shows real progress and advances to the talking-head step when ready.
+                        studioVm.runCoreStage1Tts()
+                        onScreen(ClipStudioScreen.CUT)
+                    },
+                    renderGlobalOverlays = false
+                )
+                ClipStudioScreen.CUT -> CutScreen(
+                    state = studioState,
+                    vm = studioVm,
+                    onOpenSettings = onOpenSettings,
+                    onOpenNewsroom = { onScreen(ClipStudioScreen.NEWSROOM) },
+                    onNavigate = navigate,
+                    renderGlobalOverlays = false
+                )
+                ClipStudioScreen.NEWSROOM -> NewsroomLookScreen(
+                    state = studioState,
+                    vm = studioVm,
+                    onBack = { onScreen(ClipStudioScreen.CUT) },
+                    onTestOnClip = { lookId ->
+                        studioVm.runCoreStage4ChopBroll(lookIdOverride = lookId)
+                        onScreen(ClipStudioScreen.CUT)
+                    },
+                    onOpenOverlayBuilder = onOpenOverlayBuilder,
+                    renderGlobalOverlays = false
+                )
+            }
+
+            CsToastOverlay(
+                message = activeToast,
+                onDismiss = {
+                    if (draftState.toastMessage != null) {
+                        draftVm.dismissToast()
+                    } else {
+                        studioVm.dismissToast()
+                    }
+                }
             )
         }
 
-        CsToastOverlay(
-            message = activeToast,
-            onDismiss = {
-                if (draftState.toastMessage != null) {
-                    draftVm.dismissToast()
-                } else {
-                    studioVm.dismissToast()
-                }
-            }
-        )
-
+        // Full-bleed edge-to-edge dither voice glow rising directly from the physical bottom bezel
+        // so it uses the full screen height (rising >= 1/3 of the entire screen at max voice).
         VoiceGlowDitherOverlay(
             active = isAnyRecording,
             level = liveMicLevel

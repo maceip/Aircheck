@@ -52,7 +52,17 @@ class OnDeviceVoice(private val context: Context) {
         val reader = Thread {
             proc.inputStream.bufferedReader().forEachLine { line -> synchronized(log) { log.appendLine(line) } }
         }.apply { start() }
-        val finished = proc.waitFor(TIMEOUT_MIN, TimeUnit.MINUTES)
+        // The runner prints nothing while it generates, so report the real elapsed time each second:
+        // on-phone synthesis runs several times slower than real time and must not look frozen.
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        var finished = false
+        while (!finished) {
+            finished = proc.waitFor(1, TimeUnit.SECONDS)
+            val elapsedSec = (android.os.SystemClock.elapsedRealtime() - startedAt) / 1000
+            if (finished) break
+            if (elapsedSec >= TIMEOUT_MIN * 60) break
+            onProgress("Synthesizing your voice on this phone… %d:%02d elapsed".format(elapsedSec / 60, elapsedSec % 60))
+        }
         if (!finished) {
             proc.destroyForcibly()
             throw IllegalStateException("On-phone voice took longer than $TIMEOUT_MIN minutes and was stopped.")

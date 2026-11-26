@@ -559,9 +559,12 @@ class VadAudioCaptureEngine(
     private fun readFullFrame(recorder: AudioRecord, dest: ShortArray): Int {
         var offset = 0
         while (offset < dest.size && _isCapturing.value) {
-            val n = recorder.read(dest, offset, dest.size - offset)
+            val chunk = min(RMS_SUBFRAME_SAMPLES, dest.size - offset)
+            val n = recorder.read(dest, offset, chunk)
             if (n < 0) return n
             if (n == 0) break
+            // Emit real live mic RMS every 20ms (50 Hz) so the voice glow reacts instantaneously to speech.
+            _liveRmsLevel.value = computeRmsPcm16(dest, offset, offset + n).coerceIn(0f, 1f)
             offset += n
         }
         return offset
@@ -602,6 +605,7 @@ class VadAudioCaptureEngine(
         const val SAMPLE_RATE_HZ: Int = 16_000
         const val FRAME_DURATION_MS: Long = 100L
         const val FRAME_SAMPLES: Int = (SAMPLE_RATE_HZ * FRAME_DURATION_MS / 1000L).toInt() // 1600
+        private const val RMS_SUBFRAME_SAMPLES: Int = (SAMPLE_RATE_HZ * 20L / 1000L).toInt() // 320 (20ms / 50 Hz)
         const val DEFAULT_SILENCE_THRESHOLD_RMS: Float = 0.015f
         const val DEFAULT_MAX_PAUSE_MS: Long = 600L
         const val DEFAULT_TRAILING_WINDOW_MS: Long = 15_000L
