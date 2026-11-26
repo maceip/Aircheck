@@ -603,7 +603,7 @@ _DICT_WORDS: set[str] | None = None
 
 
 def _visible_words_in_image(path: Path) -> list[str]:
-    """Real English words (5+ letters) that macOS Vision OCR reads in an image; [] if OCR is unavailable.
+    """Words (5+ letters: dictionary words or ALL-CAPS signage) that macOS Vision OCR reads; [] if no OCR.
 
     Used to reject generated b-roll stills that contain headline-style text. Screen glyphs and fake code
     rarely form dictionary words, so they pass.
@@ -630,7 +630,8 @@ def _visible_words_in_image(path: Path) -> list[str]:
         if cand.confidence() < 0.5:
             continue
         for tok in re.findall(r"[A-Za-z]{5,}", str(cand.string())):
-            if tok.lower() in _DICT_WORDS:
+            # Dictionary words, or sign-style ALL-CAPS tokens (image models misspell headlines).
+            if tok.lower() in _DICT_WORDS or tok.isupper():
                 found.append(tok)
     return found
 
@@ -652,8 +653,23 @@ def generate_broll_images(
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    def visual_only(prompt: str) -> str:
+        # Outline shot prompts sometimes say "talking head explaining X"; b-roll must never show a
+        # presenter, so drop presenter/speech words and keep the subject.
+        cleaned = re.sub(
+            r"\b(talking[- ]head|presenter|anchor(?:man|woman)?|host|newscaster|reporter|spokesperson|"
+            r"person|man|woman|someone|explain(?:s|ing)?|talk(?:s|ing)?|speak(?:s|ing)?|"
+            r"say(?:s|ing)?|describ(?:es|ing))\b",
+            " ",
+            prompt,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+        return cleaned or prompt
+
     def one(prompt: str) -> tuple[str, Path]:
-        key = hashlib.sha1(f"{aspect}|{prompt}".encode("utf-8")).hexdigest()[:16]
+        visual = visual_only(prompt)
+        key = hashlib.sha1(f"{aspect}|{visual}".encode("utf-8")).hexdigest()[:16]
         target = cache_dir / f"broll_{key}.png"
         if target.is_file():
             return prompt, target
@@ -661,9 +677,9 @@ def generate_broll_images(
         work.mkdir(parents=True, exist_ok=True)
         try:
             full_prompt = (
-                f"{prompt}. Photorealistic broadcast news b-roll still, cinematic lighting. "
-                "No news presenter or anchor, no person talking to camera, no words, letters, titles, "
-                "captions, logos or watermark anywhere in the image."
+                f"{visual}. Photorealistic documentary cutaway photograph, cinematic lighting. "
+                "Not a TV studio or newsroom; no news presenter, anchor or anyone facing the camera; "
+                "no words, letters, signage, titles, captions, logos or watermark anywhere in the image."
             )
             # Self-check: regenerate (up to 3 tries) when OCR reads real words in the still; keep the
             # attempt with the fewest words if every try has some.
@@ -671,7 +687,11 @@ def generate_broll_images(
             for attempt in range(3):
                 attempt_dir = work / f"try{attempt}"
                 attempt_dir.mkdir()
-                _generate_image_into(full_prompt, aspect, attempt_dir, bl_bin=bl_bin, runner=runner)
+                if attempt > 0 and runner is None and os.environ.get("OPENAI_API_KEY", "").strip():
+                    # Bailian drew words into the first still; OpenAI follows "no text" more reliably.
+                    _generate_backdrop_via_openai(full_prompt, aspect, attempt_dir)
+                else:
+                    _generate_image_into(full_prompt, aspect, attempt_dir, bl_bin=bl_bin, runner=runner)
                 produced = sorted(
                     p for p in attempt_dir.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
                 )
