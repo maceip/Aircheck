@@ -205,6 +205,9 @@ class DraftDeckViewModel internal constructor(
     private val _uiState = MutableStateFlow(DraftDeckUiState())
     val uiState: StateFlow<DraftDeckUiState> = _uiState.asStateFlow()
 
+    /** Direct 50 Hz mic RMS flow for [com.example.ui.clipstudio.VoiceGlowDitherOverlay] (zero full-screen recomposition). */
+    val liveRmsFlow: StateFlow<Float> get() = vadAudioEngine.liveRmsLevel
+
     private val transcribeMutex = Mutex()
     private val editGeneration = AtomicLong(0L)
 
@@ -268,7 +271,11 @@ class DraftDeckViewModel internal constructor(
         }
 
         viewModelScope.launch {
+            var lastUiEmitMs = 0L
             vadAudioEngine.liveRmsLevel.collect { rms ->
+                val nowMs = System.currentTimeMillis()
+                if (rms != 0f && nowMs - lastUiEmitMs < 100L) return@collect
+                lastUiEmitMs = nowMs
                 _uiState.update { state ->
                     if (state.isAnyRecording || rms == 0f) {
                         state.copy(liveRmsLevel = rms)

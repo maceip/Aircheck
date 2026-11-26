@@ -2,6 +2,10 @@ package com.example.ui.clipstudio
 
 import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.sharp.PhotoCamera
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -648,7 +652,92 @@ private fun LookBackgroundTab(
         }
     }
 
-    // 4. Backdrop plate generator & saved looks (scrolls cleanly right below fold)
+    // 4. Presenter Photo on Device (PickVisualMedia -> CAS JPEG -> HeyGen talking-head portrait)
+    val anchorPhotoFile = remember(
+        state.activeProject.stageConfig.photoSha,
+        state.settings.persona.defaultPhotoSha
+    ) {
+        vm.resolveAnchorPhotoFile()
+    }
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            vm.importAnchorPhoto(uri)
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("PRESENTER PHOTO", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 58.dp)
+                .sunkenPanel(radius = 14.dp)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Cs.Track)
+                    .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (anchorPhotoFile != null && anchorPhotoFile.isFile) {
+                    AsyncImage(
+                        model = anchorPhotoFile,
+                        contentDescription = "Selected presenter photo",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Sharp.PhotoCamera,
+                        contentDescription = null,
+                        tint = Cs.Muted,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+            Text(
+                text = if (anchorPhotoFile != null) "Custom phone photo" else "Default studio portrait",
+                style = sans(13.5.sp, Cs.Ink, 18.sp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (anchorPhotoFile != null) {
+                CsKeyLabel(
+                    label = "default",
+                    onClick = vm::clearAnchorPhoto,
+                    role = KeyRole.STD,
+                    radius = 10.dp,
+                    size = 11.5.sp,
+                    modifier = Modifier
+                        .height(38.dp)
+                        .testTag("cs_reset_photo")
+                )
+            }
+            VideoEditOledKey(
+                label = "choose photo",
+                active = anchorPhotoFile != null,
+                ledColor = HwLed.Green,
+                onClick = {
+                    photoPickerLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                },
+                height = 40.dp,
+                fontSize = 11.5.sp,
+                modifier = Modifier.testTag("cs_choose_photo")
+            )
+        }
+    }
+
+    // 5. Backdrop plate generator & saved looks (scrolls cleanly right below fold)
     val promptState = rememberTextFieldState(initialText = draft.platePrompt)
     LaunchedEffect(draft.id, draft.platePrompt) {
         if (promptState.text.isEmpty() && draft.platePrompt.isNotBlank()) {

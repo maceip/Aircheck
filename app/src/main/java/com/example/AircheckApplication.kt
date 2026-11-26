@@ -200,6 +200,17 @@ class AircheckContainer(context: Context) {
         }
     }
 
+    /**
+     * Route Stage 1 voice synthesis to this phone's run9 model (`onPhone = true`) or prefer the
+     * fast Mac Studio GPU voice rig when reachable (`onPhone = false`, default).
+     */
+    fun setVoiceOnPhone(onPhone: Boolean) {
+        appScope.launch {
+            profileStore.setPreferOnPhoneVoice(onPhone)
+            pipelineLogger.info("model", "voice location set to ${if (onPhone) "on_phone_run9" else "mac_studio_gpu"}")
+        }
+    }
+
     /** Stop any transfer, unload the engine, then remove the Gemma weights and partial files. */
     fun deleteGemmaFallback() {
         com.example.engine.ModelDownloadWorker.pause(appContext)

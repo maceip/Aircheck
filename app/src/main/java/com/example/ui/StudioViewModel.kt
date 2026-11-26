@@ -2,7 +2,10 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.ImageDecoder
 import android.net.Uri
+import java.io.ByteArrayOutputStream
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.AircheckApplication
@@ -250,7 +253,11 @@ class StudioViewModel internal constructor(
         }
 
         viewModelScope.launch {
+            var lastUiEmitMs = 0L
             vadAudioEngine.liveRmsLevel.collect { rms ->
+                val nowMs = System.currentTimeMillis()
+                if (rms != 0f && nowMs - lastUiEmitMs < 100L) return@collect
+                lastUiEmitMs = nowMs
                 _uiState.update { state ->
                     if (state.isRecordingCoreVoiceover || rms == 0f) {
                         state.copy(coreVoiceoverRmsLevel = rms)
@@ -674,7 +681,8 @@ class StudioViewModel internal constructor(
         plainText: String,
         headline: String = "",
         postCard: PostCardSource? = null,
-        shotPlan: List<List<ShotSpec>> = emptyList()
+        shotPlan: List<List<ShotSpec>> = emptyList(),
+        autoStartTts: Boolean = false
     ) {
         val clean = plainText.trim()
         if (clean.isBlank()) {
@@ -795,6 +803,9 @@ class StudioViewModel internal constructor(
                     errorMessage = null,
                     statusNotice = "Story loaded in Core Pipeline (01 TTS)."
                 )
+            }
+            if (autoStartTts) {
+                runCoreStage1Tts()
             }
         }
     }
@@ -1030,8 +1041,75 @@ class StudioViewModel internal constructor(
         )
     }
 
+    /** Direct 50 Hz mic RMS flow for [com.example.ui.clipstudio.VoiceGlowDitherOverlay] (zero full-screen recomposition). */
+    val liveRmsFlow: StateFlow<Float> get() = vadAudioEngine.liveRmsLevel
+
     private fun activePhotoSha(): String? = _uiState.value.activeProject.stageConfig.activePhotoSha
         ?: _uiState.value.settings.persona.defaultPhotoSha.ifBlank { null }
+
+    /** Resolves the currently selected presenter portrait JPEG in CAS, or `null` if using the rig default. */
+    fun resolveAnchorPhotoFile(): File? = casStore.fileForSha(activePhotoSha(), "jpg")
+
+    /** Imports a user-picked portrait image from the device into CAS and sets it as the active presenter photo. */
+    fun importAnchorPhoto(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val resolver = getApplication<Application>().contentResolver
+                val source = ImageDecoder.createSource(resolver, uri)
+                val decoded = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    val maxDim = maxOf(info.size.width, info.size.height)
+                    if (maxDim > 1280) {
+                        val ratio = 1280f / maxDim.toFloat()
+                        decoder.setTargetSize(
+                            (info.size.width * ratio).toInt().coerceAtLeast(1),
+                            (info.size.height * ratio).toInt().coerceAtLeast(1)
+                        )
+                    }
+                }
+                val jpegBytes = ByteArrayOutputStream().use { baos ->
+                    decoded.compress(Bitmap.CompressFormat.JPEG, 92, baos)
+                    decoded.recycle()
+                    baos.toByteArray()
+                }
+                if (jpegBytes.isEmpty()) throw IllegalStateException("Selected photo could not be encoded.")
+                val stored = casStore.putBytes(jpegBytes, "jpg")
+                profileStore.setDefaultPhotoSha(stored.sha256)
+                val curProj = _uiState.value.activeProject
+                persistProject(
+                    curProj.copy(
+                        stageConfig = curProj.stageConfig.copy(photoSha = stored.sha256)
+                    )
+                )
+                _uiState.update {
+                    it.copy(
+                        errorMessage = null,
+                        toastMessage = "presenter photo updated"
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(errorMessage = "Could not load photo: ${e.localizedMessage ?: "unsupported image"}")
+                }
+            }
+        }
+    }
+
+    /** Clears the custom device presenter photo so the rig uses its default avatar portrait. */
+    fun clearAnchorPhoto() {
+        viewModelScope.launch(Dispatchers.IO) {
+            profileStore.setDefaultPhotoSha("")
+            val curProj = _uiState.value.activeProject
+            persistProject(
+                curProj.copy(
+                    stageConfig = curProj.stageConfig.copy(photoSha = null)
+                )
+            )
+            _uiState.update { it.copy(toastMessage = "using default presenter photo") }
+        }
+    }
 
     private fun startCoreStage(op: String, extras: Map<String, String?> = emptyMap()) {
         CoreStageWorker.ensureChannel(getApplication())

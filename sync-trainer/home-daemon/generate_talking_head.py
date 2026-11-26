@@ -44,7 +44,7 @@ VALID_RESOLUTIONS = ("720P", "1080P")
 VALID_RATIOS = ("9:16", "16:9", "1:1")
 MIN_WAN_BEAT_SEC = 4
 MAX_WAN_BEAT_SEC = 10
-MAX_TOTAL_DURATION_SEC = 75
+MAX_TOTAL_DURATION_SEC = 120
 MAX_AV_SYNC_DRIFT_MS = 120.0
 
 FFPROBE_TIMEOUT_SEC = 30
@@ -374,6 +374,8 @@ def _heygen_json(args: list[str], timeout: int = 180) -> dict[str, Any]:
 def _invoke_heygen_avatar(
     *,
     master_wav: Path,
+    avatar_path: Path,
+    use_custom_photo: bool,
     output_mp4: Path,
     ratio: str,
     resolution: str,
@@ -382,14 +384,24 @@ def _invoke_heygen_avatar(
     if not HEYGEN_BIN.is_file():
         raise RuntimeError(f"HeyGen CLI not found at {HEYGEN_BIN}")
     asset = _heygen_json(["asset", "create", "--file", str(master_wav)])["data"]
-    body = {
-        "type": "avatar",
-        "avatar_id": HEYGEN_LOOK_ID,
-        "audio_asset_id": asset["asset_id"],
-        "engine": {"type": HEYGEN_ENGINE},
-        "aspect_ratio": ratio,
-        "resolution": "1080p",  # Avatar 6 accepts only 1080p or 2k
-    }
+    if use_custom_photo and avatar_path.is_file():
+        img_asset = _heygen_json(["asset", "create", "--file", str(avatar_path)])["data"]
+        body: dict[str, Any] = {
+            "type": "image",
+            "image": {"type": "asset_id", "asset_id": img_asset["asset_id"]},
+            "audio_asset_id": asset["asset_id"],
+            "aspect_ratio": ratio,
+            "resolution": "1080p",
+        }
+    else:
+        body = {
+            "type": "avatar",
+            "avatar_id": HEYGEN_LOOK_ID,
+            "audio_asset_id": asset["asset_id"],
+            "engine": {"type": HEYGEN_ENGINE},
+            "aspect_ratio": ratio,
+            "resolution": "1080p",  # Avatar 6 accepts only 1080p or 2k
+        }
     created = _heygen_json(["video", "create", "-d", json.dumps(body)])["data"]
     video_id = created.get("video_id") or created.get("id")
     if not video_id:
@@ -414,7 +426,12 @@ def _invoke_heygen_avatar(
     )
     if proc.returncode != 0 or not output_mp4.is_file():
         raise RuntimeError(f"heygen video download failed: {(proc.stderr or proc.stdout).strip()[:400]}")
-    return {"heygen_video_id": video_id, "heygen_look_id": HEYGEN_LOOK_ID, "heygen_engine": HEYGEN_ENGINE}
+    return {
+        "heygen_video_id": video_id,
+        "heygen_look_id": "custom_photo" if use_custom_photo else HEYGEN_LOOK_ID,
+        "heygen_engine": HEYGEN_ENGINE,
+        "used_custom_photo": use_custom_photo,
+    }
 
 
 def generate_talking_head(
@@ -429,6 +446,7 @@ def generate_talking_head(
     replace_audio_with_input: bool = True,
     whisper_model: Path = DEFAULT_WHISPER_MODEL,
     bl_timeout_sec: int = BL_BEAT_TIMEOUT_SEC,
+    use_custom_photo: bool = False,
 ) -> dict:
     norm_resolution = normalize_talking_head_resolution(resolution)
     norm_ratio = _validate_ratio_and_duration(ratio, max_duration)
@@ -464,6 +482,8 @@ def generate_talking_head(
 
         remote_meta = _invoke_heygen_avatar(
             master_wav=master_wav,
+            avatar_path=avatar_path,
+            use_custom_photo=use_custom_photo,
             output_mp4=output_mp4,
             ratio=norm_ratio,
             resolution=norm_resolution,
@@ -510,6 +530,7 @@ def generate_talking_head(
                     "-c:a", "aac",
                     "-b:a", "192k",
                     "-ar", "44100",
+                    "-shortest",
                     "-movflags", "+faststart",
                     str(orig_audio_mp4),
                 ],
@@ -540,7 +561,8 @@ def main() -> int:
     parser.add_argument("--transcript", default=None, help="Optional spoken transcript (auto-transcribed via whisper-cli if omitted)")
     parser.add_argument("--resolution", default="720P", choices=["480P", "720P", "1080P"])
     parser.add_argument("--ratio", default="9:16", choices=["9:16", "16:9", "1:1"])
-    parser.add_argument("--max-duration", type=int, default=10, help="Max clip duration in seconds (2..75, default 10)")
+    parser.add_argument("--max-duration", type=int, default=10, help="Max clip duration in seconds (2..120, default 10)")
+    parser.add_argument("--custom-photo", action="store_true", help="Animate the supplied --avatar image instead of the default HeyGen look")
     args = parser.parse_args()
 
     res = generate_talking_head(
@@ -551,6 +573,7 @@ def main() -> int:
         resolution=normalize_talking_head_resolution(args.resolution),
         ratio=args.ratio,
         max_duration=args.max_duration,
+        use_custom_photo=bool(args.custom_photo),
     )
     print(json.dumps(res, indent=2))
     return 0

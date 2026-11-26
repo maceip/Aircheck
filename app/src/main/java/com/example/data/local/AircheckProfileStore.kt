@@ -77,7 +77,8 @@ data class AircheckProfileProto(
     @ProtoNumber(31) val scriptEditLlmModel: String = "",
     @ProtoNumber(32) val newsroomOverlayLlmProvider: String = LlmProviderChoice.MAC_RIG_DEFAULT.id,
     @ProtoNumber(33) val newsroomOverlayLlmRemoteProvider: String = DEFAULT_REMOTE_LLM_PROVIDER_ID,
-    @ProtoNumber(34) val newsroomOverlayLlmModel: String = ""
+    @ProtoNumber(34) val newsroomOverlayLlmModel: String = "",
+    @ProtoNumber(35) val preferOnPhoneVoice: Boolean = false
 )
 
 data class StudioSettings(
@@ -92,6 +93,7 @@ data class StudioSettings(
     val remotionInstallRequested: Boolean = false,
     val remotionInstallNote: String = "",
     val phoneOnlyVoiceMode: Boolean = true,
+    val preferOnPhoneVoice: Boolean = false,
     val llmRouting: LlmRoutingSettings = LlmRoutingSettings()
 )
 
@@ -158,6 +160,10 @@ class AircheckProfileStore(
                 useLanVoice = !enabled
             )
         }
+    }
+
+    suspend fun setPreferOnPhoneVoice(enabled: Boolean) {
+        dataStore.updateData { it.copy(preferOnPhoneVoice = enabled) }
     }
 
     suspend fun recordRemotionInstallRequest(
@@ -278,6 +284,7 @@ class AircheckProfileStore(
         remotionInstallRequested = remotionInstallRequested,
         remotionInstallNote = remotionInstallNote,
         phoneOnlyVoiceMode = phoneOnlyVoiceMode,
+        preferOnPhoneVoice = preferOnPhoneVoice,
         llmRouting = LlmRoutingSettings(
             drafting = LlmStageConfig(
                 provider = LlmProviderChoice.fromRaw(draftingLlmProvider),

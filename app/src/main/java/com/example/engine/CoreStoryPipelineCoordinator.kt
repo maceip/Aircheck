@@ -203,22 +203,42 @@ class CoreStoryPipelineCoordinator(
             }
 
             val effectiveProjectId = session.scriptId.ifBlank { session.id }
-            // Voice priority: a recorded mic take, then Ryan's run9 voice on this phone, then the Mac studio.
-            val onDeviceWav: File? = if (localMicWavFile == null && onDeviceVoice?.isInstalled() == true) {
-                onDeviceVoice.synthesize(activeClauses.joinToString(" ") { it.spokenText }) { msg ->
-                    task?.onProgress?.invoke(msg)
+            val preferPhoneVoice = runCatching { profileStore?.current()?.preferOnPhoneVoice }.getOrNull() == true
+            val phoneVoiceReady = onDeviceVoice?.isInstalled() == true
+            val rigHealth = if (localMicWavFile == null && !preferPhoneVoice) {
+                runCatching { macRigGateway.resolveAndCheckHealth(rigBaseUrl) }.getOrNull()
+            } else {
+                null
+            }
+            // Voice priority:
+            // 1) Recorded mic take
+            // 2) Fast Mac Studio GPU voice (~8s) when reachable (unless user explicitly chose "This phone")
+            // 3) On-phone run9 LiteRT voice when chosen or when Mac Studio is unreachable
+            val shouldRunOnPhone = localMicWavFile == null && phoneVoiceReady && (preferPhoneVoice || rigHealth == null)
+            val onDeviceResult: ClauseVoiceSynthesisResult? = if (shouldRunOnPhone) {
+                requireNotNull(onDeviceVoice).synthesizeClauses(activeClauses.map { it.spokenText }) { frac, msg ->
+                    task?.onProgressFraction?.invoke(frac, msg)
                 }
             } else {
                 null
             }
+            val onDeviceWav: File? = onDeviceResult?.wavFile
             val localWav = localMicWavFile ?: onDeviceWav
             val updated = if (localWav != null && localWav.exists() && localWav.length() > 44L) {
+                task?.onProgressFraction?.invoke(0.94f, "Aligning words…")
                 val stored = casStore.putFile(localWav, "wav")
                 if (onDeviceWav != null) onDeviceWav.delete()
                 val wavInfo = parseWavDurationAndPeaks(stored.file)
                 val fullText = activeClauses.joinToString(" ") { it.spokenText }
                 val micAlignedWords = runLocalCtcAlignment(stored.file, fullText)
-                val timedClauses = distributeClauseTimings(activeClauses, wavInfo.durationMs)
+                val timedClauses = if (onDeviceResult != null && onDeviceResult.clauseBoundsMs.size == activeClauses.size) {
+                    activeClauses.mapIndexed { idx, clause ->
+                        val (sMs, eMs) = onDeviceResult.clauseBoundsMs[idx]
+                        clause.copy(index = idx, startMs = sMs, endMs = eMs)
+                    }
+                } else {
+                    distributeClauseTimings(activeClauses, wavInfo.durationMs)
+                }
                 clearStaleLocalPcmManifest(effectiveProjectId)
                 session.copy(
                     title = session.title.ifBlank { timedClauses.first().spokenText.take(40) },
@@ -250,9 +270,9 @@ class CoreStoryPipelineCoordinator(
                     updatedAtMillis = System.currentTimeMillis()
                 )
             } else {
-                // Run9 voice isn't installed on this phone: voice the script on the Mac studio. When the
-                // Mac is unreachable the user gets a plain "Mac offline" message, not a raw stack error.
-                val health = runCatching { macRigGateway.resolveAndCheckHealth(rigBaseUrl) }.getOrNull()
+                // Voice the script on the Mac studio GPU rig. When the Mac is unreachable and on-phone
+                // voice isn't installed, the user gets a plain "Mac offline" message, not a raw stack error.
+                val health = rigHealth ?: runCatching { macRigGateway.resolveAndCheckHealth(rigBaseUrl) }.getOrNull()
                     ?: return@withContext Result.failure(MacStudioOfflineException())
                 val ttsRes = macRigGateway.synthesizeCoreStoryTts(
                     rigBaseUrl = health.resolvedUrl,
@@ -392,7 +412,7 @@ class CoreStoryPipelineCoordinator(
                 }
             )
 
-            val targetMaxSec = max(4, ((session.ttsDurationMs + 999L) / 1000L).toInt()).coerceIn(4, 75)
+            val targetMaxSec = max(4, ((session.ttsDurationMs + 999L) / 1000L).toInt()).coerceIn(4, 120)
             // Resume a rig render that a previous (killed) process already started instead of paying twice.
             var headJobId = session.pendingHeadJobId?.takeIf { it.isNotBlank() }
             var resubmitted = false

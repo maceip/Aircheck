@@ -213,6 +213,9 @@ fun AircheckApp(
                                     baseModelName = container.onDevicePromptEngine.baseModelName()
                                 )
                             }
+                            val phoneVoiceInstalled = androidx.compose.runtime.remember {
+                                container.onDeviceVoice.isInstalled()
+                            }
                             com.example.ui.screens.OnDeviceModelsCard(
                                 aicore = aicore,
                                 download = download,
@@ -221,7 +224,10 @@ fun AircheckApp(
                                 onDelete = { container.deleteGemmaFallback() },
                                 draftOnPhone = studioState.settings.llmRouting.drafting.provider ==
                                     com.example.data.LlmProviderChoice.LOCAL_AICORE_NANO,
-                                onDraftOnPhoneChange = { onPhone -> container.setDraftOnPhone(onPhone) }
+                                onDraftOnPhoneChange = { onPhone -> container.setDraftOnPhone(onPhone) },
+                                phoneVoiceInstalled = phoneVoiceInstalled,
+                                voiceOnPhone = studioState.settings.preferOnPhoneVoice,
+                                onVoiceOnPhoneChange = { onPhone -> container.setVoiceOnPhone(onPhone) }
                             )
                         },
                         onClose = { showSettingsModal = false }

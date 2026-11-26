@@ -190,7 +190,7 @@ def test_resolution_clamping_and_validation(tmp_path: Path) -> None:
     avatar.write_bytes(b"\xff\xd8\xff\xe0AVATAR\xff\xd9")
     with pytest.raises(ValueError, match="Unsupported ratio"):
         gth.generate_talking_head(wav, avatar, tmp_path / "out.mp4", ratio="21:9")
-    for bad_dur in (1, 76, True):
+    for bad_dur in (1, 121, True):
         with pytest.raises(ValueError, match="max_duration"):
             gth.generate_talking_head(wav, avatar, tmp_path / "out.mp4", max_duration=bad_dur)
 
@@ -321,10 +321,10 @@ def test_render_video_validation_75s_480p_clamp_and_presynth_wav(
         assert seen_specs[0]["words"][0]["word"] == "Line"
         assert seen_specs[0]["align_url"] == "/v1/renders/align_pre.json"
 
-        # Reject 1, 76, 8K with 400
+        # Reject 1, 121, 8K with 400
         for bad in (
             {"spoken_text": "hi", "max_duration": 1},
-            {"spoken_text": "hi", "max_duration": 76},
+            {"spoken_text": "hi", "max_duration": 121},
             {"spoken_text": "hi", "resolution": "8K"},
         ):
             code, _ = _http_json(host, port, "POST", "/v1/render-video", bad)

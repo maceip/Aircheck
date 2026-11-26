@@ -1755,6 +1755,47 @@ def test_calibrated_live_v002_gates_accept_broadcast_quality_and_reject_garbled(
     assert ok["metrics"]["passed_all_strict_gates"] is True
     ota_server._validate_strict_tts_metrics(ok["metrics"], require_present=True)
 
+    # Real Lambda `:8452` chatterbox out-of-domain broadcast rollouts (cer=0.0, spk=0.68-0.71, mos=3.43-3.79)
+    # MUST pass live gates instead of falsely aborting live demos.
+    def _verify_lambda_chatterbox_live(pcm: np.ndarray, expected_text: str) -> dict[str, Any]:
+        return {
+            "recognized_text": expected_text,
+            "cer": 0.0,
+            "max_phoneme_duration_ms": 104.65,
+            "wespeaker_cosine": 0.68253,
+            "dnsmos_p808": 3.4336,
+            "tail_rms_dbfs": sar.compute_tail_rms_dbfs(pcm),
+            "syllables_per_sec": 4.461,
+            "word_spans": [("tonight", 1000, 12000)],
+        }
+
+    ok_lambda = rbs.render_broadcast_studio(
+        script_text="Tonight on Aircheck Tech Desk.",
+        project_id="lambda_chatterbox_live_cal_ok",
+        output_dir=tmp_path / "cal_lambda_ok",
+        takes_per_clause=1,
+        max_retries_per_clause=0,
+        lexicon_path=lexicon_path,
+        room_ir_path=ir_path,
+        room_tone_path=tone_path,
+        skip_video=True,
+        require_strict_gates=True,
+        require_real_alignment=True,
+        early_exit_on_pass=True,
+        gate_max_cer=ota_server.LIVE_TTS_GATE_MAX_CER,
+        gate_min_speaker_cos=ota_server.LIVE_TTS_GATE_MIN_SPEAKER_COS,
+        gate_min_dnsmos_p808=ota_server.LIVE_TTS_GATE_MIN_DNSMOS_P808,
+        gate_max_tail_rms_dbfs=ota_server.LIVE_TTS_GATE_MAX_TAIL_RMS_DBFS,
+        gate_min_syllables_per_sec=ota_server.LIVE_TTS_GATE_MIN_SYLLABLES_PER_SEC,
+        gate_max_syllables_per_sec=ota_server.LIVE_TTS_GATE_MAX_SYLLABLES_PER_SEC,
+        gate_max_phoneme_ms=ota_server.LIVE_TTS_GATE_MAX_PHONEME_MS,
+        schema_path=SCHEMA_PATH,
+        synthesizer_fn=_synth,
+        verifier_fn=_verify_lambda_chatterbox_live,
+    )
+    assert ok_lambda["metrics"]["passed_all_strict_gates"] is True
+    ota_server._validate_strict_tts_metrics(ok_lambda["metrics"], require_present=True)
+
     # Garbled / wrong-speaker take MUST still fail loudly under calibrated live gates
     def _verify_imposter(pcm: np.ndarray, expected_text: str) -> dict[str, Any]:
         return {

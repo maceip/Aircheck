@@ -16,7 +16,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -24,12 +23,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.draft.XAttachment
 import com.example.ui.PostCardSource
 import com.example.ui.StudioUiState
 import com.example.ui.StudioViewModel
 import com.example.ui.draft.DraftDeckUiState
 import com.example.ui.draft.DraftDeckViewModel
+import kotlinx.coroutines.flow.StateFlow
 
 /** Clip Studio v5 screens (`01 SPARK`, `02 SCRIPT`, `03 CUT`, and `Video look`). */
 enum class ClipStudioScreen { SPARK, SCRIPT, CUT, NEWSROOM }
@@ -52,17 +53,18 @@ fun ClipStudioShell(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var pendingMicAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        val action = pendingMicAction
-        pendingMicAction = null
-        if (granted) action?.invoke()
+        if (granted) {
+            // Do not auto-fire a press-and-hold latch after the OS dialog closes with no finger down.
+            draftVm.showToast("mic ready — hold to record")
+        } else {
+            draftVm.showToast("microphone permission required to record")
+        }
     }
     val requestMic: (() -> Unit) -> Unit = { action ->
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             action()
         } else {
-            pendingMicAction = action
             micLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
@@ -110,12 +112,6 @@ fun ClipStudioShell(
     }
 
     val activeToast = draftState.toastMessage ?: studioState.toastMessage
-    val isAnyRecording = draftState.isAnyRecording || studioState.isRecordingCoreVoiceover
-    val liveMicLevel = when {
-        draftState.isAnyRecording -> draftState.liveRmsLevel
-        studioState.isRecordingCoreVoiceover -> studioState.coreVoiceoverRmsLevel
-        else -> 0f
-    }
 
     Box(
         modifier
@@ -145,15 +141,15 @@ fun ClipStudioShell(
                     onNavigate = navigate,
                     onCreateVideo = { text ->
                         val quote = draftState.document.attachment as? XAttachment.QuotePost
+                        // Persist the new CorePipelineSession to Room BEFORE auto-starting Stage 1 TTS
+                        // so CoreStageWorker never races against an old or empty session.
                         studioVm.openStoryInCorePipeline(
                             plainText = text,
                             headline = draftState.document.arcBeats.firstOrNull()?.text.orEmpty().take(40),
                             postCard = quote?.let { PostCardSource(it.handle, it.tweetId, it.snippet) },
-                            shotPlan = draftState.document.shotPlan
+                            shotPlan = draftState.document.shotPlan,
+                            autoStartTts = true
                         )
-                        // Auto-start voicing on "make the video" so the user skips a tap + a serial wait;
-                        // the dock shows real progress and advances to the talking-head step when ready.
-                        studioVm.runCoreStage1Tts()
                         onScreen(ClipStudioScreen.CUT)
                     },
                     renderGlobalOverlays = false
@@ -191,11 +187,34 @@ fun ClipStudioShell(
             )
         }
 
-        // Full-bleed edge-to-edge dither voice glow rising directly from the physical bottom bezel
-        // so it uses the full screen height (rising >= 1/3 of the entire screen at max voice).
-        VoiceGlowDitherOverlay(
-            active = isAnyRecording,
-            level = liveMicLevel
+        // Isolated 50 Hz full-bleed edge-to-edge dither voice glow rising directly from the physical
+        // bottom bezel without triggering 50 Hz recompositions on Spark/Script/Cut screens.
+        VoiceGlowDitherHost(
+            draftRecording = draftState.isAnyRecording,
+            studioRecording = studioState.isRecordingCoreVoiceover,
+            draftRmsFlow = draftVm.liveRmsFlow,
+            studioRmsFlow = studioVm.liveRmsFlow
         )
     }
+}
+
+@Composable
+private fun VoiceGlowDitherHost(
+    draftRecording: Boolean,
+    studioRecording: Boolean,
+    draftRmsFlow: StateFlow<Float>,
+    studioRmsFlow: StateFlow<Float>
+) {
+    val active = draftRecording || studioRecording
+    val draftRms by draftRmsFlow.collectAsStateWithLifecycle()
+    val studioRms by studioRmsFlow.collectAsStateWithLifecycle()
+    val liveLevel = when {
+        draftRecording -> draftRms
+        studioRecording -> studioRms
+        else -> 0f
+    }
+    VoiceGlowDitherOverlay(
+        active = active,
+        level = liveLevel
+    )
 }

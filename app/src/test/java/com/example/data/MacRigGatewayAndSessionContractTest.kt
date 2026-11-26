@@ -222,12 +222,12 @@ class MacRigGatewayAndSessionContractTest {
     }
 
     @Test
-    fun enqueueMacRigRender_allowsUpTo75s_andSerializesOptionalFields() = runTest {
+    fun enqueueMacRigRender_allowsUpTo120s_andSerializesOptionalFields() = runTest {
         val capturedBodies = CopyOnWriteArrayList<String>()
         val srv = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         srv.createContext("/v1/render-video") { ex ->
             capturedBodies.add(ex.requestBody.readBytes().toString(Charsets.UTF_8))
-            val json = """{"job_id":"head_75s"}""".toByteArray()
+            val json = """{"job_id":"head_120s"}""".toByteArray()
             ex.sendResponseHeaders(200, json.size.toLong())
             ex.responseBody.use { it.write(json) }
         }
@@ -251,7 +251,7 @@ class MacRigGatewayAndSessionContractTest {
             rigBaseUrl = baseUrl,
             project = project,
             photoSha = null,
-            maxDurationSec = 65,
+            maxDurationSec = 99,
             words = listOf(AlignedWord("Sixty", 0L, 300L)),
             alignUrl = "$baseUrl/v1/align.json",
             useRemotion = true
@@ -260,11 +260,11 @@ class MacRigGatewayAndSessionContractTest {
             rigBaseUrl = baseUrl,
             project = project,
             photoSha = null,
-            maxDurationSec = 99
+            maxDurationSec = 180
         )
 
         val first = JSONObject(capturedBodies[0])
-        assertEquals(65, first.getInt("max_duration"))
+        assertEquals(99, first.getInt("max_duration"))
         assertEquals("LIVE UPDATE", first.getString("chyron_headline"))
         assertEquals("STUDIO A", first.getString("chyron_subline"))
         assertTrue(first.getBoolean("show_brand_bug"))
@@ -273,7 +273,7 @@ class MacRigGatewayAndSessionContractTest {
         assertEquals("Sixty", first.getJSONArray("words").getJSONObject(0).getString("word"))
 
         val second = JSONObject(capturedBodies[1])
-        assertEquals(75, second.getInt("max_duration"))
+        assertEquals(120, second.getInt("max_duration"))
     }
 
     @Test

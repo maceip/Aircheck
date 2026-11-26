@@ -453,7 +453,7 @@ class OnDevicePromptEngine internal constructor(
         if (cleanSeed.isEmpty()) {
             return Result.failure(OnDeviceLlmException("seed_transcript must not be blank."))
         }
-        val clampedSec = targetSec.coerceIn(10, 90)
+        val clampedSec = targetSec.coerceIn(20, 120)
         val expectedWordBudget = (clampedSec * 2.5).toInt().coerceAtLeast(30)
         val prompt = buildString {
             if (rerollIndex != null && !existingBeats.isNullOrEmpty()) {
@@ -567,7 +567,7 @@ class OnDevicePromptEngine internal constructor(
         if (cleanSeed.isEmpty()) {
             return Result.failure(OnDeviceLlmException("seed_transcript must not be blank."))
         }
-        val clampedSec = targetSec.coerceIn(10, 90)
+        val clampedSec = targetSec.coerceIn(20, 120)
         val expectedWordBudget = (clampedSec * 2.5).toInt().coerceAtLeast(30)
         val prompt = buildString {
             appendLine("Write 3 spoken newscast script versions (DIRECT, PUNCHY, STORY) targeting ~${clampedSec}s (~$expectedWordBudget words). Use plain ASCII only.")

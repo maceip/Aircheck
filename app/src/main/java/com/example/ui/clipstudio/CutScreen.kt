@@ -1,7 +1,9 @@
 package com.example.ui.clipstudio
 
 import android.net.Uri
+import android.view.LayoutInflater
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -63,8 +65,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
@@ -80,7 +84,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import coil3.compose.AsyncImage
+import com.example.R
 import com.example.data.AlignedWord
+import java.io.File
 import com.example.data.BrollSegmentMode
 import com.example.data.ClipRecord
 import com.example.data.CoreRenderOptions
@@ -128,7 +135,7 @@ fun CutScreen(
     val clipFlow = remember(session.finalClipId) { vm.observeClip(session.finalClipId.orEmpty()) }
     val clip: ClipRecord? by clipFlow.collectAsStateWithLifecycle(initialValue = null)
 
-    val sourceUri: Uri? = remember(
+    val sourceInfo: Pair<Uri?, Boolean> = remember(
         session.finalVideoSha,
         session.finalVideoUrl,
         session.talkingHeadSha,
@@ -140,14 +147,22 @@ fun CutScreen(
         val headFile = vm.casStore.fileForSha(session.talkingHeadSha, "mp4")
         val wavFile = vm.casStore.fileForSha(session.ttsVoiceSha, "wav")
         when {
-            finalFile != null -> Uri.fromFile(finalFile)
-            !session.finalVideoUrl.isNullOrBlank() -> Uri.parse(session.finalVideoUrl)
-            headFile != null -> Uri.fromFile(headFile)
-            !session.talkingHeadVideoUrl.isNullOrBlank() -> Uri.parse(session.talkingHeadVideoUrl)
-            wavFile != null -> Uri.fromFile(wavFile)
-            !session.ttsAudioUrl.isNullOrBlank() -> Uri.parse(session.ttsAudioUrl)
-            else -> null
+            finalFile != null -> Uri.fromFile(finalFile) to true
+            !session.finalVideoUrl.isNullOrBlank() -> Uri.parse(session.finalVideoUrl) to true
+            headFile != null -> Uri.fromFile(headFile) to true
+            !session.talkingHeadVideoUrl.isNullOrBlank() -> Uri.parse(session.talkingHeadVideoUrl) to true
+            wavFile != null -> Uri.fromFile(wavFile) to false
+            !session.ttsAudioUrl.isNullOrBlank() -> Uri.parse(session.ttsAudioUrl) to false
+            else -> null to false
         }
+    }
+    val sourceUri = sourceInfo.first
+    val sourceHasVideo = sourceInfo.second
+    val anchorPhotoFile: File? = remember(
+        state.activeProject.stageConfig.photoSha,
+        state.settings.persona.defaultPhotoSha
+    ) {
+        vm.resolveAnchorPhotoFile()
     }
 
     LaunchedEffect(sourceUri) {
@@ -230,10 +245,13 @@ fun CutScreen(
                 onDismissNotice = vm::dismissNotice
             )
 
-            // 218dp sunken #000 ExoPlayer video monitor
+            // 218dp sunken #000 ExoPlayer TextureView video monitor + Stage 1 voice waveform preview
             VideoMonitorPanel(
                 player = player,
                 sourceUri = sourceUri,
+                sourceHasVideo = sourceHasVideo,
+                waveformPeaks = session.waveformPeaks,
+                anchorPhotoFile = anchorPhotoFile,
                 isPlaying = isPlaying,
                 positionMs = positionMs,
                 durationMs = effectiveDurationMs,
@@ -549,6 +567,9 @@ private fun resolveCutPrimarySpec(
 private fun VideoMonitorPanel(
     player: androidx.media3.common.Player,
     sourceUri: Uri?,
+    sourceHasVideo: Boolean,
+    waveformPeaks: List<Float>,
+    anchorPhotoFile: File?,
     isPlaying: Boolean,
     positionMs: Long,
     durationMs: Long,
@@ -566,17 +587,19 @@ private fun VideoMonitorPanel(
             .padding(horizontal = 10.dp)
             .height(218.dp)
             .sunkenPanel(radius = 18.dp)
+            .clickable(enabled = sourceUri != null, role = Role.Button, onClick = onTogglePlay)
             .testTag("cs_cut_monitor"),
         contentAlignment = Alignment.Center
     ) {
-        if (sourceUri != null) {
+        if (sourceUri != null && sourceHasVideo) {
             val punchScale = if (punchIn) 1.06f else 1.0f
             AndroidView(
                 factory = { ctx ->
-                    PlayerView(ctx).apply {
+                    (LayoutInflater.from(ctx).inflate(R.layout.cut_texture_player_view, null) as PlayerView).apply {
                         this.player = player
                         useController = false
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        setKeepContentOnPlayerReset(false)
                     }
                 },
                 update = { view ->
@@ -594,6 +617,43 @@ private fun VideoMonitorPanel(
                         scaleY = punchScale
                     }
             )
+        } else if (sourceUri != null) {
+            // Stage 1 voice audio ready (before talking-head MP4): show optional presenter portrait
+            // backdrop + real 64-bar audio waveform so the monitor clearly shows voiced audio is ready.
+            if (anchorPhotoFile != null && anchorPhotoFile.isFile) {
+                AsyncImage(
+                    model = anchorPhotoFile,
+                    contentDescription = "Presenter photo preview",
+                    contentScale = ContentScale.Crop,
+                    alpha = 0.28f,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            if (waveformPeaks.isNotEmpty()) {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(84.dp)
+                        .padding(horizontal = 24.dp)
+                ) {
+                    val count = waveformPeaks.size
+                    val step = size.width / count.coerceAtLeast(1).toFloat()
+                    val strokeW = (step * 0.56f).coerceIn(2.dp.toPx(), 5.dp.toPx())
+                    val centerY = size.height / 2f
+                    waveformPeaks.forEachIndexed { idx, rawPeak ->
+                        val frac = idx.toFloat() / count.coerceAtLeast(1).toFloat()
+                        val barH = (size.height * (0.14f + 0.82f * rawPeak.coerceIn(0f, 1f)))
+                        val x = idx * step + step / 2f
+                        drawLine(
+                            color = if (frac <= progressFraction) Cs.Red else Color.White.copy(alpha = 0.34f),
+                            start = Offset(x, centerY - barH / 2f),
+                            end = Offset(x, centerY + barH / 2f),
+                            strokeWidth = strokeW,
+                            cap = StrokeCap.Round
+                        )
+                    }
+                }
+            }
         }
 
         // Top-left timecode (`m:ss / m:ss`)
@@ -607,27 +667,40 @@ private fun VideoMonitorPanel(
                 .testTag("cs_cut_timecode")
         )
 
-        // Centered 64dp circular Play/Pause button
-        Box(
-            modifier = Modifier
-                .size(64.dp)
-                .clip(CircleShape)
-                .background(Cs.Raised.copy(alpha = 0.9f))
-                .border(1.dp, Color.White.copy(alpha = 0.06f), CircleShape)
-                .clickable(
-                    enabled = sourceUri != null,
-                    role = Role.Button,
-                    onClick = onTogglePlay
-                )
-                .testTag("cs_cut_play"),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = if (isPlaying) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
-                contentDescription = if (isPlaying) "Pause" else "Play",
-                tint = if (sourceUri != null) Cs.Ink else Cs.Dim,
-                modifier = Modifier.size(36.dp)
+        if (sourceUri != null && !sourceHasVideo) {
+            Text(
+                text = "VOICE READY",
+                style = mono(10.sp, HwLed.Green, FontWeight.Medium),
+                maxLines = 1,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(end = 14.dp, top = 12.dp)
             )
+        }
+
+        // Centered 64dp circular Play/Pause button (auto-hides during active video playback so face stays clear)
+        if (!isPlaying || !sourceHasVideo) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(CircleShape)
+                    .background(Cs.Raised.copy(alpha = 0.88f))
+                    .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape)
+                    .clickable(
+                        enabled = sourceUri != null,
+                        role = Role.Button,
+                        onClick = onTogglePlay
+                    )
+                    .testTag("cs_cut_play"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    tint = if (sourceUri != null) Cs.Ink else Cs.Dim,
+                    modifier = Modifier.size(36.dp)
+                )
+            }
         }
 
         // Live caption at bottom (Geist 500 14/19, white)

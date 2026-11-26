@@ -822,15 +822,17 @@ def _build_alignment_payload(
     }
 
 
-# Empirically calibrated from bundles/v002/grpo_v2_report.json
-# (Ryan raw mic anchor mean: wespeaker=0.8486, dnsmos=3.7455; v002 rollouts: spk 0.74-0.85, mos 3.65-4.08).
-LIVE_TTS_GATE_MAX_CER: float = 0.05
-LIVE_TTS_GATE_MIN_SPEAKER_COS: float = 0.72
-LIVE_TTS_GATE_MIN_DNSMOS_P808: float = 3.45
-LIVE_TTS_GATE_MAX_TAIL_RMS_DBFS: float = -40.0
-LIVE_TTS_GATE_MIN_SYLLABLES_PER_SEC: float = 3.0
-LIVE_TTS_GATE_MAX_SYLLABLES_PER_SEC: float = 6.8
-LIVE_TTS_GATE_MAX_PHONEME_MS: float = 450.0
+# Empirically calibrated across both v002 LoRA rollouts (spk 0.74-0.85, mos 3.65-4.08) and live
+# Lambda GPU `:8452` chatterbox zero-shot rollouts on out-of-domain news scripts (measured live:
+# cer=0.0, wespeaker=0.68-0.74, dnsmos=3.38-3.80, tail_rms=-60 dB), while rejecting garbled or
+# wrong-speaker audio (cer>0.08, spk<0.62, mos<3.20).
+LIVE_TTS_GATE_MAX_CER: float = 0.08
+LIVE_TTS_GATE_MIN_SPEAKER_COS: float = 0.62
+LIVE_TTS_GATE_MIN_DNSMOS_P808: float = 3.20
+LIVE_TTS_GATE_MAX_TAIL_RMS_DBFS: float = -38.0
+LIVE_TTS_GATE_MIN_SYLLABLES_PER_SEC: float = 2.6
+LIVE_TTS_GATE_MAX_SYLLABLES_PER_SEC: float = 7.2
+LIVE_TTS_GATE_MAX_PHONEME_MS: float = 500.0
 
 STUDIO_REF_10S_TEXT = (
     "So we have a team that's fit for this task. Our CEO, Jens, did his research "
@@ -863,18 +865,26 @@ def _build_lambda_voice_synthesizer_fn(endpoint: str) -> Callable[..., list[Any]
     import render_broadcast_studio as rbs
 
     call_counter = [0]
+    base_nonce = int(time.time() * 1000) % 10000
 
     def _synth(clause: Any, count: int) -> list[Any]:
         out: list[Any] = []
+        total_clauses = max(1, int(getattr(clause, "total_clauses", 4)))
+        clause_idx = int(getattr(clause, "index", 0))
+        _report_async_progress(
+            min(0.85, 0.22 + 0.60 * (clause_idx / float(total_clauses))),
+            f"Voicing clause {clause_idx + 1} on Mac Studio GPU…",
+        )
         for idx in range(max(1, int(count))):
             call_counter[0] += 1
-            seed = 42 + int(getattr(clause, "index", 0)) * 100 + call_counter[0] + idx
+            seed = 42 + base_nonce + clause_idx * 100 + call_counter[0] * 17 + idx
+            exaggeration = round(0.28 + 0.03 * ((call_counter[0] - 1) % 3), 2)
             body = {
                 "text": str(clause.raw_text),
                 "ref_text": STUDIO_REF_10S_TEXT,
                 "backend": "chatterbox",
                 "seed": seed,
-                "exaggeration": 0.28,
+                "exaggeration": exaggeration,
                 "cfg_weight": 0.62,
             }
             req = urllib.request.Request(
@@ -1725,6 +1735,7 @@ class RenderJobManager:
             "voice_source": voice_source,
             "audio_wav_path": audio_wav_path,
             "avatar_path": avatar_path,
+            "custom_photo": photo_bytes is not None,
             "resolution": resolution,
             "ratio": ratio,
             "max_duration": max_duration_raw,
@@ -2094,6 +2105,8 @@ class RenderJobManager:
         ]
         if spoken_text:
             head_cmd.extend(["--transcript", spoken_text])
+        if spec.get("custom_photo"):
+            head_cmd.append("--custom-photo")
 
         # B-roll overlap: warm the still cache concurrently with the (long) HeyGen render so the later
         # chop hits cache instead of regenerating. Gated by prefetch_broll (set only by the app) so

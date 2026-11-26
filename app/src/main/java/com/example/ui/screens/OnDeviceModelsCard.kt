@@ -53,6 +53,9 @@ fun OnDeviceModelsCard(
     draftOnPhone: Boolean,
     onDraftOnPhoneChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    phoneVoiceInstalled: Boolean = false,
+    voiceOnPhone: Boolean = false,
+    onVoiceOnPhoneChange: (Boolean) -> Unit = {},
 ) {
     val tokens = LocalAircheckTokens.current
     // Phone drafting needs a model that can actually run here: the AICore model or verified Gemma.
@@ -100,6 +103,40 @@ fun OnDeviceModelsCard(
                     color = TelemetryMuted,
                     modifier = Modifier.testTag("draft_location_hint")
                 )
+            }
+
+            if (phoneVoiceInstalled) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Voice scripts on", style = MaterialTheme.typography.bodyMedium, color = StudioCrisp)
+                    Text(
+                        text = if (voiceOnPhone) "This phone" else "Mac Studio",
+                        style = TelemetryTimecodeStyle,
+                        color = tokens.channelAccent,
+                        modifier = Modifier.testTag("voice_location_label")
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ModelButton(
+                        label = "This phone",
+                        tag = "voice_on_phone_button",
+                        onClick = { onVoiceOnPhoneChange(true) },
+                        modifier = Modifier.weight(1f),
+                        enabled = !voiceOnPhone,
+                        selected = voiceOnPhone
+                    )
+                    ModelButton(
+                        label = "Mac Studio",
+                        tag = "voice_on_mac_button",
+                        onClick = { onVoiceOnPhoneChange(false) },
+                        modifier = Modifier.weight(1f),
+                        enabled = voiceOnPhone,
+                        selected = !voiceOnPhone
+                    )
+                }
             }
 
             // Primary: AICore system model.

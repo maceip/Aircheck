@@ -760,6 +760,22 @@ def compose_studio_cut(
     ]
     lower_overlays = [o for o in valid_overlays if str(o.get("kind") or "LOWER_THIRD").upper() != "QUOTE_BRIEF"]
     quote_overlays = [o for o in valid_overlays if str(o.get("kind") or "").upper() == "QUOTE_BRIEF"]
+    # Render the configured Video Look title bar as a broadcast lower-third chyron even when no
+    # separate saved LOWER_THIRD overlay card is attached, matching the live 04 VIDEO LOOK preview.
+    if not lower_overlays and options.chyron_headline:
+        desk_sub = options.chyron_subline or (
+            options.corner_bug_text.upper() if options.corner_bug_text.upper() != "LIVE" else "AIRCHECK DESK"
+        )
+        lower_overlays = [
+            {
+                "kind": "LOWER_THIRD",
+                "headline": options.chyron_headline,
+                "subline": desk_sub,
+                "callout_stat": "",
+                "duration_sec": max(4, int(round(total_s))),
+                "breaking_style": options.breaking_style,
+            }
+        ]
     has_lower_third = bool(lower_overlays or options.chyron_headline)
 
     timed_pngs: list[tuple[Path, float, float]] = []
@@ -987,13 +1003,39 @@ def compose_studio_cut(
         draw = ImageDraw.Draw(img)
         left = int(width * 0.045)
         right = width - left
-        deck_h = int(118 * scale)
+        max_text_w = max(int(120 * scale), (right - left) - int(44 * scale))
+
+        def _fit_headline_lines(txt: str, font_obj: Any) -> list[str]:
+            if not txt:
+                return []
+            words_h = txt.split()
+            lines_out: list[str] = []
+            cur = ""
+            for w in words_h:
+                cand = f"{cur} {w}".strip() if cur else w
+                if draw.textlength(cand, font=font_obj) <= max_text_w or not cur:
+                    cur = cand
+                else:
+                    lines_out.append(cur)
+                    cur = w
+            if cur:
+                lines_out.append(cur)
+            return lines_out
+
+        h_font = f_title
+        h_lines = _fit_headline_lines(headline, h_font)
+        if len(h_lines) > 2 or any(draw.textlength(ln, font=h_font) > max_text_w for ln in h_lines):
+            h_font = f_body
+            h_lines = _fit_headline_lines(headline, h_font)[:2]
+        h_line_h = int((42 if h_font is f_title else 32) * scale)
+        sub_text = subline or (stat.upper() if stat and kicker_bg is None else "")
+        deck_h = max(int(118 * scale), int(28 * scale) + len(h_lines) * h_line_h + (int(42 * scale) if sub_text else int(14 * scale)))
         deck_bottom = height - int(height * 0.042)
         deck_top = deck_bottom - deck_h
         if kicker_bg is not None and kicker_lbl:
             show_stat = bool(stat) and stat.upper() not in kicker_lbl.upper()
             full_kicker = f"{kicker_lbl} · {stat.upper()}" if show_stat else kicker_lbl
-            kw = min(right - left, int((len(full_kicker) * 12.8 + 44) * scale))
+            kw = min(right - left, int(draw.textlength(full_kicker, font=f_tag) + 46 * scale))
             kh = int(34 * scale)
             ky = deck_top - kh
             draw.rounded_rectangle([(left, ky), (left + kw, deck_top + int(4 * scale))], radius=int(6 * scale), fill=kicker_bg)
@@ -1009,11 +1051,11 @@ def compose_studio_cut(
             width=2,
         )
         draw.rectangle([(left, deck_top), (left + int(7 * scale), deck_bottom)], fill=ovl_accent)
-        if headline:
-            draw.text((left + int(22 * scale), deck_top + int(18 * scale)), headline, font=f_title, fill=(255, 255, 255, 255))
-        sub_text = subline or (stat.upper() if stat and kicker_bg is None else "")
+        for li, h_line in enumerate(h_lines):
+            draw.text((left + int(22 * scale), deck_top + int(16 * scale) + li * h_line_h), h_line, font=h_font, fill=(255, 255, 255, 255))
         if sub_text:
-            draw.text((left + int(22 * scale), deck_top + int(72 * scale)), sub_text, font=f_tag, fill=ovl_accent if ovl_style != "clean" else (188, 192, 204, 255))
+            sub_y = deck_top + int(20 * scale) + max(1, len(h_lines)) * h_line_h
+            draw.text((left + int(22 * scale), sub_y), sub_text, font=f_tag, fill=ovl_accent if ovl_style != "clean" else (188, 192, 204, 255))
         img.save(png)
         timed_pngs.append((png, start_s, max(start_s + 0.25, end_s)))
         overlay_count += 1

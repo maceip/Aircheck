@@ -1,6 +1,7 @@
 package com.example.engine
 
 import android.app.Application
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -9,6 +10,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.runComposeUiTest
 import androidx.test.core.app.ApplicationProvider
 import com.example.engine.ModelDownloadManager.Phase
@@ -264,18 +266,28 @@ class ModelDownloadManagerTest {
             }
         }
         var draftOnPhone by androidx.compose.runtime.mutableStateOf(false)
+        var voiceOnPhone by androidx.compose.runtime.mutableStateOf(false)
         setContent {
             AircheckTheme {
                 val state by manager.state.collectAsState()
-                OnDeviceModelsCard(
-                    aicore = AicoreModelStatus(checked = true, baseModelName = null),
-                    download = state,
-                    onDownload = { start() },
-                    onPause = { job?.cancel() },
-                    onDelete = { manager.delete() },
-                    draftOnPhone = draftOnPhone,
-                    onDraftOnPhoneChange = { draftOnPhone = it },
-                )
+                androidx.compose.foundation.layout.Column(
+                    modifier = androidx.compose.ui.Modifier.verticalScroll(
+                        androidx.compose.foundation.rememberScrollState()
+                    )
+                ) {
+                    OnDeviceModelsCard(
+                        aicore = AicoreModelStatus(checked = true, baseModelName = null),
+                        download = state,
+                        onDownload = { start() },
+                        onPause = { job?.cancel() },
+                        onDelete = { manager.delete() },
+                        draftOnPhone = draftOnPhone,
+                        onDraftOnPhoneChange = { draftOnPhone = it },
+                        phoneVoiceInstalled = true,
+                        voiceOnPhone = voiceOnPhone,
+                        onVoiceOnPhoneChange = { voiceOnPhone = it },
+                    )
+                }
             }
         }
         onNodeWithTag("aicore_model_label").assertTextEquals("Not available")
@@ -288,11 +300,11 @@ class ModelDownloadManagerTest {
 
         // Download -> transfer stalls mid-way -> Pause keeps the partial bytes.
         stallObject = true
-        onNodeWithTag("gemma_download_button").performClick()
+        onNodeWithTag("gemma_download_button").performScrollTo().performClick()
         waitUntil(timeoutMillis = 10_000) { manager.state.value.phase == Phase.DOWNLOADING && manager.state.value.downloadedBytes >= 1024 * 1024 }
         onNodeWithTag("gemma_phase_label").assertTextEquals("Downloading")
         onNodeWithTag("gemma_progress_bar").assertExists()
-        onNodeWithTag("gemma_pause_button").performClick()
+        onNodeWithTag("gemma_pause_button").performScrollTo().performClick()
         waitUntil(timeoutMillis = 10_000) { manager.state.value.phase == Phase.PAUSED }
         stallObject = false
         val kept = part().length()
@@ -300,7 +312,7 @@ class ModelDownloadManagerTest {
         onNodeWithTag("gemma_phase_label").assertTextEquals("Paused")
 
         // Resume -> completes from the kept bytes and verifies.
-        onNodeWithTag("gemma_download_button").performClick()
+        onNodeWithTag("gemma_download_button").performScrollTo().performClick()
         waitUntil(timeoutMillis = 10_000) { manager.state.value.phase == Phase.READY }
         assertEquals("bytes=$kept-", rangeHeaders.last())
         assertArrayEquals(payload, manager.modelFile().readBytes())
@@ -309,15 +321,24 @@ class ModelDownloadManagerTest {
 
         // With verified Gemma on disk the phone can draft: switch there and back.
         onNodeWithTag("draft_location_hint").assertDoesNotExist()
-        onNodeWithTag("draft_on_phone_button").performClick()
+        onNodeWithTag("draft_on_phone_button").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) { draftOnPhone }
         onNodeWithTag("draft_location_label").assertTextEquals("This phone")
-        onNodeWithTag("draft_on_mac_button").performClick()
+        onNodeWithTag("draft_on_mac_button").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) { !draftOnPhone }
         onNodeWithTag("draft_location_label").assertTextEquals("Mac Studio")
 
+        // Voice scripts location defaults to fast Mac Studio GPU and toggles cleanly to This phone and back.
+        onNodeWithTag("voice_location_label").assertTextEquals("Mac Studio")
+        onNodeWithTag("voice_on_phone_button").performScrollTo().performClick()
+        waitUntil(timeoutMillis = 5_000) { voiceOnPhone }
+        onNodeWithTag("voice_location_label").assertTextEquals("This phone")
+        onNodeWithTag("voice_on_mac_button").performScrollTo().performClick()
+        waitUntil(timeoutMillis = 5_000) { !voiceOnPhone }
+        onNodeWithTag("voice_location_label").assertTextEquals("Mac Studio")
+
         // Delete -> files are gone and the card is back to Not downloaded.
-        onNodeWithTag("gemma_delete_button").performClick()
+        onNodeWithTag("gemma_delete_button").performScrollTo().performClick()
         waitUntil(timeoutMillis = 10_000) { manager.state.value.phase == Phase.NOT_DOWNLOADED }
         assertFalse(manager.modelFile().exists())
         onNodeWithTag("gemma_phase_label").assertTextEquals("Not downloaded")

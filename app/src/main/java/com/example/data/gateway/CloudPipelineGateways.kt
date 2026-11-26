@@ -213,7 +213,7 @@ class DirectMacRigGateway(
         val subline = project.stageConfig.chyronSubline.trim()
         val showBug = project.stageConfig.showBrandBug
 
-        val clampedMaxDuration = maxDurationSec.coerceIn(2, 75)
+        val clampedMaxDuration = maxDurationSec.coerceIn(2, 120)
         val canonicalInput = buildString {
             append(baseUrl).append('|')
             append(project.id).append('|')

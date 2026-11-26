@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.net.Uri
+import android.view.LayoutInflater
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -223,15 +224,18 @@ fun ClipReviewScreen(
                         val player = remember { playerController.acquirePlayer() }
                         AndroidView(
                             factory = { ctx ->
-                                PlayerView(ctx).apply {
+                                (LayoutInflater.from(ctx).inflate(R.layout.cut_texture_player_view, null) as PlayerView).apply {
                                     this.player = player
                                     useController = false
                                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                    setShutterBackgroundColor(android.graphics.Color.BLACK)
+                                    setKeepContentOnPlayerReset(false)
                                 }
                             },
                             update = { view ->
                                 if (view.player !== player) view.player = player
+                            },
+                            onRelease = { view ->
+                                view.player = null
                             },
                             modifier = Modifier.fillMaxSize()
                         )

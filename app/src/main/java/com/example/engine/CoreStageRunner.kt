@@ -61,7 +61,12 @@ class CoreStageRunner(
 
     suspend fun tts(localMicWav: File?, onProgress: (Float, String) -> Unit): String {
         val base = session()
-        val progressLabel = if (localMicWav != null) "Preparing recorded voiceover…" else "Voicing script on your Mac studio…"
+        val preferPhone = runCatching { profileStore.current().preferOnPhoneVoice }.getOrNull() == true
+        val progressLabel = when {
+            localMicWav != null -> "Preparing recorded voiceover…"
+            preferPhone -> "Voicing script on this phone…"
+            else -> "Voicing script on your Mac studio…"
+        }
         // No measured progress yet: report "unknown" (negative) so the UI shows no invented percent.
         onProgress(PROGRESS_UNKNOWN, progressLabel)
         val result = coordinator.synthesizeStage1Tts(
