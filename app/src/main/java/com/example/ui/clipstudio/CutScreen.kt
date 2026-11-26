@@ -5,7 +5,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,7 +20,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -36,7 +34,7 @@ import androidx.compose.material.icons.sharp.CropLandscape
 import androidx.compose.material.icons.sharp.CropPortrait
 import androidx.compose.material.icons.sharp.Edit
 import androidx.compose.material.icons.sharp.Movie
-import androidx.compose.material.icons.sharp.Palette
+import androidx.compose.material.icons.sharp.OpenInFull
 import androidx.compose.material.icons.sharp.Pause
 import androidx.compose.material.icons.sharp.Person
 import androidx.compose.material.icons.sharp.PlayArrow
@@ -45,7 +43,7 @@ import androidx.compose.material.icons.sharp.Settings
 import androidx.compose.material.icons.sharp.Share
 import androidx.compose.material.icons.sharp.Sync
 import androidx.compose.material.icons.sharp.SyncProblem
-import androidx.compose.material.icons.sharp.ZoomIn
+import androidx.compose.material.icons.sharp.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -250,61 +248,68 @@ fun CutScreen(
                 }
             )
 
-            // Recessed hardware switch well with raised v4-style 3D tool toggles + LED active states (zero flat white slabs!)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 10.dp, top = 12.dp, end = 10.dp, bottom = 4.dp)
-                    .sunkenPanel(radius = 14.dp, fill = Cs.SunkenTrack)
-                    .padding(5.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    CsPill(
-                        label = "captions",
-                        selected = opts.captions,
-                        icon = Icons.Sharp.ClosedCaption,
-                        onClick = { vm.setCoreCaptions(!opts.captions) },
-                        modifier = Modifier.testTag("cs_cut_captions")
-                    )
-                    CsPill(
-                        label = "trim pauses",
-                        selected = opts.stripSilence,
-                        icon = Icons.Sharp.ContentCut,
-                        onClick = { vm.setCoreStripSilence(!opts.stripSilence) },
-                        modifier = Modifier.testTag("cs_cut_strip_silence")
-                    )
-                    CsPill(
-                        label = "punch-in",
-                        selected = opts.punchIn,
-                        icon = Icons.Sharp.ZoomIn,
-                        onClick = { vm.setCorePunchIn(!opts.punchIn) },
-                        modifier = Modifier.testTag("cs_cut_punch_in")
-                    )
-                    val isVertical = opts.aspect == CoreRenderOptions.ASPECT_VERTICAL
-                    CsPill(
-                        label = if (isVertical) "9:16" else "16:9",
-                        selected = false,
-                        icon = if (isVertical) Icons.Sharp.CropPortrait else Icons.Sharp.CropLandscape,
-                        onClick = {
-                            vm.setCoreAspect(
-                                if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL
-                            )
-                        },
-                        modifier = Modifier.testTag("cs_cut_aspect")
-                    )
-                    CsPill(
-                        label = "look",
-                        selected = false,
-                        icon = Icons.Sharp.Palette,
-                        onClick = onOpenNewsroom,
-                        modifier = Modifier.testTag("cs_cut_look")
-                    )
-                }
+            // Machined brushed-silver OP-1 hardware console bar for direct video-modifying controls:
+            // recessed black OLED icon display + sculpted 3D silver pill keycap + functional colored LED below.
+            val isVertical = opts.aspect == CoreRenderOptions.ASPECT_VERTICAL
+            val lookAccentColor = remember(defaultLook?.accentHex) { parseAccentHex(defaultLook?.accentHex) }
+            VideoEditConsoleBar(
+                moduleCount = 5,
+                modifier = Modifier.padding(start = 10.dp, top = 10.dp, end = 10.dp, bottom = 2.dp)
+            ) { moduleW ->
+                VideoEditConsoleModule(
+                    label = "captions",
+                    contentDesc = "Toggle captions",
+                    icon = Icons.Sharp.ClosedCaption,
+                    active = opts.captions,
+                    ledColor = HwLed.Blue,
+                    width = moduleW,
+                    onClick = { vm.setCoreCaptions(!opts.captions) },
+                    modifier = Modifier.testTag("cs_cut_captions")
+                )
+                VideoEditConsoleModule(
+                    label = "trim",
+                    contentDesc = "Trim pauses",
+                    icon = Icons.Sharp.ContentCut,
+                    active = opts.stripSilence,
+                    ledColor = HwLed.Orange,
+                    width = moduleW,
+                    onClick = { vm.setCoreStripSilence(!opts.stripSilence) },
+                    modifier = Modifier.testTag("cs_cut_strip_silence")
+                )
+                VideoEditConsoleModule(
+                    label = "punch-in",
+                    contentDesc = "Toggle punch-in zoom",
+                    icon = Icons.Sharp.OpenInFull,
+                    active = opts.punchIn,
+                    ledColor = HwLed.Green,
+                    width = moduleW,
+                    onClick = { vm.setCorePunchIn(!opts.punchIn) },
+                    modifier = Modifier.testTag("cs_cut_punch_in")
+                )
+                VideoEditConsoleModule(
+                    label = if (isVertical) "9:16" else "16:9",
+                    contentDesc = if (isVertical) "Aspect 9 by 16" else "Aspect 16 by 9",
+                    icon = if (isVertical) Icons.Sharp.CropPortrait else Icons.Sharp.CropLandscape,
+                    active = true,
+                    ledColor = if (isVertical) HwLed.Orange else HwLed.Blue,
+                    width = moduleW,
+                    onClick = {
+                        vm.setCoreAspect(
+                            if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL
+                        )
+                    },
+                    modifier = Modifier.testTag("cs_cut_aspect")
+                )
+                VideoEditConsoleModule(
+                    label = "look",
+                    contentDesc = "Edit video look",
+                    icon = Icons.Sharp.Tune,
+                    active = true,
+                    ledColor = lookAccentColor,
+                    width = moduleW,
+                    onClick = onOpenNewsroom,
+                    modifier = Modifier.testTag("cs_cut_look")
+                )
             }
 
             // Sunken 2-way `words` · `b-roll` mode switch
@@ -758,46 +763,34 @@ private fun TranscriptWordsPane(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(start = 52.dp, top = 10.dp, bottom = 2.dp)
-                            .sunkenPanel(radius = 14.dp, fill = Cs.SunkenTrack)
-                            .padding(5.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            .padding(start = 52.dp, top = 10.dp, bottom = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        CsKey(
+                        VideoEditOledKey(
+                            label = "edit words",
+                            icon = Icons.Sharp.Edit,
+                            active = dirty,
+                            ledColor = HwLed.Orange,
                             onClick = { onEdit(idx) },
-                            role = KeyRole.STD,
-                            radius = 10.dp,
-                            pip = true,
-                            horizontalPadding = 10.dp,
-                            contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                            height = 44.dp,
+                            fontSize = 12.sp,
                             modifier = Modifier
                                 .weight(1f)
-                                .height(44.dp)
                                 .testTag("cs_clause_edit_btn_$idx")
-                        ) { tint ->
-                            Icon(Icons.Sharp.Edit, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
-                            Text("edit words", style = mono(13.sp, tint), maxLines = 1)
-                        }
+                        )
 
-                        CsKey(
+                        VideoEditOledKey(
+                            label = if (broll) "back to face" else "b-roll here",
+                            icon = Icons.Sharp.Movie,
+                            active = broll,
+                            ledColor = HwLed.Green,
                             onClick = { vm.toggleCutClauseBroll(idx) },
-                            role = if (broll) KeyRole.ACTIVE else KeyRole.STD,
-                            radius = 10.dp,
-                            pip = !broll,
-                            horizontalPadding = 10.dp,
-                            contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                            height = 44.dp,
+                            fontSize = 12.sp,
                             modifier = Modifier
                                 .weight(1f)
-                                .height(44.dp)
                                 .testTag("cs_clause_broll_btn_$idx")
-                        ) { tint ->
-                            Icon(Icons.Sharp.Movie, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
-                            Text(
-                                text = if (broll) "back to face" else "b-roll here",
-                                style = mono(13.sp, tint),
-                                maxLines = 1
-                            )
-                        }
+                        )
                     }
                 }
             }
@@ -895,16 +888,14 @@ private fun InlineClauseWordsEditor(
                 .testTag("cs_clause_editor_$idx")
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CsKeyLabel(
+            VideoEditOledKey(
                 label = "save words",
+                active = fieldState.text.toString().isNotBlank(),
+                ledColor = HwLed.Green,
                 onClick = { onSave(fieldState.text.toString()) },
-                role = KeyRole.COMMIT,
-                radius = 12.dp,
-                weight = FontWeight.Medium,
                 enabled = fieldState.text.toString().isNotBlank(),
-                modifier = Modifier
-                    .height(44.dp)
-                    .testTag("cs_clause_apply_$idx")
+                height = 44.dp,
+                modifier = Modifier.testTag("cs_clause_apply_$idx")
             )
             CsKeyLabel(
                 label = "cancel",
@@ -961,32 +952,16 @@ private fun BrollModePane(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                CsKey(
+                VideoEditOledKey(
+                    label = if (broll) "b-roll" else "face",
+                    icon = if (broll) Icons.Sharp.Movie else Icons.Sharp.Person,
+                    active = broll,
+                    ledColor = HwLed.Green,
                     onClick = { vm.toggleCutClauseBroll(idx) },
-                    role = if (broll) KeyRole.ACTIVE else KeyRole.STD,
-                    radius = 10.dp,
-                    pip = !broll,
-                    horizontalPadding = 12.dp,
-                    contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-                    modifier = Modifier
-                        .height(44.dp)
-                        .testTag("cs_timeline_toggle_$idx")
-                ) { tint ->
-                    if (broll) {
-                        CsLedDot(color = Cs.Voice, size = 6.dp)
-                    }
-                    Icon(
-                        imageVector = if (broll) Icons.Sharp.Movie else Icons.Sharp.Person,
-                        contentDescription = null,
-                        tint = tint,
-                        modifier = Modifier.size(17.dp)
-                    )
-                    Text(
-                        text = if (broll) "b-roll" else "face",
-                        style = mono(12.sp, tint, if (broll) FontWeight.SemiBold else FontWeight.Normal),
-                        maxLines = 1
-                    )
-                }
+                    height = 44.dp,
+                    fontSize = 11.5.sp,
+                    modifier = Modifier.testTag("cs_timeline_toggle_$idx")
+                )
             }
         }
     }

@@ -80,13 +80,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlin.math.pow
 
-private fun parseAccentHex(hex: String): Color {
-    val clean = hex.trim().removePrefix("#")
-    return runCatching {
-        if (clean.length == 6) Color((0xFF000000L or clean.toLong(16)).toInt()) else Cs.Red
-    }.getOrDefault(Cs.Red)
-}
-
 /**
  * 04 Video look (Clip Studio v5+ Hardware):
  * - Tappable live broadcast preview showing top-left News Logo Bug (`cornerBugText` / `showBrandBug`),
@@ -591,28 +584,24 @@ private fun LookBackgroundTab(
     onSelectLook: (String) -> Unit,
     onUpdateDraft: (NewsroomLook) -> Unit
 ) {
-    // 1. Editable Design System Accent Palette (4 raised hardware swatches with glowing LEDs)
-    CsSegmentedRow {
+    // 1. Editable Design System Accent Palette (unified silver-bezel recessed-OLED hardware strip)
+    VideoEditOledStrip(height = 44.dp) {
         val accents = listOf(
-            Triple("crimson", NewsroomLook.ACCENT_CRIMSON, Cs.Red),
-            Triple("amber", NewsroomLook.ACCENT_AMBER, Cs.AmberBright),
-            Triple("cobalt", NewsroomLook.ACCENT_COBALT, Cs.Cobalt),
-            Triple("mint", NewsroomLook.ACCENT_MINT, Cs.Mint)
+            Triple("crimson", NewsroomLook.ACCENT_CRIMSON, HwLed.Red),
+            Triple("amber", NewsroomLook.ACCENT_AMBER, HwLed.Amber),
+            Triple("cobalt", NewsroomLook.ACCENT_COBALT, HwLed.Blue),
+            Triple("mint", NewsroomLook.ACCENT_MINT, HwLed.Green)
         )
         accents.forEach { (name, hex, color) ->
             val selected = draft.accentHex.equals(hex, ignoreCase = true)
-            CsSegment(
+            VideoEditStripInset(
+                label = name,
                 selected = selected,
-                onClick = { onUpdateDraft(draft.copy(accentHex = hex)) },
-                height = 40.dp,
                 ledColor = color,
+                dimLedPreview = color,
+                onClick = { onUpdateDraft(draft.copy(accentHex = hex)) },
                 modifier = Modifier.testTag("cs_accent_$name")
-            ) { tint ->
-                if (!selected) {
-                    CsLedDot(color = color, size = 6.dp)
-                }
-                Text(name, style = mono(11.sp, tint), maxLines = 1, softWrap = false)
-            }
+            )
         }
     }
 
@@ -641,23 +630,21 @@ private fun LookBackgroundTab(
         tag = "cs_scrub_ev"
     )
 
-    // 3. LIGHT 3-way raised hardware switch well (`warm` · `neutral` · `cool`)
-    CsSegmentedRow {
+    // 3. LIGHT 3-way silver-bezel OLED hardware strip (`warm` · `neutral` · `cool`)
+    VideoEditOledStrip(height = 44.dp) {
         val lightChoices = listOf(
-            Triple(NewsroomLook.LIGHT_WARM, "warm", Cs.AmberBright),
-            Triple(NewsroomLook.LIGHT_NEUTRAL, "neutral", Cs.Ink),
-            Triple(NewsroomLook.LIGHT_COOL, "cool", Cs.Cobalt)
+            Triple(NewsroomLook.LIGHT_WARM, "warm", HwLed.Orange),
+            Triple(NewsroomLook.LIGHT_NEUTRAL, "neutral", Color.White),
+            Triple(NewsroomLook.LIGHT_COOL, "cool", HwLed.Blue)
         )
         lightChoices.forEach { (wire, label, ledCol) ->
-            CsSegment(
+            VideoEditStripInset(
+                label = label,
                 selected = draft.light == wire,
-                onClick = { onUpdateDraft(draft.copy(light = wire)) },
-                height = 42.dp,
                 ledColor = ledCol,
+                onClick = { onUpdateDraft(draft.copy(light = wire)) },
                 modifier = Modifier.testTag("cs_light_$label")
-            ) { tint ->
-                Text(label, style = mono(12.5.sp, tint), maxLines = 1)
-            }
+            )
         }
     }
 
@@ -697,8 +684,10 @@ private fun LookBackgroundTab(
                     }
                 }
             )
-            CsKeyLabel(
+            VideoEditOledKey(
                 label = if (state.isGeneratingBackdrop) "working…" else "generate",
+                active = promptState.text.toString().isNotBlank() && !state.isGeneratingBackdrop,
+                ledColor = HwLed.Blue,
                 onClick = {
                     val lookId = if (looks.any { it.id == draft.id }) {
                         draft.id
@@ -708,11 +697,9 @@ private fun LookBackgroundTab(
                     vm.generateBackdropForLook(lookId, promptState.text.toString())
                 },
                 enabled = promptState.text.toString().isNotBlank() && !state.isGeneratingBackdrop,
-                radius = 10.dp,
-                size = 12.sp,
-                modifier = Modifier
-                    .height(42.dp)
-                    .testTag("cs_backdrop_generate")
+                height = 42.dp,
+                fontSize = 11.5.sp,
+                modifier = Modifier.testTag("cs_backdrop_generate")
             )
         }
 
@@ -801,11 +788,12 @@ private fun LookStyleAndLogoTab(
                     }
                 }
             )
-            CsPill(
+            VideoEditOledKey(
                 label = if (options.showBrandBug) "bug on" else "bug off",
-                selected = options.showBrandBug,
-                accentBarColor = if (options.showBrandBug) Cs.Red else null,
-                height = 40.dp,
+                active = options.showBrandBug,
+                ledColor = HwLed.Green,
+                height = 42.dp,
+                fontSize = 11.5.sp,
                 onClick = {
                     vm.setCoreBrandBug(
                         show = !options.showBrandBug,
@@ -822,21 +810,24 @@ private fun LookStyleAndLogoTab(
         Text("BREAKING NEWS STYLE", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
         val activeTagKey = breakingStyle.titleTagKey
         val tags = listOf(
-            "none" to null,
-            "breaking" to Cs.Red,
-            "developing" to Cs.AmberBright,
-            "explainer" to Cs.Ink
+            "none" to Color.White,
+            "breaking" to HwLed.Red,
+            "developing" to HwLed.Amber,
+            "explainer" to HwLed.Blue
         )
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             tags.forEach { (tag, accent) ->
-                CsPill(
+                VideoEditOledKey(
                     label = tag,
-                    selected = activeTagKey == tag,
-                    accentBarColor = accent,
+                    active = activeTagKey == tag,
+                    ledColor = accent,
+                    dimLedPreview = if (tag == "none") null else accent,
                     onClick = { vm.setTitleTagStyle(tag) },
+                    height = 42.dp,
+                    fontSize = 11.5.sp,
                     modifier = Modifier.testTag("cs_tag_$tag")
                 )
             }
@@ -1005,41 +996,19 @@ private fun LookCardsTab(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        CsKey(
+                        VideoEditOledKey(
+                            label = cleanHeadline,
+                            icon = if (attached) Icons.Sharp.Check else Icons.Sharp.Add,
+                            active = attached,
+                            ledColor = HwLed.Green,
+                            trailingText = "${ovl.durationSec}s",
                             onClick = { vm.toggleSavedOverlayForPipeline(ovl.id) },
-                            role = if (attached) KeyRole.ACTIVE else KeyRole.STD,
-                            radius = 12.dp,
-                            pip = !attached,
-                            horizontalPadding = 12.dp,
-                            contentAlignment = Arrangement.spacedBy(8.dp),
+                            height = 46.dp,
+                            fontSize = 12.sp,
                             modifier = Modifier
                                 .weight(1f)
-                                .height(46.dp)
                                 .testTag("cs_overlay_${ovl.id}")
-                        ) { tint ->
-                            if (attached) {
-                                CsLedDot(color = Cs.Mint, size = 6.5.dp)
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Sharp.Add,
-                                    contentDescription = null,
-                                    tint = tint,
-                                    modifier = Modifier.size(17.dp)
-                                )
-                            }
-                            Text(
-                                text = cleanHeadline,
-                                style = sans(14.5.sp, tint, 19.sp),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Text(
-                                text = "${ovl.durationSec}s",
-                                style = mono(11.5.sp, Cs.Muted),
-                                maxLines = 1
-                            )
-                        }
+                        )
                         CsIconKey(
                             icon = Icons.Sharp.Edit,
                             contentDescription = "Edit card text",
@@ -1055,21 +1024,18 @@ private fun LookCardsTab(
         }
     }
 
-    CsKey(
+    VideoEditOledKey(
+        label = "create / generate cards",
+        icon = Icons.Sharp.FormatQuote,
+        active = attachedOverlays.isNotEmpty(),
+        ledColor = HwLed.Blue,
         onClick = onOpenOverlayBuilder,
-        role = KeyRole.STD,
-        radius = 12.dp,
-        pip = true,
-        horizontalPadding = 16.dp,
-        contentAlignment = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        height = 46.dp,
+        fontSize = 12.sp,
         modifier = Modifier
             .fillMaxWidth()
-            .height(46.dp)
             .testTag("cs_open_overlay_builder")
-    ) { tint ->
-        Icon(Icons.Sharp.FormatQuote, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
-        Text("create / generate cards", style = mono(13.sp, tint), maxLines = 1)
-    }
+    )
 }
 
 @Composable
@@ -1148,21 +1114,20 @@ private fun LookBrollFramingTab(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("CUT-SCENE B-ROLL FRAMING", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
-        CsSegmentedRow {
+        VideoEditOledStrip(height = 46.dp) {
             val modes = listOf(
                 CoreRenderOptions.BROLL_FRAMING_PIP to "Corner PiP",
                 CoreRenderOptions.BROLL_FRAMING_FULL to "Full Cut",
                 CoreRenderOptions.BROLL_FRAMING_SPLIT to "Split 50/50"
             )
             modes.forEach { (wire, label) ->
-                CsSegment(
+                VideoEditStripInset(
+                    label = label,
                     selected = options.brollFraming == wire,
+                    ledColor = HwLed.Green,
                     onClick = { vm.setCoreBrollFraming(wire) },
-                    height = 44.dp,
                     modifier = Modifier.testTag("cs_broll_framing_$wire")
-                ) { tint ->
-                    Text(label, style = mono(12.sp, tint), maxLines = 1, softWrap = false)
-                }
+                )
             }
         }
     }

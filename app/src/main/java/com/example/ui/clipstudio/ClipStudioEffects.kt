@@ -11,12 +11,30 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -24,8 +42,10 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
@@ -37,14 +57,23 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -844,5 +873,616 @@ fun Modifier.neumorphicDockKey(
             cornerRadius = innerCorner,
             style = Stroke(width = 1.dp.toPx())
         )
+    }
+}
+
+// =============================================================================
+// 5. Silver-Bezel Recessed-OLED Hardware Video-Edit Controls (OP-1 / Tactile Deck)
+//    Used exclusively on buttons that directly edit or modify video.
+// =============================================================================
+
+object HwLed {
+    val Orange = Color(0xFFFF7A14)
+    val Blue = Color(0xFF1A8CFF)
+    val Green = Color(0xFF12C95B)
+    val Red = Color(0xFFE52424)
+    val Amber = Color(0xFFF0A500)
+}
+
+/**
+ * Draws a recessed spherical 3D hardware LED jewel onto a light-silver faceplate:
+ * - When [lit] is true: real colored radial light bloom on the surrounding aluminum + glossy 3D colored dome + specular glint.
+ * - When [lit] is false: dark anodized recessed LED socket + unlit glass lens (or faint [dimTint] preview when supplied).
+ */
+internal fun DrawScope.drawHardwareLedJewel(
+    center: Offset,
+    radius: Float,
+    color: Color,
+    lit: Boolean,
+    dimTint: Color? = null
+) {
+    // 1. Subtle recessed socket ring cut into the silver housing
+    drawCircle(
+        color = Color(0xFF707580).copy(alpha = 0.72f),
+        radius = radius * 1.18f,
+        center = Offset(center.x, center.y - radius * 0.10f)
+    )
+    drawCircle(
+        color = Color.White.copy(alpha = 0.65f),
+        radius = radius * 1.16f,
+        center = Offset(center.x, center.y + radius * 0.14f)
+    )
+
+    if (lit) {
+        // Real colored light halo spilled onto the brushed-silver housing around the LED
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    color.copy(alpha = 0.58f),
+                    color.copy(alpha = 0.18f),
+                    Color.Transparent
+                ),
+                center = center,
+                radius = radius * 2.55f
+            ),
+            radius = radius * 2.55f,
+            center = center
+        )
+        // Saturated 3D refractive jewel body
+        val darkRim = Color(
+            red = (color.red * 0.48f).coerceIn(0f, 1f),
+            green = (color.green * 0.48f).coerceIn(0f, 1f),
+            blue = (color.blue * 0.48f).coerceIn(0f, 1f),
+            alpha = 1f
+        )
+        val hotCore = Color(
+            red = (color.red + (1f - color.red) * 0.42f).coerceIn(0f, 1f),
+            green = (color.green + (1f - color.green) * 0.42f).coerceIn(0f, 1f),
+            blue = (color.blue + (1f - color.blue) * 0.42f).coerceIn(0f, 1f),
+            alpha = 1f
+        )
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(hotCore, color, darkRim),
+                center = Offset(center.x - radius * 0.22f, center.y - radius * 0.22f),
+                radius = radius * 1.18f
+            ),
+            radius = radius,
+            center = center
+        )
+        // Specular glass pinpoint
+        drawCircle(
+            color = Color.White.copy(alpha = 0.90f),
+            radius = radius * 0.30f,
+            center = Offset(center.x - radius * 0.28f, center.y - radius * 0.28f)
+        )
+    } else {
+        // Physical unlit dark lens sitting inside the recessed socket
+        val base = dimTint ?: Color(0xFF474C56)
+        val centerCol = if (dimTint != null) {
+            Color(
+                red = base.red * 0.55f + 0.18f,
+                green = base.green * 0.55f + 0.18f,
+                blue = base.blue * 0.55f + 0.18f,
+                alpha = 1f
+            )
+        } else {
+            Color(0xFF565B66)
+        }
+        val edgeCol = if (dimTint != null) {
+            Color(base.red * 0.30f, base.green * 0.30f, base.blue * 0.30f, 1f)
+        } else {
+            Color(0xFF2B2E36)
+        }
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(centerCol, edgeCol),
+                center = Offset(center.x - radius * 0.2f, center.y - radius * 0.2f),
+                radius = radius * 1.15f
+            ),
+            radius = radius,
+            center = center
+        )
+        drawCircle(
+            color = Color.White.copy(alpha = 0.24f),
+            radius = radius * 0.24f,
+            center = Offset(center.x - radius * 0.28f, center.y - radius * 0.28f)
+        )
+    }
+}
+
+/**
+ * Draws the sculpted 3D molded light-silver / off-white hardware shell (used for console bars,
+ * individual OLED keycaps, and unified hardware strips).
+ */
+private fun DrawScope.drawMoldedSilverShell(
+    radiusPx: Float,
+    pressed: Boolean = false,
+    enabled: Boolean = true
+) {
+    val corner = CornerRadius(radiusPx, radiusPx)
+    val skirtPx = if (pressed) 0.75.dp.toPx() else 2.25.dp.toPx()
+    val faceH = (size.height - skirtPx).coerceAtLeast(2f)
+
+    // Outer ambient drop shadow onto the dark chassis
+    if (!pressed) {
+        drawRoundRect(
+            color = Color.Black.copy(alpha = if (enabled) 0.58f else 0.28f),
+            topLeft = Offset(0f, 2.5.dp.toPx()),
+            size = size,
+            cornerRadius = corner
+        )
+    }
+
+    // Lower 3D beveled skirt rim
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(Color(0xFFAEB4BE), Color(0xFF838994)),
+            startY = faceH * 0.55f,
+            endY = size.height
+        ),
+        topLeft = Offset(0f, 0.75.dp.toPx()),
+        size = Size(size.width, (size.height - 0.75.dp.toPx()).coerceAtLeast(1f)),
+        cornerRadius = corner
+    )
+
+    // Main sculpted matte light-silver faceplate body
+    val topFace = if (pressed) Color(0xFFD5D8DF) else Color(0xFFF1F3F6)
+    val midFace = if (pressed) Color(0xFFC5C9D2) else Color(0xFFDCDFE5)
+    val botFace = if (pressed) Color(0xFFB4B9C3) else Color(0xFFC4C9D2)
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(
+                if (enabled) topFace else topFace.copy(alpha = 0.55f),
+                if (enabled) midFace else midFace.copy(alpha = 0.55f),
+                if (enabled) botFace else botFace.copy(alpha = 0.55f)
+            ),
+            startY = 0f,
+            endY = faceH
+        ),
+        topLeft = Offset.Zero,
+        size = Size(size.width, faceH),
+        cornerRadius = corner
+    )
+
+    // Crisp upper specular highlight + subtle inner bevel contour
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(
+                Color.White.copy(alpha = if (pressed) 0.35f else 0.92f),
+                Color.White.copy(alpha = 0.14f),
+                Color(0xFF7B818C).copy(alpha = 0.45f)
+            ),
+            startY = 0f,
+            endY = faceH
+        ),
+        topLeft = Offset(0.5.dp.toPx(), 0.5.dp.toPx()),
+        size = Size((size.width - 1.dp.toPx()).coerceAtLeast(1f), (faceH - 1.dp.toPx()).coerceAtLeast(1f)),
+        cornerRadius = CornerRadius((radiusPx - 0.5.dp.toPx()).coerceAtLeast(1f)),
+        style = Stroke(width = 1.dp.toPx())
+    )
+}
+
+/**
+ * Draws a deeply recessed glossy pure-black OLED screen window inlaid inside a silver housing.
+ */
+private fun DrawScope.drawRecessedOledWindow(
+    topLeft: Offset,
+    winSize: Size,
+    radiusPx: Float,
+    activeSurface: Boolean = true
+) {
+    val corner = CornerRadius(radiusPx, radiusPx)
+    // Recessed chamfer border on silver bezel around the cutout (shadow top, bright catch bottom)
+    drawRoundRect(
+        color = Color(0xFF838894).copy(alpha = 0.75f),
+        topLeft = Offset(topLeft.x - 0.75.dp.toPx(), topLeft.y - 0.9.dp.toPx()),
+        size = Size(winSize.width + 1.5.dp.toPx(), winSize.height + 1.5.dp.toPx()),
+        cornerRadius = CornerRadius(radiusPx + 0.75.dp.toPx()),
+        style = Stroke(width = 1.dp.toPx())
+    )
+    drawRoundRect(
+        color = Color.White.copy(alpha = 0.72f),
+        topLeft = Offset(topLeft.x - 0.5.dp.toPx(), topLeft.y + 0.6.dp.toPx()),
+        size = Size(winSize.width + 1.dp.toPx(), winSize.height + 0.8.dp.toPx()),
+        cornerRadius = CornerRadius(radiusPx + 0.5.dp.toPx()),
+        style = Stroke(width = 0.9.dp.toPx())
+    )
+
+    // Glossy jet-black OLED display cavity
+    val topCol = if (activeSurface) Color(0xFF151820) else Color(0xFF262A33)
+    val botCol = if (activeSurface) Color(0xFF040507) else Color(0xFF13151B)
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(topCol, botCol),
+            startY = topLeft.y,
+            endY = topLeft.y + winSize.height
+        ),
+        topLeft = topLeft,
+        size = winSize,
+        cornerRadius = corner
+    )
+    // Subtle crisp inner glass stroke
+    drawRoundRect(
+        color = Color.Black.copy(alpha = 0.85f),
+        topLeft = topLeft,
+        size = winSize,
+        cornerRadius = corner,
+        style = Stroke(width = 1.dp.toPx())
+    )
+}
+
+/**
+ * OP-1 / Industrial Hardware Console Bar (exact match to Ryan's 2nd reference):
+ * a machined brushed-silver faceplate bar housing a horizontal row of [VideoEditConsoleModule]
+ * controls (recessed black OLED icon tile above + 3D tactile sculpted light-silver pill keycap +
+ * centered recessed glowing functional LED dot directly underneath).
+ *
+ * Fits all 5 direct video-editing modules edge-to-edge on standard phone widths while remaining
+ * horizontally scrollable for narrow windows and E2E `performScrollTo()` compatibility.
+ */
+@Composable
+fun VideoEditConsoleBar(
+    modifier: Modifier = Modifier,
+    moduleCount: Int = 5,
+    content: @Composable RowScope.(moduleWidth: Dp) -> Unit
+) {
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxWidth()
+            .drawBehind {
+                drawMoldedSilverShell(radiusPx = 18.dp.toPx(), pressed = false, enabled = true)
+            }
+            .clip(RoundedCornerShape(18.dp))
+            .padding(start = 7.dp, top = 7.dp, end = 7.dp, bottom = 7.dp)
+    ) {
+        val gap = 6.dp
+        val count = moduleCount.coerceAtLeast(1)
+        val computedW = ((maxWidth - gap * (count - 1)) / count).coerceAtLeast(64.dp)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(gap),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            content(computedW)
+        }
+    }
+}
+
+/**
+ * Single vertical 3-tier video-editing hardware module inside [VideoEditConsoleBar]:
+ * 1. Top: recessed glossy pure-black OLED icon screen (`icon` in pure crisp white)
+ * 2. Middle: raised 3D sculpted light-silver tactile pill keycap with subtle engraved label
+ * 3. Bottom: centered recessed color-coded glowing LED jewel (real live state; dim unlit socket when off)
+ */
+@Composable
+fun VideoEditConsoleModule(
+    label: String,
+    icon: ImageVector,
+    active: Boolean,
+    ledColor: Color,
+    onClick: () -> Unit,
+    width: Dp,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    contentDesc: String = label
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val isPressed = pressed && enabled
+
+    Column(
+        modifier = modifier
+            .width(width)
+            .semantics(mergeDescendants = true) {
+                contentDescription = contentDesc
+            }
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick
+            ),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        // 1. Top recessed glossy jet-black OLED screen tile with crisp white icon
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(29.dp)
+                .drawBehind {
+                    drawRecessedOledWindow(
+                        topLeft = Offset.Zero,
+                        winSize = size,
+                        radiusPx = 8.dp.toPx(),
+                        activeSurface = true
+                    )
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (enabled) Color.White else Color.White.copy(alpha = 0.45f),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+
+        // 2. Middle raised 3D sculpted light-silver tactile pill keycap (depresses on touch)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(23.dp)
+                .offset(y = if (isPressed) 1.dp else 0.dp)
+                .drawBehind {
+                    val r = size.height / 2f
+                    val corner = CornerRadius(r, r)
+                    if (!isPressed) {
+                        // Soft downward shadow onto the brushed-silver faceplate
+                        drawRoundRect(
+                            color = Color(0xFF424752).copy(alpha = 0.42f),
+                            topLeft = Offset(0f, 1.8.dp.toPx()),
+                            size = size,
+                            cornerRadius = corner
+                        )
+                    }
+                    // Molded convex light-grey keycap fill
+                    val topCol = if (isPressed) Color(0xFFC4C8D0) else Color(0xFFF3F5F8)
+                    val botCol = if (isPressed) Color(0xFFD5D8DF) else Color(0xFFCCD0D8)
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(colors = listOf(topCol, botCol)),
+                        topLeft = Offset.Zero,
+                        size = size,
+                        cornerRadius = corner
+                    )
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = if (isPressed) 0.20f else 0.92f),
+                                Color(0xFF7D838E).copy(alpha = 0.55f)
+                            )
+                        ),
+                        topLeft = Offset(0.5.dp.toPx(), 0.5.dp.toPx()),
+                        size = Size((size.width - 1.dp.toPx()).coerceAtLeast(1f), (size.height - 1.dp.toPx()).coerceAtLeast(1f)),
+                        cornerRadius = corner,
+                        style = Stroke(width = 0.9.dp.toPx())
+                    )
+                }
+                .padding(horizontal = 3.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = label,
+                style = mono(
+                    size = 9.2.sp,
+                    color = if (enabled) Color(0xFF1F222A) else Color(0xFF6B707B),
+                    weight = FontWeight.SemiBold
+                ),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip
+            )
+        }
+
+        // 3. Bottom centered recessed color-coded hardware LED jewel
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(11.dp)
+        ) {
+            drawHardwareLedJewel(
+                center = Offset(size.width / 2f, size.height / 2f),
+                radius = 3.4.dp.toPx(),
+                color = ledColor,
+                lit = active && enabled
+            )
+        }
+    }
+}
+
+/**
+ * Individual Molded Silver-White Recessed-OLED Hardware Keycap (exact match to Ryan's 1st reference):
+ * thick sculpted light-silver rounded shell + centered recessed jet-black OLED window with crisp
+ * pure-white icon/label + tiny recessed spherical colored LED jewel tucked in the bottom-right corner.
+ */
+@Composable
+fun VideoEditOledKey(
+    label: String,
+    active: Boolean,
+    ledColor: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    enabled: Boolean = true,
+    height: Dp = 44.dp,
+    fontSize: TextUnit = 12.sp,
+    dimLedPreview: Color? = null,
+    trailingText: String? = null
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val isPressed = pressed && enabled
+
+    Box(
+        modifier = modifier
+            .height(height)
+            .offset(y = if (isPressed) 1.dp else 0.dp)
+            .drawBehind {
+                drawMoldedSilverShell(radiusPx = 13.dp.toPx(), pressed = isPressed, enabled = enabled)
+                // Recessed jet-black OLED window centered inside the sculpted silver frame
+                val padH = 6.dp.toPx()
+                val padTop = 5.dp.toPx()
+                val padBot = 7.dp.toPx()
+                val winW = (size.width - padH * 2f).coerceAtLeast(8f)
+                val winH = (size.height - padTop - padBot).coerceAtLeast(8f)
+                drawRecessedOledWindow(
+                    topLeft = Offset(padH, padTop),
+                    winSize = Size(winW, winH),
+                    radiusPx = 8.5.dp.toPx(),
+                    activeSurface = true
+                )
+            }
+            .drawWithContent {
+                drawContent()
+                // Bottom-right corner recessed glossy colored LED jewel (exact Image 1 placement)
+                drawHardwareLedJewel(
+                    center = Offset(size.width - 6.dp.toPx(), size.height - 7.dp.toPx()),
+                    radius = 3.3.dp.toPx(),
+                    color = ledColor,
+                    lit = active && enabled,
+                    dimTint = dimLedPreview
+                )
+            }
+            .clip(RoundedCornerShape(13.dp))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick
+            )
+            .padding(start = 12.dp, top = 5.dp, end = 14.dp, bottom = 7.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        val fg = if (enabled) Color.White else Color.White.copy(alpha = 0.45f)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = fg,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            Text(
+                text = label,
+                style = mono(fontSize, fg, if (active) FontWeight.SemiBold else FontWeight.Medium),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                modifier = if (trailingText != null) Modifier.weight(1f, fill = false) else Modifier
+            )
+            if (trailingText != null) {
+                Text(
+                    text = trailingText,
+                    style = mono(11.sp, Color(0xFFA0A5B2)),
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Unified Molded Silver-White Hardware Strip (exact match to the bottom faceplate bar of Ryan's 1st reference):
+ * a single continuous light-silver rounded hardware chassis containing side-by-side recessed jet-black
+ * OLED screen insets, each with its own bottom-right corner spherical colored LED jewel.
+ */
+@Composable
+fun VideoEditOledStrip(
+    modifier: Modifier = Modifier,
+    height: Dp = 46.dp,
+    content: @Composable RowScope.() -> Unit
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(height)
+            .drawBehind {
+                drawMoldedSilverShell(radiusPx = 14.dp.toPx(), pressed = false, enabled = true)
+            }
+            .clip(RoundedCornerShape(14.dp))
+            .padding(start = 7.dp, top = 5.dp, end = 7.dp, bottom = 7.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        content = content
+    )
+}
+
+/**
+ * Single recessed jet-black OLED button inset inside [VideoEditOledStrip], paired with a
+ * bottom-right corner spherical colored LED jewel right on the silver bezel corner.
+ */
+@Composable
+fun RowScope.VideoEditStripInset(
+    label: String,
+    selected: Boolean,
+    ledColor: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    enabled: Boolean = true,
+    dimLedPreview: Color? = null
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val isPressed = pressed && enabled
+
+    Box(
+        modifier = modifier
+            .weight(1f)
+            .fillMaxHeight()
+            .offset(y = if (isPressed) 0.8.dp else 0.dp)
+            .drawBehind {
+                drawRecessedOledWindow(
+                    topLeft = Offset(0f, 0f),
+                    winSize = Size(size.width, size.height),
+                    radiusPx = 8.5.dp.toPx(),
+                    activeSurface = selected || isPressed
+                )
+            }
+            .drawWithContent {
+                drawContent()
+                drawHardwareLedJewel(
+                    center = Offset(size.width - 2.dp.toPx(), size.height - 1.5.dp.toPx()),
+                    radius = 3.2.dp.toPx(),
+                    color = ledColor,
+                    lit = selected && enabled,
+                    dimTint = dimLedPreview
+                )
+            }
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Tab,
+                onClick = onClick
+            )
+            .padding(horizontal = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        val fg = when {
+            !enabled -> Color.White.copy(alpha = 0.35f)
+            selected -> Color.White
+            else -> Color(0xFFD0D4DE)
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally)
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = fg,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+            Text(
+                text = label,
+                style = mono(11.sp, fg, if (selected) FontWeight.SemiBold else FontWeight.Medium),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }

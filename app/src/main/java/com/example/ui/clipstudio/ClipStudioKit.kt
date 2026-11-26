@@ -536,7 +536,7 @@ fun CsPill(
             CsLedDot(
                 color = when {
                     accentBarColor != null -> accentBarColor
-                    else -> Cs.Voice
+                    else -> Cs.Mint
                 },
                 size = 6.5.dp
             )
@@ -576,7 +576,12 @@ fun CsSegmentedRow(
     )
 }
 
-/** Individual raised hardware segment inside [CsSegmentedRow]. Active shows elevated keycap + LED dot; inactive shows raised keycap + corner pip. */
+/**
+ * Individual raised hardware segment inside [CsSegmentedRow].
+ * Active navigation segments highlight cleanly with an elevated keycap + subtle crisp white bottom
+ * indicator bar (zero misleading red recording lights); optional [ledColor] renders a colored LED only
+ * when explicitly requested.
+ */
 @Composable
 fun RowScope.CsSegment(
     selected: Boolean,
@@ -584,7 +589,7 @@ fun RowScope.CsSegment(
     modifier: Modifier = Modifier,
     height: Dp = 44.dp,
     enabled: Boolean = true,
-    ledColor: Color = Cs.Voice,
+    ledColor: Color? = null,
     content: @Composable RowScope.(Color) -> Unit
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -602,6 +607,18 @@ fun RowScope.CsSegment(
                 enabled = enabled,
                 pip = !selected
             )
+            .drawBehind {
+                if (selected && enabled && ledColor == null) {
+                    val barW = 20.dp.toPx().coerceAtMost(size.width * 0.45f)
+                    val barH = 2.dp.toPx()
+                    drawRoundRect(
+                        color = Cs.InkBright.copy(alpha = 0.85f),
+                        topLeft = Offset((size.width - barW) / 2f, size.height - 6.dp.toPx()),
+                        size = Size(barW, barH),
+                        cornerRadius = CornerRadius(barH / 2f, barH / 2f)
+                    )
+                }
+            }
             .clip(RoundedCornerShape(10.dp))
             .clickable(
                 interactionSource = interaction,
@@ -619,7 +636,7 @@ fun RowScope.CsSegment(
             selected -> Cs.White
             else -> Cs.InkSub
         }
-        if (selected && enabled) {
+        if (selected && enabled && ledColor != null) {
             CsLedDot(color = ledColor, size = 6.dp)
         }
         content(tint)
@@ -1385,6 +1402,14 @@ fun CsSectionLabel(text: String, modifier: Modifier = Modifier) {
 @Composable
 fun CsColumn(modifier: Modifier = Modifier, gap: Dp = 8.dp, content: @Composable ColumnScope.() -> Unit) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(gap), content = content)
+}
+
+/** Parses a persisted 6-digit hex accent string (e.g. `#D71921`) into a Compose [Color]. */
+internal fun parseAccentHex(hex: String?): Color {
+    val clean = hex.orEmpty().trim().removePrefix("#")
+    return runCatching {
+        if (clean.length == 6) Color((0xFF000000L or clean.toLong(16)).toInt()) else Cs.Red
+    }.getOrDefault(Cs.Red)
 }
 
 /** Formats milliseconds as `m:ss` (e.g. `0:58`, `1:05`), matching the Clip Studio v5 spec. */
