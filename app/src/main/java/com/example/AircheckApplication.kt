@@ -183,6 +183,23 @@ class AircheckContainer(context: Context) {
             fallbackReady = { modelDownloadManager.isReady() },
         )
     }
+    /**
+     * Route Spark drafting and Script editing to this phone (AICore, Gemma fallback) or back to the
+     * Mac rig default. Persisted; [LlmStageRouter] reads it on every pass.
+     */
+    fun setDraftOnPhone(onPhone: Boolean) {
+        val provider = if (onPhone) {
+            com.example.data.LlmProviderChoice.LOCAL_AICORE_NANO
+        } else {
+            com.example.data.LlmProviderChoice.MAC_RIG_DEFAULT
+        }
+        appScope.launch {
+            profileStore.setLlmStageConfig(com.example.data.LlmStage.DRAFTING, provider)
+            profileStore.setLlmStageConfig(com.example.data.LlmStage.SCRIPT_EDIT, provider)
+            pipelineLogger.info("model", "drafting location set to ${provider.id}")
+        }
+    }
+
     /** Stop any transfer, unload the engine, then remove the Gemma weights and partial files. */
     fun deleteGemmaFallback() {
         com.example.engine.ModelDownloadWorker.pause(appContext)

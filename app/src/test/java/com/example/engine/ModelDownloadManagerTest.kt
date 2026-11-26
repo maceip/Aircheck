@@ -3,7 +3,9 @@ package com.example.engine
 import android.app.Application
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -261,6 +263,7 @@ class ModelDownloadManagerTest {
                 }
             }
         }
+        var draftOnPhone by androidx.compose.runtime.mutableStateOf(false)
         setContent {
             AircheckTheme {
                 val state by manager.state.collectAsState()
@@ -270,12 +273,18 @@ class ModelDownloadManagerTest {
                     onDownload = { start() },
                     onPause = { job?.cancel() },
                     onDelete = { manager.delete() },
+                    draftOnPhone = draftOnPhone,
+                    onDraftOnPhoneChange = { draftOnPhone = it },
                 )
             }
         }
         onNodeWithTag("aicore_model_label").assertTextEquals("Not available")
         onNodeWithTag("gemma_phase_label").assertTextEquals("Not downloaded")
         onNodeWithTag("gemma_delete_button").assertDoesNotExist()
+        // No AICore and no Gemma yet: phone drafting cannot be selected.
+        onNodeWithTag("draft_location_label").assertTextEquals("Mac Studio")
+        onNodeWithTag("draft_on_phone_button").assertIsNotEnabled()
+        onNodeWithTag("draft_location_hint").assertExists()
 
         // Download -> transfer stalls mid-way -> Pause keeps the partial bytes.
         stallObject = true
@@ -297,6 +306,15 @@ class ModelDownloadManagerTest {
         assertArrayEquals(payload, manager.modelFile().readBytes())
         onNodeWithTag("gemma_phase_label").assertTextEquals("Ready")
         onNodeWithTag("gemma_download_button").assertDoesNotExist()
+
+        // With verified Gemma on disk the phone can draft: switch there and back.
+        onNodeWithTag("draft_location_hint").assertDoesNotExist()
+        onNodeWithTag("draft_on_phone_button").performClick()
+        waitUntil(timeoutMillis = 5_000) { draftOnPhone }
+        onNodeWithTag("draft_location_label").assertTextEquals("This phone")
+        onNodeWithTag("draft_on_mac_button").performClick()
+        waitUntil(timeoutMillis = 5_000) { !draftOnPhone }
+        onNodeWithTag("draft_location_label").assertTextEquals("Mac Studio")
 
         // Delete -> files are gone and the card is back to Not downloaded.
         onNodeWithTag("gemma_delete_button").performClick()

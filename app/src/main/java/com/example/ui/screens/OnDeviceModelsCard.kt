@@ -50,12 +50,57 @@ fun OnDeviceModelsCard(
     onDownload: () -> Unit,
     onPause: () -> Unit,
     onDelete: () -> Unit,
+    draftOnPhone: Boolean,
+    onDraftOnPhoneChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val tokens = LocalAircheckTokens.current
+    // Phone drafting needs a model that can actually run here: the AICore model or verified Gemma.
+    val phoneCanDraft = aicore.baseModelName != null || download.phase == Phase.READY
     StudioCard(modifier = modifier.fillMaxWidth().testTag("on_device_models_card")) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("On-device drafting models", style = MaterialTheme.typography.titleSmall, color = StudioCrisp)
+
+            // Where Spark/Script drafting runs. Persisted in settings; read by the LLM stage router.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Write scripts on", style = MaterialTheme.typography.bodyMedium, color = StudioCrisp)
+                Text(
+                    text = if (draftOnPhone) "This phone" else "Mac Studio",
+                    style = TelemetryTimecodeStyle,
+                    color = tokens.channelAccent,
+                    modifier = Modifier.testTag("draft_location_label")
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                ModelButton(
+                    label = "This phone",
+                    tag = "draft_on_phone_button",
+                    onClick = { onDraftOnPhoneChange(true) },
+                    modifier = Modifier.weight(1f),
+                    enabled = phoneCanDraft && !draftOnPhone,
+                    selected = draftOnPhone
+                )
+                ModelButton(
+                    label = "Mac Studio",
+                    tag = "draft_on_mac_button",
+                    onClick = { onDraftOnPhoneChange(false) },
+                    modifier = Modifier.weight(1f),
+                    enabled = draftOnPhone,
+                    selected = !draftOnPhone
+                )
+            }
+            if (!phoneCanDraft && aicore.checked) {
+                Text(
+                    text = "No on-device model can run yet — download the Gemma fallback to draft on this phone.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TelemetryMuted,
+                    modifier = Modifier.testTag("draft_location_hint")
+                )
+            }
 
             // Primary: AICore system model.
             Row(
@@ -175,12 +220,24 @@ fun OnDeviceModelsCard(
 }
 
 @Composable
-private fun ModelButton(label: String, tag: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun ModelButton(
+    label: String,
+    tag: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    selected: Boolean = false,
+) {
+    val tokens = LocalAircheckTokens.current
     OutlinedButton(
         onClick = onClick,
+        enabled = enabled,
         shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, LocalAircheckTokens.current.hairline),
-        colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+        border = BorderStroke(1.dp, if (selected) tokens.channelAccent else tokens.hairline),
+        colors = ButtonDefaults.outlinedButtonColors(
+            contentColor = StudioCrisp,
+            disabledContentColor = if (selected) tokens.channelAccent else TelemetryMuted
+        ),
         modifier = modifier.height(46.dp).testTag(tag)
     ) {
         Text(label)

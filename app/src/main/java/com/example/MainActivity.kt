@@ -218,7 +218,10 @@ fun AircheckApp(
                                 download = download,
                                 onDownload = { com.example.engine.ModelDownloadWorker.enqueue(appCtx) },
                                 onPause = { com.example.engine.ModelDownloadWorker.pause(appCtx) },
-                                onDelete = { container.deleteGemmaFallback() }
+                                onDelete = { container.deleteGemmaFallback() },
+                                draftOnPhone = studioState.settings.llmRouting.drafting.provider ==
+                                    com.example.data.LlmProviderChoice.LOCAL_AICORE_NANO,
+                                onDraftOnPhoneChange = { onPhone -> container.setDraftOnPhone(onPhone) }
                             )
                         },
                         onClose = { showSettingsModal = false }
