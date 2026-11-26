@@ -29,12 +29,14 @@ import argparse
 import base64
 import binascii
 from concurrent.futures import ThreadPoolExecutor
+import contextvars
 import datetime
 import hashlib
 import io
 import ipaddress
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import queue
 import re
@@ -42,6 +44,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -97,6 +100,130 @@ VALID_RESOLUTIONS = frozenset({"480P", "720P", "1080P"})
 VALID_RATIOS = frozenset({"9:16", "16:9", "1:1"})
 TALKING_HEAD_TIMEOUT_BASE_SEC = 600
 MAX_PENDING_ASYNC_TASKS = 16
+
+# Coarse progress reporter bound to the currently running async task (tts/chop/backdrop). The async
+# worker sets it so deep compose/synthesis code can report milestones without signature changes; it
+# is a no-op for synchronous calls (default None).
+_ASYNC_PROGRESS: contextvars.ContextVar[Callable[[float, str], None] | None] = contextvars.ContextVar(
+    "aircheck_async_progress", default=None
+)
+
+
+def _report_async_progress(fraction: float, detail: str) -> None:
+    cb = _ASYNC_PROGRESS.get()
+    if cb is not None:
+        try:
+            cb(float(fraction), str(detail))
+        except Exception:  # noqa: BLE001 - progress must never break a render
+            LOGGER.debug("async progress report failed", exc_info=True)
+
+
+def _setup_durable_logging(renders_dir: Path) -> Path:
+    """Attach a bounded, auto-rotating generation log so status survives restarts with zero upkeep."""
+    log_dir = Path(renders_dir) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "generation.log"
+    handler = RotatingFileHandler(
+        log_path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    handler.setLevel(logging.INFO)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    if root.level == logging.NOTSET or root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+    LOGGER.info("Durable generation log active: %s (5 MB x 5 rotation)", log_path)
+    return log_path
+
+
+class _RybbitLogHandler(logging.Handler):
+    """Forwards rig log records to a self-hosted Rybbit sink (POST /api/track).
+
+    Config-gated and fire-and-forget: never blocks or breaks generation. The ingest API key stays
+    server-side on the rig (never in the app). Without a key, events still ingest but are classified
+    as bot traffic; an ingest:write key makes them show cleanly in the dashboard.
+    """
+
+    def __init__(self, base_url: str, site_id: str, api_key: str = "") -> None:
+        super().__init__(level=logging.INFO)
+        self._endpoint = base_url.rstrip("/") + "/api/track"
+        self._site_id = site_id
+        self._api_key = api_key
+        self._queue: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._flusher: threading.Thread | None = None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+            is_error = record.levelno >= logging.ERROR
+            if is_error:
+                props = json.dumps({"message": msg[:500], "logger": record.name})[:4096]
+            else:
+                props = json.dumps(
+                    {"msg": msg[:1500], "logger": record.name, "level": record.levelname}
+                )[:2048]
+            body = {
+                "site_id": self._site_id,
+                "type": "error" if is_error else "custom_event",
+                "event_name": "rig_error" if is_error else "rig_log",
+                "pathname": "/rig/" + record.name,
+                "hostname": "aircheck-rig",
+                "anonymous_id": "aircheck-rig",
+                "tag": "aircheck-rig",
+                # A browser-like UA is required: even with an ingest key, Rybbit still runs
+                # user-agent bot classification, and python-urllib's default UA is flagged as a bot
+                # (which would hide these logs in bot_events instead of the events dashboard).
+                "user_agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+                ),
+                "properties": props,
+            }
+            with self._lock:
+                self._queue.append(body)
+                if len(self._queue) > 1000:
+                    del self._queue[: len(self._queue) - 1000]
+                if self._flusher is None or not self._flusher.is_alive():
+                    self._flusher = threading.Thread(target=self._flush_loop, daemon=True)
+                    self._flusher.start()
+        except Exception:  # noqa: BLE001 - logging must never break a render
+            pass
+
+    def _flush_loop(self) -> None:
+        while True:
+            time.sleep(2.0)
+            with self._lock:
+                batch = self._queue[:]
+                self._queue.clear()
+            if not batch:
+                return
+            for body in batch:
+                try:
+                    headers = {"Content-Type": "application/json"}
+                    if self._api_key:
+                        headers["Authorization"] = f"Bearer {self._api_key}"
+                    req = urllib.request.Request(
+                        self._endpoint,
+                        data=json.dumps(body).encode("utf-8"),
+                        headers=headers,
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        resp.read()
+                except Exception:  # noqa: BLE001 - local generation.log remains source of truth
+                    pass
+
+
+def _setup_rybbit_shipping() -> None:
+    """Enable Rybbit log shipping when RYBBIT_URL + RYBBIT_SITE_ID are set (key optional)."""
+    base_url = os.environ.get("RYBBIT_URL", "").strip()
+    site_id = os.environ.get("RYBBIT_SITE_ID", "").strip()
+    if not base_url or not site_id:
+        return
+    api_key = os.environ.get("RYBBIT_API_KEY", "").strip()
+    logging.getLogger().addHandler(_RybbitLogHandler(base_url, site_id, api_key))
+    LOGGER.info("Rybbit log shipping active: %s (site %s)", base_url, site_id)
 
 
 class AsyncQueueFullError(RuntimeError):
@@ -713,17 +840,23 @@ STUDIO_REF_10S_TEXT = (
 
 
 def _build_lambda_voice_synthesizer_fn(endpoint: str) -> Callable[..., list[Any]] | None:
-    """Return a `render_broadcast_studio` synthesizer_fn backed by the warm Lambda GPU-1 voice server."""
+    """Return a `render_broadcast_studio` synthesizer_fn backed by the warm Lambda GPU-1 voice server.
+
+    Returns None when the endpoint is unhealthy so the caller falls back to the local warm engine.
+    """
     base = endpoint.rstrip("/")
-    explicit_env = "AIRCHECK_VOICE_ENDPOINT" in os.environ
     try:
         with urllib.request.urlopen(f"{base}/health", timeout=2.5) as resp:
             health = json.loads(resp.read().decode("utf-8"))
         if not health.get("ok"):
             raise RuntimeError(f"Unhealthy voice endpoint {base}: {health}")
     except Exception as exc:
-        if explicit_env:
-            raise RuntimeError(f"AIRCHECK_VOICE_ENDPOINT {base} unreachable: {exc}") from exc
+        # Fall back to the local warm TTS engine whenever the Lambda voice endpoint is unreachable
+        # (e.g. away from home / tunnel down), even when AIRCHECK_VOICE_ENDPOINT is explicitly set,
+        # so voice synthesis keeps working instead of hard-failing the whole clip.
+        LOGGER.warning(
+            "Lambda voice endpoint %s unavailable (%s); falling back to local warm TTS engine.", base, exc
+        )
         return None
 
     import numpy as np
@@ -1202,6 +1335,10 @@ class RenderJobManager:
             self._persist_job_locked(record)
 
         def _run() -> None:
+            def _progress(fraction: float, detail: str) -> None:
+                self._update_job(task_id, progress_fraction=fraction, stage_detail=detail)
+
+            progress_token = _ASYNC_PROGRESS.set(_progress)
             try:
                 result = fn(payload)
                 patch = {"status": "READY", "progress_fraction": 1.0, "stage_detail": "Ready", "result": result}
@@ -1213,6 +1350,7 @@ class RenderJobManager:
                     "error_kind": "invalid_request" if isinstance(exc, ValueError) else "task_failed",
                 }
             finally:
+                _ASYNC_PROGRESS.reset(progress_token)
                 with self._pending_async_lock:
                     self._pending_async_counts[pool_key] = max(0, self._pending_async_counts[pool_key] - 1)
             with self._lock:
@@ -1596,6 +1734,9 @@ class RenderJobManager:
             "clauses": caller_clauses,
             "words": caller_words,
             "align_url": caller_align_url,
+            "prefetch_broll": bool(payload.get("prefetch_broll")),
+            "broll_plan": payload.get("broll_plan") if isinstance(payload.get("broll_plan"), list) else [],
+            "broll_aspect": str(payload.get("broll_aspect") or ratio or "9:16"),
             "work_dir": work_dir,
         }
 
@@ -1953,6 +2094,37 @@ class RenderJobManager:
         ]
         if spoken_text:
             head_cmd.extend(["--transcript", spoken_text])
+
+        # B-roll overlap: warm the still cache concurrently with the (long) HeyGen render so the later
+        # chop hits cache instead of regenerating. Gated by prefetch_broll (set only by the app) so
+        # tests never trigger real image generation.
+        broll_prefetch_thread: threading.Thread | None = None
+        if spec.get("prefetch_broll"):
+            broll_plan = spec.get("broll_plan")
+            broll_aspect = str(spec.get("broll_aspect") or ratio or "9:16")
+            if isinstance(broll_plan, list):
+                prefetch_prompts = [
+                    str(c.get("broll_caption") or c.get("spoken_text") or c.get("spokenText") or "").strip()
+                    for c in broll_plan
+                    if isinstance(c, Mapping)
+                    and str(c.get("segment_mode") or "").upper() == "BROLL_CUTAWAY"
+                    and not str(c.get("broll_url") or c.get("bRollUrl") or "").strip()
+                ]
+                prefetch_prompts = [p for p in prefetch_prompts if p]
+                if prefetch_prompts:
+                    def _prefetch_broll() -> None:
+                        try:
+                            generate_broll_images(
+                                prefetch_prompts, broll_aspect, self.renders_dir,
+                                bl_bin=DEFAULT_BL_BIN, runner=self._plate_runner,
+                            )
+                            LOGGER.info("b-roll prefetch warmed %d still(s)", len(prefetch_prompts))
+                        except Exception:  # noqa: BLE001 - chop regenerates any misses
+                            LOGGER.warning("b-roll prefetch failed; chop will regenerate", exc_info=True)
+
+                    broll_prefetch_thread = threading.Thread(target=_prefetch_broll, daemon=True)
+                    broll_prefetch_thread.start()
+
         head_timeout_sec = max(TALKING_HEAD_TIMEOUT_BASE_SEC, max_duration * 25)
         try:
             head_proc = subprocess.run(
@@ -1967,6 +2139,10 @@ class RenderJobManager:
 
         if head_proc.returncode != 0:
             raise RuntimeError(_summarize_subprocess_error("generate_talking_head.py", head_proc))
+        # Ensure the concurrent b-roll prefetch finishes before this job is READY, so the chop that
+        # follows hits a warm cache (and never races the prefetch writing the same still).
+        if broll_prefetch_thread is not None:
+            broll_prefetch_thread.join(timeout=300)
         head_meta: dict[str, Any] = {}
         stdout_text = (head_proc.stdout or "").strip()
         if stdout_text:
@@ -2086,6 +2262,8 @@ class RenderJobManager:
         work_dir = self.jobs_dir / tts_id
         work_dir.mkdir(parents=True, exist_ok=True)
         out_wav = self.renders_dir / f"{tts_id}.wav"
+        LOGGER.info("tts start job=%s clauses=%d", tts_id, len(clauses_in))
+        _report_async_progress(0.2, "Synthesizing voice on your Mac studio…")
 
         metrics: dict[str, Any] | None = None
         words: list[dict[str, Any]] = []
@@ -2157,6 +2335,8 @@ class RenderJobManager:
         align_payload = _build_alignment_payload(tts_id, duration_ms, words, timed_clauses)
         _atomic_publish_file(source_wav, out_wav)
         _atomic_write_json(align_payload, self.renders_dir / align_filename)
+        LOGGER.info("tts ready job=%s duration_ms=%d", tts_id, duration_ms)
+        _report_async_progress(0.95, "Voice ready")
         return {
             "tts_id": tts_id,
             "audio_url": f"/v1/renders/{tts_id}.wav",
@@ -2181,6 +2361,8 @@ class RenderJobManager:
         work_dir = self.jobs_dir / final_id
         work_dir.mkdir(parents=True, exist_ok=True)
         self.renders_dir.mkdir(parents=True, exist_ok=True)
+        LOGGER.info("chop start job=%s source=%s", final_id, source_job_id or "uploaded")
+        _report_async_progress(0.1, "Preparing studio cut…")
 
         if raw_mp4_b64 is not None and str(raw_mp4_b64).strip() != "":
             src_bytes = _decode_strict_base64(raw_mp4_b64, "source_mp4_base64")
@@ -2392,6 +2574,8 @@ class RenderJobManager:
                 and str(it.get("segment_mode") or "").upper() == "BROLL_CUTAWAY"
                 and not str(it.get("broll_url") or it.get("bRollUrl") or "").strip()
             ]
+            if broll_prompts:
+                _report_async_progress(0.35, f"Generating {len(broll_prompts)} b-roll still(s)…")
             broll_images = (
                 generate_broll_images(
                     broll_prompts, aspect, self.renders_dir, bl_bin=DEFAULT_BL_BIN, runner=self._plate_runner
@@ -2500,6 +2684,7 @@ class RenderJobManager:
                 packaging_payload["accentHex"] = accent_hex
             input_props["packaging"] = packaging_payload
 
+            _report_async_progress(0.7, "Rendering studio cut…")
             req_body = json.dumps(
                 {
                     "jobId": final_id,
@@ -3990,6 +4175,10 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             self._handle_list_renders(head_only=head_only)
             return
 
+        if raw_path == "/v1/logs":
+            self._handle_get_logs(head_only=head_only)
+            return
+
         if raw_path.startswith("/v1/plates/") and raw_path.endswith(".png"):
             plate_id = raw_path[len("/v1/plates/") : -len(".png")]
             resolved_plate = studio_plate_path(self.server.render_manager.plates_dir, plate_id)
@@ -4180,6 +4369,31 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(HTTPStatus.OK, job, head_only=head_only)
+
+    def _handle_get_logs(self, *, head_only: bool) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        try:
+            lines = int(qs.get("lines", ["200"])[0])
+        except ValueError:
+            lines = 200
+        lines = max(1, min(2000, lines))
+        log_path = Path(self.server.render_manager.renders_dir) / "logs" / "generation.log"
+        tail: list[str] = []
+        if log_path.is_file():
+            try:
+                with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+                    tail = fh.read().splitlines()[-lines:]
+            except OSError as exc:
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": "log_read_failed", "detail": str(exc)},
+                    head_only=head_only,
+                )
+                return
+        self._send_json(
+            HTTPStatus.OK, {"log_path": str(log_path), "lines": tail}, head_only=head_only
+        )
 
     def _handle_render_download(self, filename: str, *, head_only: bool) -> None:
         try:
@@ -4428,6 +4642,9 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/remotion/install":
             self._handle_post_remotion_install()
             return
+        if parsed.path == "/v1/logs":
+            self._handle_post_logs()
+            return
         is_async = urllib.parse.parse_qs(parsed.query).get("async", ["0"])[0] in ("1", "true")
         if is_async and parsed.path in ASYNC_TASK_ROUTES:
             self._handle_post_async_task(parsed.path)
@@ -4455,6 +4672,42 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             HTTPStatus.NOT_FOUND,
             {"error": "not_found", "detail": f"Unknown POST endpoint: {parsed.path}"},
         )
+
+    def _handle_post_logs(self) -> None:
+        text_body = self._read_post_utf8_body(max_bytes=256 * 1024, empty_detail="Empty log payload")
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"})
+            return
+        if not isinstance(decoded, dict):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bad_request", "detail": "Log body must be a JSON object"})
+            return
+        device = (str(decoded.get("device") or "phone").strip()[:40]) or "phone"
+        events = decoded.get("events")
+        if not isinstance(events, list):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bad_request", "detail": "events must be a list"})
+            return
+        accepted = 0
+        for ev in events[:500]:
+            if not isinstance(ev, dict):
+                continue
+            msg = str(ev.get("msg") or "").strip()[:1000]
+            if not msg:
+                continue
+            tag = str(ev.get("tag") or "app").strip()[:40]
+            level = str(ev.get("level") or "info").lower()
+            line = "app[%s] %s %s" % (device, tag, msg)
+            if level in ("error", "err", "fatal"):
+                LOGGER.error(line)
+            elif level in ("warn", "warning"):
+                LOGGER.warning(line)
+            else:
+                LOGGER.info(line)
+            accepted += 1
+        self._send_json(HTTPStatus.OK, {"accepted": accepted})
 
     def _handle_post_preferences(self) -> None:
         text_body = self._read_post_utf8_body(
@@ -4925,6 +5178,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         default_avatar_path=args.default_avatar,
         quiet=args.quiet,
     )
+    _setup_durable_logging(server.render_manager.renders_dir)
+    _setup_rybbit_shipping()
     bound_host, bound_port = server.server_address[:2]
     LOGGER.info("VoiceStudio OTA & Render Bridge server listening on http://%s:%d", bound_host, bound_port)
     try:

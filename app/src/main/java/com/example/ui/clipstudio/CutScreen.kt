@@ -190,7 +190,8 @@ fun CutScreen(
         Column(Modifier.fillMaxSize()) {
             CsTopBar(
                 activeStage = 3,
-                onNavigate = onNavigate
+                onNavigate = onNavigate,
+                leds = com.example.ui.pipelineLedStateFor(state)
             ) {
                 if (unsynced.isNotEmpty()) {
                     val badgeText = if (unsynced.size == 1) {

@@ -168,6 +168,9 @@ dependencies {
   implementation(libs.mlkit.genai.schema)
   ksp(libs.mlkit.genai.schema.compiler)
 
+  // LiteRT-LM: bundled Gemma fallback drafting engine for devices without AICore Gemini Nano.
+  implementation(libs.litertlm.android)
+
   implementation(libs.androidx.room.runtime)
   implementation(libs.androidx.room.ktx)
   ksp(libs.androidx.room.compiler)

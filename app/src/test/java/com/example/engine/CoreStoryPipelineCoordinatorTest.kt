@@ -633,7 +633,9 @@ class CoreStoryPipelineCoordinatorTest {
             maxDurationSec: Int,
             words: List<AlignedWord>,
             alignUrl: String?,
-            useRemotion: Boolean?
+            useRemotion: Boolean?,
+            brollPlan: List<CoreStoryClause>,
+            brollAspect: String
         ): EnqueuedRenderResult {
             enqueueCount++
             lastEnqueuedMaxDurationSec = maxDurationSec

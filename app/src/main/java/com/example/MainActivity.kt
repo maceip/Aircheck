@@ -200,6 +200,7 @@ fun AircheckApp(
                         onOpenNewsroomStudio = {
                             showNewsroomStudioModal = true
                         },
+                        onLoadActivity = { studioViewModel.loadActivityLog() },
                         onClose = { showSettingsModal = false }
                     )
                 }

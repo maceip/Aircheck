@@ -1,0 +1,116 @@
+#cloud-config
+# Self-sustaining Rybbit log sink for Aircheck.
+# Boots a DigitalOcean Ubuntu 24 droplet into a fully unattended analytics/log stack:
+#   Rybbit (ClickHouse + Postgres + Redis + backend + client + Caddy auto-TLS)
+#   + Watchtower daily auto-update of the app images
+#   + signup disabled (single-owner instance)
+#   + 90-day ClickHouse TTL + daily disk-guard so it never runs out of disk
+#   + daily/weekly bounded backups + unattended OS security upgrades
+# Domain: logs.relay.stare.network  (DNS A record must point at this droplet's IPv4.)
+package_update: true
+package_upgrade: true
+packages:
+  - git
+  - curl
+  - ca-certificates
+  - cron
+  - unattended-upgrades
+
+write_files:
+  - path: /opt/rybbit-deploy/docker-compose.watchtower.yml
+    permissions: "0644"
+    content: |
+      services:
+        watchtower:
+          image: containrrr/watchtower:1.7.1
+          container_name: watchtower
+          restart: unless-stopped
+          volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+          environment:
+            - DOCKER_API_VERSION=1.44
+          command: --interval 86400 --cleanup --rolling-restart backend client caddy
+          logging:
+            driver: "json-file"
+            options:
+              max-size: "10m"
+              max-file: "3"
+  - path: /opt/rybbit-deploy/apply-ttl.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      # Bound ClickHouse growth: auto-expire events older than 90 days.
+      set -euo pipefail
+      for i in $(seq 1 40); do
+        docker exec clickhouse clickhouse-client --query 'SELECT 1' >/dev/null 2>&1 && break
+        sleep 2
+      done
+      for t in events bot_events session_replay_events; do
+        docker exec clickhouse clickhouse-client \
+          --query "ALTER TABLE analytics.$t MODIFY TTL timestamp + INTERVAL 90 DAY DELETE" || true
+      done
+  - path: /opt/rybbit-deploy/disk-guard.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      LOG=/var/log/rybbit-diskguard.log
+      THRESHOLD=85
+      docker builder prune -af >>"$LOG" 2>&1 || true
+      docker image prune -af >>"$LOG" 2>&1 || true
+      USED=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+      echo "$(date -Is) disk used=${USED}%" >>"$LOG"
+      if [ "${USED:-0}" -ge "$THRESHOLD" ]; then
+        echo "$(date -Is) disk >= ${THRESHOLD}% — emergency reclaim" >>"$LOG"
+        for t in events bot_events session_replay_events; do
+          docker exec clickhouse clickhouse-client --query "ALTER TABLE analytics.$t MATERIALIZE TTL" >>"$LOG" 2>&1 || true
+        done
+        ls -1t /opt/rybbit-backups/weekly/clickhouse-*.tar.gz 2>/dev/null | tail -n +3 | xargs -r rm -f
+        ls -1t /opt/rybbit-backups/daily/postgres-*.sql 2>/dev/null | tail -n +4 | xargs -r rm -f
+        docker system prune -af >>"$LOG" 2>&1 || true
+      fi
+  - path: /opt/rybbit-deploy/backup.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      BACKUP_ROOT=/opt/rybbit-backups
+      STAMP=$(date +%Y%m%d-%H%M%S)
+      DOW=$(date +%u)
+      mkdir -p "$BACKUP_ROOT/daily" "$BACKUP_ROOT/weekly"
+      cd /opt/rybbit
+      set -a; [ -f .env ] && . ./.env; set +a
+      docker exec postgres pg_dump -U "${POSTGRES_USER:-frog}" "${POSTGRES_DB:-analytics}" \
+        > "$BACKUP_ROOT/daily/postgres-$STAMP.sql" 2>/dev/null || true
+      tar czf "$BACKUP_ROOT/daily/config-$STAMP.tar.gz" \
+        .env Caddyfile docker-compose.yml docker-compose.watchtower.yml 2>/dev/null || true
+      if [ "$DOW" = "7" ]; then
+        CH_VOL=$(docker volume ls --format '{{.Name}}' | grep 'clickhouse-data' | head -1 || true)
+        if [ -n "$CH_VOL" ]; then
+          docker run --rm -v "$CH_VOL:/data:ro" -v "$BACKUP_ROOT/weekly:/backup" alpine \
+            tar czf "/backup/clickhouse-$STAMP.tar.gz" -C /data . 2>/dev/null || true
+        fi
+      fi
+      ls -1t "$BACKUP_ROOT/daily/"postgres-*.sql 2>/dev/null | tail -n +8 | xargs -r rm -f
+      ls -1t "$BACKUP_ROOT/daily/"config-*.tar.gz 2>/dev/null | tail -n +8 | xargs -r rm -f
+      ls -1t "$BACKUP_ROOT/weekly/"clickhouse-*.tar.gz 2>/dev/null | tail -n +5 | xargs -r rm -f
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+
+runcmd:
+  - [ bash, -lc, "curl -fsSL https://get.docker.com | sh" ]
+  - [ bash, -lc, "systemctl enable --now docker" ]
+  - [ bash, -lc, "git clone --depth 1 https://github.com/rybbit-io/rybbit.git /opt/rybbit" ]
+  - [ bash, -lc, "cd /opt/rybbit && chmod +x *.sh && ./setup.sh logs.relay.stare.network" ]
+  - [ bash, -lc, "cd /opt/rybbit && sed -i 's/^DISABLE_SIGNUP=.*/DISABLE_SIGNUP=true/' .env" ]
+  - [ bash, -lc, "cp /opt/rybbit-deploy/docker-compose.watchtower.yml /opt/rybbit/docker-compose.watchtower.yml" ]
+  - [ bash, -lc, "cd /opt/rybbit && docker compose -f docker-compose.yml -f docker-compose.watchtower.yml --profile with-webserver build client" ]
+  - [ bash, -lc, "cd /opt/rybbit && docker compose -f docker-compose.yml -f docker-compose.watchtower.yml --profile with-webserver up -d" ]
+  - [ bash, -lc, "/opt/rybbit-deploy/apply-ttl.sh" ]
+  - [ bash, -lc, "(crontab -l 2>/dev/null; echo '15 3 * * * /opt/rybbit-deploy/backup.sh >> /var/log/rybbit-backup.log 2>&1'; echo '0 4 * * * /opt/rybbit-deploy/disk-guard.sh') | crontab -" ]
+  - [ bash, -lc, "systemctl enable --now cron unattended-upgrades" ]
+  - [ bash, -lc, "echo 'rybbit cloud-init complete' > /var/log/rybbit-init.done" ]

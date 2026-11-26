@@ -149,6 +149,9 @@ fun ClipStudioShell(
                         postCard = quote?.let { PostCardSource(it.handle, it.tweetId, it.snippet) },
                         shotPlan = draftState.document.shotPlan
                     )
+                    // Auto-start voicing on "make the video" so the user skips a tap + a serial wait;
+                    // the dock shows real progress and advances to the talking-head step when ready.
+                    studioVm.runCoreStage1Tts()
                     onScreen(ClipStudioScreen.CUT)
                 },
                 renderGlobalOverlays = false

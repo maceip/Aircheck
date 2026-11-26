@@ -36,14 +36,20 @@ class CoreStageRunner(
         explicit?.ifBlank { null } ?: runCatching { profileStore.current().persona.defaultPhotoSha }.getOrNull()?.ifBlank { null }
 
     /** Handle that persists the rig task id under [key] in the session and resumes it if present. */
-    private fun handle(base: CorePipelineSession, key: String, onProgress: (String) -> Unit): RigTaskHandle =
+    private fun handle(
+        base: CorePipelineSession,
+        key: String,
+        onProgress: (String) -> Unit,
+        onProgressFraction: (Float, String) -> Unit = { _, _ -> }
+    ): RigTaskHandle =
         RigTaskHandle(
             resumeTaskId = base.pendingRigTasks[key],
             onSubmitted = { id ->
                 val latest = localRepo.getLatestCorePipelineSession() ?: base
                 localRepo.saveCorePipelineSession(latest.copy(pendingRigTasks = latest.pendingRigTasks + (key to id)))
             },
-            onProgress = onProgress
+            onProgress = onProgress,
+            onProgressFraction = onProgressFraction
         )
 
     private suspend fun clearTask(key: String) {
@@ -61,9 +67,11 @@ class CoreStageRunner(
             session = base,
             rigBaseUrl = rigUrl(),
             localMicWavFile = localMicWav,
-            task = handle(base, KEY_TTS) { detail ->
-                onProgress(0.4f, detail.ifBlank { progressLabel })
-            }
+            task = handle(
+                base, KEY_TTS,
+                { detail -> onProgress(0.4f, detail.ifBlank { progressLabel }) },
+                { fraction, detail -> onProgress(fraction.coerceAtLeast(0.1f), detail.ifBlank { progressLabel }) }
+            )
         )
         val voiced = result.getOrElse {
             clearTask(KEY_TTS)
@@ -112,14 +120,18 @@ class CoreStageRunner(
         val base = session()
         val look: NewsroomLook? = lookIdOverride?.let { localRepo.getNewsroomLook(it) } ?: localRepo.getDefaultNewsroomLook()
         val signature = base.cutSignature(look)
-        onProgress(0.2f, "Rendering studio cut on rig…")
+        onProgress(0.05f, "Preparing studio cut…")
         val result = coordinator.chopTalkingHeadIntoBrollStage4(
             session = base,
             rigBaseUrl = rigUrl(),
             allSavedOverlays = localRepo.listSavedNewsroomOverlays(),
             photoSha = photoSha(photoSha),
             look = look,
-            task = handle(base, KEY_CUT) { onProgress(0.5f, "Rendering studio cut on rig…") }
+            task = handle(
+                base, KEY_CUT,
+                { onProgress(0.5f, "Rendering studio cut on rig…") },
+                { fraction, detail -> onProgress(fraction.coerceAtLeast(0.05f), detail.ifBlank { "Rendering studio cut on rig…" }) }
+            )
         )
         val (chopped, _) = result.getOrElse {
             clearTask(KEY_CUT)
@@ -141,7 +153,7 @@ class CoreStageRunner(
         onProgress(0.2f, "Generating backdrop plate on rig…")
         val health = gateway.resolveAndCheckHealth(rigUrl())
         val plate = try {
-            gateway.generateBackdropPlate(health.resolvedUrl, prompt, base.renderOptions.aspect, handle(base, key) {})
+            gateway.generateBackdropPlate(health.resolvedUrl, prompt, base.renderOptions.aspect, handle(base, key, onProgress = {}))
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             clearTask(key)

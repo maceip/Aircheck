@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
@@ -20,7 +21,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -44,8 +47,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.data.BrandChannel
 import com.example.ui.RigConnectionStatus
@@ -78,6 +83,7 @@ fun SystemDeckSheet(
     onSaveTailscaleRigUrl: (String) -> Unit,
     onTestRigConnection: (String) -> Unit,
     onOpenNewsroomStudio: () -> Unit = {},
+    onLoadActivity: (suspend () -> List<String>)? = null,
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
@@ -166,6 +172,13 @@ fun SystemDeckSheet(
                             color = TelemetryMuted
                         )
                     }
+                }
+            }
+
+            // 0. Activity — what's happening on the phone + rig, in one durable log.
+            if (onLoadActivity != null) {
+                item(key = "activity_card") {
+                    ActivityLogCard(loadLogs = onLoadActivity)
                 }
             }
 
@@ -361,6 +374,96 @@ fun SystemDeckSheet(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * "What's happening" panel: tails the durable generation log (rig + shipped phone events). The log
+ * is auto-rotating on both ends, so there is nothing for the user to manage or clean up.
+ */
+@Composable
+private fun ActivityLogCard(loadLogs: suspend () -> List<String>) {
+    var lines by remember { mutableStateOf<List<String>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var refreshKey by remember { mutableStateOf(0) }
+    LaunchedEffect(refreshKey) {
+        loading = true
+        lines = runCatching { loadLogs() }.getOrDefault(emptyList())
+        loading = false
+    }
+    StudioCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("activity_log_card")
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Activity",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = StudioCrisp
+                )
+                Text(
+                    text = if (loading) "loading…" else "${lines.size} events",
+                    style = TelemetryTimecodeStyle,
+                    color = TelemetryMuted,
+                    modifier = Modifier.testTag("activity_log_count")
+                )
+            }
+            Text(
+                text = "Phone + Mac rig pipeline log. Auto-rotating — nothing to manage.",
+                style = MaterialTheme.typography.bodySmall,
+                color = TelemetryMuted
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 220.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(OledVoid)
+                    .verticalScroll(rememberScrollState())
+                    .padding(10.dp)
+                    .testTag("activity_log_scroll")
+            ) {
+                if (lines.isEmpty()) {
+                    Text(
+                        text = if (loading) "Loading…" else "No activity yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TelemetryMuted
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        lines.takeLast(120).forEach { line ->
+                            Text(
+                                text = line,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp
+                                ),
+                                color = StudioCrisp
+                            )
+                        }
+                    }
+                }
+            }
+            OutlinedButton(
+                onClick = { refreshKey++ },
+                enabled = !loading,
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, LocalAircheckTokens.current.hairline),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(46.dp)
+                    .testTag("activity_refresh_button")
+            ) {
+                Text(if (loading) "Refreshing…" else "Refresh")
             }
         }
     }
