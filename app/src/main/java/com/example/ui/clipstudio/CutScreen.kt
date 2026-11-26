@@ -250,54 +250,61 @@ fun CutScreen(
                 }
             )
 
-            // 44dp horizontal tool pill row
-            Row(
+            // Recessed hardware switch well with raised v4-style 3D tool toggles + LED active states (zero flat white slabs!)
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(start = 10.dp, top = 12.dp, end = 10.dp, bottom = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    .padding(start = 10.dp, top = 12.dp, end = 10.dp, bottom = 4.dp)
+                    .sunkenPanel(radius = 14.dp, fill = Cs.SunkenTrack)
+                    .padding(5.dp)
             ) {
-                CsPill(
-                    label = "captions",
-                    selected = opts.captions,
-                    icon = Icons.Sharp.ClosedCaption,
-                    onClick = { vm.setCoreCaptions(!opts.captions) },
-                    modifier = Modifier.testTag("cs_cut_captions")
-                )
-                CsPill(
-                    label = "trim pauses",
-                    selected = opts.stripSilence,
-                    icon = Icons.Sharp.ContentCut,
-                    onClick = { vm.setCoreStripSilence(!opts.stripSilence) },
-                    modifier = Modifier.testTag("cs_cut_strip_silence")
-                )
-                CsPill(
-                    label = "punch-in",
-                    selected = opts.punchIn,
-                    icon = Icons.Sharp.ZoomIn,
-                    onClick = { vm.setCorePunchIn(!opts.punchIn) },
-                    modifier = Modifier.testTag("cs_cut_punch_in")
-                )
-                val isVertical = opts.aspect == CoreRenderOptions.ASPECT_VERTICAL
-                CsPill(
-                    label = if (isVertical) "9:16" else "16:9",
-                    selected = false,
-                    icon = if (isVertical) Icons.Sharp.CropPortrait else Icons.Sharp.CropLandscape,
-                    onClick = {
-                        vm.setCoreAspect(
-                            if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL
-                        )
-                    },
-                    modifier = Modifier.testTag("cs_cut_aspect")
-                )
-                CsPill(
-                    label = "look",
-                    selected = false,
-                    icon = Icons.Sharp.Palette,
-                    onClick = onOpenNewsroom,
-                    modifier = Modifier.testTag("cs_cut_look")
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    CsPill(
+                        label = "captions",
+                        selected = opts.captions,
+                        icon = Icons.Sharp.ClosedCaption,
+                        onClick = { vm.setCoreCaptions(!opts.captions) },
+                        modifier = Modifier.testTag("cs_cut_captions")
+                    )
+                    CsPill(
+                        label = "trim pauses",
+                        selected = opts.stripSilence,
+                        icon = Icons.Sharp.ContentCut,
+                        onClick = { vm.setCoreStripSilence(!opts.stripSilence) },
+                        modifier = Modifier.testTag("cs_cut_strip_silence")
+                    )
+                    CsPill(
+                        label = "punch-in",
+                        selected = opts.punchIn,
+                        icon = Icons.Sharp.ZoomIn,
+                        onClick = { vm.setCorePunchIn(!opts.punchIn) },
+                        modifier = Modifier.testTag("cs_cut_punch_in")
+                    )
+                    val isVertical = opts.aspect == CoreRenderOptions.ASPECT_VERTICAL
+                    CsPill(
+                        label = if (isVertical) "9:16" else "16:9",
+                        selected = false,
+                        icon = if (isVertical) Icons.Sharp.CropPortrait else Icons.Sharp.CropLandscape,
+                        onClick = {
+                            vm.setCoreAspect(
+                                if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL
+                            )
+                        },
+                        modifier = Modifier.testTag("cs_cut_aspect")
+                    )
+                    CsPill(
+                        label = "look",
+                        selected = false,
+                        icon = Icons.Sharp.Palette,
+                        onClick = onOpenNewsroom,
+                        modifier = Modifier.testTag("cs_cut_look")
+                    )
+                }
             }
 
             // Sunken 2-way `words` · `b-roll` mode switch
@@ -751,43 +758,43 @@ private fun TranscriptWordsPane(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(start = 52.dp, top = 10.dp, bottom = 2.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            .padding(start = 52.dp, top = 10.dp, bottom = 2.dp)
+                            .sunkenPanel(radius = 14.dp, fill = Cs.SunkenTrack)
+                            .padding(5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Row(
+                        CsKey(
+                            onClick = { onEdit(idx) },
+                            role = KeyRole.STD,
+                            radius = 10.dp,
+                            pip = true,
+                            horizontalPadding = 10.dp,
+                            contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
                             modifier = Modifier
                                 .weight(1f)
                                 .height(44.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(Cs.Raised)
-                                .border(1.dp, Cs.Hairline, RoundedCornerShape(14.dp))
-                                .clickable(role = Role.Button) { onEdit(idx) }
-                                .padding(horizontal = 10.dp)
-                                .testTag("cs_clause_edit_btn_$idx"),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Sharp.Edit, contentDescription = null, tint = Cs.Ink, modifier = Modifier.size(18.dp))
-                            Text("edit words", style = mono(13.sp, Cs.Ink), maxLines = 1)
+                                .testTag("cs_clause_edit_btn_$idx")
+                        ) { tint ->
+                            Icon(Icons.Sharp.Edit, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+                            Text("edit words", style = mono(13.sp, tint), maxLines = 1)
                         }
 
-                        Row(
+                        CsKey(
+                            onClick = { vm.toggleCutClauseBroll(idx) },
+                            role = if (broll) KeyRole.ACTIVE else KeyRole.STD,
+                            radius = 10.dp,
+                            pip = !broll,
+                            horizontalPadding = 10.dp,
+                            contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
                             modifier = Modifier
                                 .weight(1f)
                                 .height(44.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(Cs.Raised)
-                                .border(1.dp, Cs.Hairline, RoundedCornerShape(14.dp))
-                                .clickable(role = Role.Button) { vm.toggleCutClauseBroll(idx) }
-                                .padding(horizontal = 10.dp)
-                                .testTag("cs_clause_broll_btn_$idx"),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Sharp.Movie, contentDescription = null, tint = Cs.Ink, modifier = Modifier.size(18.dp))
+                                .testTag("cs_clause_broll_btn_$idx")
+                        ) { tint ->
+                            Icon(Icons.Sharp.Movie, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
                             Text(
                                 text = if (broll) "back to face" else "b-roll here",
-                                style = mono(13.sp, Cs.Ink),
+                                style = mono(13.sp, tint),
                                 maxLines = 1
                             )
                         }
@@ -954,31 +961,29 @@ private fun BrollModePane(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                val toggleBg = if (broll) Cs.Ink else Cs.Raised
-                val toggleFg = if (broll) Cs.Black else Cs.Ink
-                Row(
+                CsKey(
+                    onClick = { vm.toggleCutClauseBroll(idx) },
+                    role = if (broll) KeyRole.ACTIVE else KeyRole.STD,
+                    radius = 10.dp,
+                    pip = !broll,
+                    horizontalPadding = 12.dp,
+                    contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
                     modifier = Modifier
                         .height(44.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(toggleBg)
-                        .then(
-                            if (!broll) Modifier.border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp)) else Modifier
-                        )
-                        .clickable(role = Role.Button) { vm.toggleCutClauseBroll(idx) }
-                        .padding(horizontal = 12.dp)
-                        .testTag("cs_timeline_toggle_$idx"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
+                        .testTag("cs_timeline_toggle_$idx")
+                ) { tint ->
+                    if (broll) {
+                        CsLedDot(color = Cs.Voice, size = 6.dp)
+                    }
                     Icon(
                         imageVector = if (broll) Icons.Sharp.Movie else Icons.Sharp.Person,
                         contentDescription = null,
-                        tint = toggleFg,
-                        modifier = Modifier.size(18.dp)
+                        tint = tint,
+                        modifier = Modifier.size(17.dp)
                     )
                     Text(
                         text = if (broll) "b-roll" else "face",
-                        style = mono(12.sp, toggleFg, if (broll) FontWeight.Medium else FontWeight.Normal),
+                        style = mono(12.sp, tint, if (broll) FontWeight.SemiBold else FontWeight.Normal),
                         maxLines = 1
                     )
                 }

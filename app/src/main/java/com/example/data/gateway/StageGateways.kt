@@ -103,6 +103,20 @@ data class GeneratedOverlayBriefResult(
     val breakingStyle: BreakingNewsStyle = BreakingNewsStyle.BREAKING
 )
 
+data class VideoLookTweakResult(
+    val accentHex: String? = null,
+    val light: String? = null,
+    val blurPercent: Int? = null,
+    val brightnessEv: Double? = null,
+    val breakingStyle: BreakingNewsStyle? = null,
+    val showBrandBug: Boolean? = null,
+    val cornerBugText: String? = null,
+    val brollFraming: String? = null,
+    val chyronHeadline: String? = null,
+    val backdropPrompt: String? = null,
+    val summary: String = ""
+)
+
 data class MacRigJobSnapshot(
     val jobId: String,
     val status: RenderJobStatus,
@@ -215,6 +229,15 @@ interface MacRigRenderGateway {
         currentHeadline: String,
         storyContext: String = ""
     ): String = throw UnsupportedOperationException("polishHeadline not implemented")
+
+    /** `POST /v1/ai-assist` (`mode = "tweak_video_look"`): applies natural-language look/style/logo/framing tweaks via rig LLM. */
+    suspend fun tweakVideoLook(
+        rigBaseUrl: String,
+        instruction: String,
+        currentLook: NewsroomLook,
+        currentOptions: CoreRenderOptions,
+        storyContext: String = ""
+    ): VideoLookTweakResult = throw UnsupportedOperationException("tweakVideoLook not implemented")
 
     /** `POST /v1/studio/shot-preview` + download JPEG into CAS for immediate SPARK shot thumbnails. */
     suspend fun generateAndCacheShotPreview(

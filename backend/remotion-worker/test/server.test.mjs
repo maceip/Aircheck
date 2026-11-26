@@ -468,3 +468,45 @@ test("POST /render rejects a single > 32 MiB chunk immediately with HTTP 413 JSO
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test("POST /render validates packaging.accentHex and packaging.brollFraming strictly", async () => {
+  const { server, port } = await startEphemeralServer();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  try {
+    const badAccentRes = await fetch(`${baseUrl}/render`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "accent-test",
+        outputLocalPath: "/tmp/out.mp4",
+        inputProps: {
+          lipsyncUrl: "http://127.0.0.1:9/a.mp4",
+          voiceUrl: "http://127.0.0.1:9/a.wav",
+          words: [{ word: "Live", startMs: 0, endMs: 400 }],
+          packaging: { accentHex: "not-a-hex" },
+        },
+      }),
+    });
+    assert.equal(badAccentRes.status, 400);
+    assert.match((await badAccentRes.json()).error, /accentHex/);
+
+    const badFramingRes = await fetch(`${baseUrl}/render`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId: "framing-test",
+        outputLocalPath: "/tmp/out.mp4",
+        inputProps: {
+          lipsyncUrl: "http://127.0.0.1:9/a.mp4",
+          voiceUrl: "http://127.0.0.1:9/a.wav",
+          words: [{ word: "Live", startMs: 0, endMs: 400 }],
+          packaging: { accentHex: "#3A86F2", brollFraming: "diagonal" },
+        },
+      }),
+    });
+    assert.equal(badFramingRes.status, 400);
+    assert.match((await badFramingRes.json()).error, /brollFraming/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

@@ -19,6 +19,7 @@ export interface BeatSpec {
 }
 
 export type BreakingStyle = "breaking" | "developing" | "exclusive" | "alert_stat" | "clean";
+export type BrollFraming = "pip" | "full" | "split";
 
 export interface OverlayItemSpec {
   kind: "LOWER_THIRD" | "STAT_CALLOUT" | "QUOTE_BRIEF";
@@ -35,6 +36,8 @@ export interface PackagingSpec {
   cornerBugText: string;
   showBrandBug: boolean;
   breakingStyle?: BreakingStyle;
+  accentHex?: string;
+  brollFraming?: BrollFraming;
   overlays?: OverlayItemSpec[];
   templateId?: "Newsroom916" | "Explainer169";
 }

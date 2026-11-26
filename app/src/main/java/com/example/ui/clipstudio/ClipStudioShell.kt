@@ -111,6 +111,13 @@ fun ClipStudioShell(
 
     val activeToast = draftState.toastMessage ?: studioState.toastMessage
     val isAnyRecording = draftState.isAnyRecording || studioState.isRecordingCoreVoiceover
+    val liveMicLevel = if (draftState.isAnyRecording) {
+        draftState.liveRmsLevel
+    } else if (studioState.isRecordingCoreVoiceover) {
+        0.35f
+    } else {
+        0f
+    }
 
     Box(
         modifier
@@ -178,13 +185,9 @@ fun ClipStudioShell(
             }
         )
 
-        if (isAnyRecording) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .border(2.dp, Cs.Red)
-                    .testTag("cs_recording_border")
-            )
-        }
+        VoiceGlowDitherOverlay(
+            active = isAnyRecording,
+            level = liveMicLevel
+        )
     }
 }
