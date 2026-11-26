@@ -561,7 +561,7 @@ func runSupervisor(cfg *Config) error {
 		defer wg.Done()
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
-		syncedFallback := false
+		lastPhoneSync := ""
 		for {
 			otaOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/health", defaultOtaPort))
 			remOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/healthz", defaultRemotionPort))
@@ -581,14 +581,22 @@ func runSupervisor(cfg *Config) error {
 			stateMu.Unlock()
 			saveState()
 
-			if cfg.SyncPhone && otaOK && !cfg.EnableTunnel && !syncedFallback && pub == "" {
-				if dev, err := pushRigEndpointToPhone(cfg.AdbBin, lan); err == nil && dev != "" {
-					syncedFallback = true
-					stateMu.Lock()
-					state.SyncedDevice = dev
-					stateMu.Unlock()
-					saveState()
-					logf("Synced LAN URL (%s) to phone (%s)", lan, dev)
+			// Re-push the current rig URL whenever a phone (re)connects or the URL changes, so a phone
+			// that was unplugged while the tunnel URL rotated never keeps a stale address.
+			if cfg.SyncPhone && otaOK {
+				target := pub
+				if target == "" && !cfg.EnableTunnel {
+					target = lan
+				}
+				if serial := firstOnlineDevice(cfg.AdbBin); serial != "" && target != "" && serial+"|"+target != lastPhoneSync {
+					if dev, err := pushRigEndpointToPhone(cfg.AdbBin, target); err == nil && dev != "" {
+						lastPhoneSync = serial + "|" + target
+						stateMu.Lock()
+						state.SyncedDevice = dev
+						stateMu.Unlock()
+						saveState()
+						logf("Synced rig URL (%s) to phone (%s)", target, dev)
+					}
 				}
 			}
 
