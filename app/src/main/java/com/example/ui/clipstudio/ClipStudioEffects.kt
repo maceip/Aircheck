@@ -40,6 +40,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -352,26 +353,26 @@ private fun makeRubikMoves(count: Int): List<RubikMove> = List(count) { i ->
 @Composable
 fun ThinkingOrbSolving(
     modifier: Modifier = Modifier,
-    size: Dp = 24.dp,
-    tint: Color = Cs.Ink,
+    size: Dp = 32.dp,
+    tint: Color = Cs.White,
     speedMultiplier: Float = 1f,
     paused: Boolean = false
 ) {
-    // Choose exact thinking-orbs@0.3.2 PRESETS.rubik tuning for inline (20), medium (32), or hero (64) scale
+    // High-contrast, bold OLED-tuned thinking-orbs@0.3.2 Rubik sphere: denser rings + bolder crisp dots
     val preset = remember(size) {
         when {
-            size.value <= 24f -> Triple(1.95f, 0.088f, 1.90f) // 20px preset
-            size.value <= 42f -> Triple(1.8964f, 0.1537f, 1.4951f) // 32px preset
-            else -> Triple(1.82f, 0.35f, 1.05f) // 64px preset
+            size.value <= 28f -> Triple(1.95f, 0.19f, 2.25f)
+            size.value <= 42f -> Triple(1.90f, 0.25f, 1.95f)
+            else -> Triple(1.82f, 0.42f, 1.45f)
         }
     }
     val (presetSpeed, countScale, sizeScale) = preset
     val rt = remember(countScale) { sqrt(countScale) }
-    val latRings = remember(rt) { max(4, (15f * rt).roundToInt()) }
-    val lonDensity = remember(rt) { max(8, (40f * rt).roundToInt()) }
-    val rBase = 0.6f * sizeScale
-    val rDepth = 1.7f * sizeScale
-    val rActive = 0.3f * sizeScale
+    val latRings = remember(rt) { max(6, (15f * rt).roundToInt()) }
+    val lonDensity = remember(rt) { max(16, (40f * rt).roundToInt()) }
+    val rBase = 0.95f * sizeScale
+    val rDepth = 2.05f * sizeScale
+    val rActive = 0.55f * sizeScale
     val moves = remember { makeRubikMoves(14) }
     val amounts = remember { FloatArray(14) }
 
@@ -396,7 +397,7 @@ fun ThinkingOrbSolving(
         if (sz <= 1f) return@Canvas
         val cx = this.size.width / 2f
         val cy = this.size.height / 2f
-        val radius = sz / 2f * 0.82f
+        val radius = sz / 2f * 0.86f
         val t = elapsedSec
 
         // Exact solveCycle(t, moveCount=14, slotDur=0.42, rest=1.2)
@@ -432,9 +433,10 @@ fun ThinkingOrbSolving(
         val sy = sin(yaw)
         val cyw = cos(yaw)
 
-        // Exact radiusScale(size, rsPow = 0.6) normalized to physical dp-equivalent pixels
-        val logicalSize = size.value.coerceAtLeast(16f)
-        val rs = (logicalSize / 300f).pow(0.6f) * (sz / logicalSize)
+        // Bolder OLED-readable dot sizing scaled cleanly to physical dp
+        val logicalSize = size.value.coerceAtLeast(20f)
+        val rs = (logicalSize / 210f).pow(0.55f) * (sz / logicalSize)
+        val minDotPx = 0.95.dp.toPx()
 
         val dots = ArrayList<OrbDot>((latRings + 1) * lonDensity)
         for (li in 0..latRings) {
@@ -487,20 +489,31 @@ fun ThinkingOrbSolving(
                 val y1 = y * ct - z1 * st
                 val z2 = y * st + z1 * ct
                 val depth = (z2 + 1f) / 2f
-                val dotR = max(0.6f, (rBase + rDepth * depth + if (inActive) rActive else 0f) * rs)
-                val w = (0.62f - 0.54f * depth - if (inActive) 0.14f else 0f).coerceIn(0f, 1f)
+                val dotR = max(minDotPx, (rBase + rDepth * depth + if (inActive) rActive else 0f) * rs)
+                val w = (0.44f - 0.44f * depth - if (inActive) 0.14f else 0f).coerceIn(0f, 0.48f)
                 dots.add(OrbDot(cx + x1 * radius, cy - y1 * radius, z2, dotR, w))
             }
         }
         dots.sortBy { it.z }
+        // Subtle center bloom behind the orb so it pops cleanly off dark OLED surfaces
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(tint.copy(alpha = 0.14f), Color.Transparent),
+                center = Offset(cx, cy),
+                radius = radius * 1.15f
+            ),
+            radius = radius * 1.15f,
+            center = Offset(cx, cy)
+        )
         for (dot in dots) {
-            val lum = (1f - dot.white).coerceIn(0.18f, 1f)
+            val lum = (1f - dot.white).coerceIn(0.52f, 1f)
+            val alpha = (0.68f + 0.32f * lum).coerceIn(0.68f, 1f)
             drawCircle(
                 color = Color(
-                    red = tint.red * lum,
-                    green = tint.green * lum,
-                    blue = tint.blue * lum,
-                    alpha = (0.35f + 0.65f * lum).coerceIn(0f, 1f)
+                    red = (tint.red * lum + (1f - tint.red) * 0.10f * lum).coerceIn(0f, 1f),
+                    green = (tint.green * lum + (1f - tint.green) * 0.10f * lum).coerceIn(0f, 1f),
+                    blue = (tint.blue * lum + (1f - tint.blue) * 0.10f * lum).coerceIn(0f, 1f),
+                    alpha = alpha
                 ),
                 radius = dot.r,
                 center = Offset(dot.x, dot.y)
@@ -562,8 +575,9 @@ fun VoiceGlowDitherOverlay(
     )
     if (fade <= 0.01f) return
 
+    val latestLevel by rememberUpdatedState(level)
     var clockSec by remember { mutableFloatStateOf(0f) }
-    var smoothedLevel by remember { mutableFloatStateOf(0.23f) }
+    var smoothedLevel by remember { mutableFloatStateOf(0.12f) }
     LaunchedEffect(active) {
         var lastNanos = -1L
         while (true) {
@@ -571,10 +585,13 @@ fun VoiceGlowDitherOverlay(
                 val dt = if (lastNanos < 0L) 0.016f else ((nanos - lastNanos) / 1_000_000_000.0).toFloat().coerceIn(0f, 0.05f)
                 lastNanos = nanos
                 clockSec += dt
-                // Real live mic level with voice-glow@0.5.0 idle presence (0.23) + attack/release smoothing
-                val boosted = (level * 3.1f).coerceIn(0f, 1f)
-                val target = max(0.23f, boosted)
-                val rate = if (target > smoothedLevel) 1f / 0.14f else 1f / 0.55f
+                // Real live mic RMS from AudioRecord (conversational speech is ~0.015..0.16 RMS):
+                // read via rememberUpdatedState so every frame reacts immediately to live voice!
+                val raw = latestLevel.coerceIn(0f, 1f)
+                val gated = ((raw - 0.008f) / 0.135f).coerceIn(0f, 1f)
+                val perceptual = gated.pow(0.58f)
+                val target = 0.10f + 0.90f * perceptual
+                val rate = if (target > smoothedLevel) 1f / 0.055f else 1f / 0.24f
                 smoothedLevel += (target - smoothedLevel) * (1f - exp(-dt * rate))
             }
         }
@@ -588,8 +605,8 @@ fun VoiceGlowDitherOverlay(
 
             val densityScale = (cw / 390f).coerceIn(0.75f, 1.8f)
             val t = clockSec
-            val breathe = 0.06f * sin(t * (2f * PI.toFloat() / 5.2f))
-            val lvl = (smoothedLevel + breathe).coerceIn(0.16f, 1f)
+            val breathe = 0.03f * sin(t * (2f * PI.toFloat() / 5.2f))
+            val lvl = (smoothedLevel + breathe).coerceIn(0.08f, 1f)
 
             // 3 frequency bands driven from live smoothed RMS (matches voice-glow@0.5.0 band synthesis)
             val b0 = lvl
@@ -597,10 +614,10 @@ fun VoiceGlowDitherOverlay(
             val b2 = lvl * (0.60f + 0.40f * sin(t * 13.7f + 2f))
             val bands = floatArrayOf(b0, b1, b2)
 
-            // Mobile preset geometry
-            val reach = 1f + 2.15f * lvl
-            val spread = 1f + 0.45f * lvl
-            val flowOffset = (t * 48f * (0.35f + 0.65f * lvl)) % (36f * VOICE_LOBES.size)
+            // Mobile preset geometry — low calm rim when silent, dramatic surge when speaking
+            val reach = 0.72f + 2.75f * lvl
+            val spread = 0.88f + 0.62f * lvl
+            val flowOffset = (t * 54f * (0.25f + 1.15f * lvl)) % (36f * VOICE_LOBES.size)
             val halfRing = 36f * VOICE_LOBES.size * 0.5f
 
             val lobeX = FloatArray(VOICE_LOBES.size)

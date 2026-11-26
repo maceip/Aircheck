@@ -686,7 +686,11 @@ class DraftEngineUnitTest {
             val client = DraftApiClient(
                 configuredRigUrl = liveUrl,
                 usbLoopbackUrl = "http://127.0.0.1:$deadPort",
-                healthProbeTimeoutMs = 500L
+                healthProbeTimeoutMs = 500L,
+                transcriber = { bytes ->
+                    capturedPayloads["transcriber"] = Base64.getEncoder().encodeToString(bytes)
+                    TranscribeResponse(transcript = "Cold caches double latency.", durationMs = 2450L)
+                }
             )
 
             assertEquals(liveUrl, client.resolveActiveBaseUrl())
@@ -696,11 +700,7 @@ class DraftEngineUnitTest {
             val tx = client.transcribeWavBytes(sampleWavBytes)
             assertEquals("Cold caches double latency.", tx.transcript)
             assertEquals(2450L, tx.durationMs)
-            val txJson = Json.parseToJsonElement(capturedPayloads.getValue("/v1/draft/transcribe")).jsonObject
-            assertEquals(
-                Base64.getEncoder().encodeToString(sampleWavBytes),
-                txJson["audio_wav_base64"]?.jsonPrimitive?.content
-            )
+            assertEquals(Base64.getEncoder().encodeToString(sampleWavBytes), capturedPayloads.getValue("transcriber"))
 
             // 2. angles
             val angles = client.extractAngles("Cold caches double latency.", listOf("no fluff"))

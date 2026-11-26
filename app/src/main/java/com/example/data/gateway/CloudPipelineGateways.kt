@@ -682,7 +682,13 @@ class DirectMacRigGateway(
                         throw IllegalStateException("$label failed: ${job.optNullableString("error_message") ?: "unknown rig error"}")
                     }
                 }
-                task?.onProgress?.invoke(job.optNullableString("stage_detail") ?: "$label running")
+                val detail = job.optNullableString("stage_detail") ?: "$label running"
+                val rawFrac = job.optDouble("progress_fraction", Double.NaN)
+                if (!rawFrac.isNaN() && rawFrac > 0.0) {
+                    task?.onProgressFraction?.invoke(rawFrac.toFloat().coerceIn(0f, 1f), detail)
+                } else {
+                    task?.onProgress?.invoke(detail)
+                }
                 kotlinx.coroutines.delay(RIG_TASK_POLL_MS)
             }
             // Lost on the rig: resubmit exactly once.

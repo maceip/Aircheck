@@ -72,7 +72,8 @@ data class ChoppedBrollResult(
 class RigTaskHandle(
     val resumeTaskId: String?,
     val onSubmitted: suspend (String) -> Unit,
-    val onProgress: (String) -> Unit = {}
+    val onProgress: (String) -> Unit = {},
+    val onProgressFraction: (Float, String) -> Unit = { _, _ -> }
 )
 
 data class SilenceGapsResult(

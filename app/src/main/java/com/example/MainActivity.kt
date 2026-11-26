@@ -30,10 +30,8 @@ import com.example.ui.clipstudio.ClipStudioScreen
 import com.example.ui.clipstudio.ClipStudioShell
 import com.example.ui.draft.DraftDeckViewModel
 import com.example.ui.screens.ClipReviewScreen
-import com.example.ui.screens.CorePipelineScreen
 import com.example.ui.screens.NewsroomStudioScreen
 import com.example.ui.screens.SystemDeckSheet
-import com.example.ui.screens.VoiceModelCareScreen
 import com.example.ui.theme.AircheckTheme
 import com.example.ui.theme.OledVoid
 
@@ -122,10 +120,9 @@ class MainActivity : ComponentActivity() {
 /**
  * Aircheck top-level navigation shell:
  * - Default surface: Clip Studio v4 (`01 SPARK` · `02 SCRIPT` · `03 CUT` + `04 NEWSROOM` looks).
- * - Single canonical video pipeline (`CorePipelineScreen`):
+ * - Single canonical video pipeline (Clip Studio: Spark -> Script -> Cut, driven by CoreStageWorker):
  *   `01 TTS -> 02 Iterate Story -> 03 Speech to Talking Head -> 04 Chop into B-Roll -> 05 Final Review`.
  * - Separate optional screens kept outside the main flow:
- *   - `VoiceModelCareScreen` (phone-only voice lock, local LoRA care, quality check)
  *   - `NewsroomStudioScreen` (savable AI-generated Jetpack A2UI overlays for news briefs)
  */
 @Composable
@@ -138,9 +135,7 @@ fun AircheckApp(
     val context = LocalContext.current
 
     var showSettingsModal by rememberSaveable { mutableStateOf(false) }
-    var showVoiceModelCareModal by rememberSaveable { mutableStateOf(false) }
     var showNewsroomStudioModal by rememberSaveable { mutableStateOf(false) }
-    var showCorePipelineModal by rememberSaveable { mutableStateOf(false) }
     var activeReviewClipId by rememberSaveable { mutableStateOf<String?>(null) }
     var clipStudioScreen by rememberSaveable { mutableStateOf(ClipStudioScreen.SPARK) }
 
@@ -178,22 +173,6 @@ fun AircheckApp(
                 .background(OledVoid)
         ) {
             when {
-                showVoiceModelCareModal -> {
-                    VoiceModelCareScreen(
-                        uiState = studioState,
-                        onTogglePhoneOnlyMode = studioViewModel::setPhoneOnlyVoiceMode,
-                        onVerifyFiles = {
-                            studioViewModel.refreshVoiceModelCare(verifyChecksums = true)
-                        },
-                        onStartRecordSample = studioViewModel::startVoiceCareSampleRecording,
-                        onStopRecordSample = studioViewModel::stopVoiceCareSampleRecording,
-                        onDeleteSample = studioViewModel::deleteVoiceCareSample,
-                        onImportModelUri = studioViewModel::importLocalVoiceModelUri,
-                        onRunQualityCheck = studioViewModel::runOnPhoneVoiceQualityCheck,
-                        onBack = { showVoiceModelCareModal = false }
-                    )
-                }
-
                 showNewsroomStudioModal -> {
                     NewsroomStudioScreen(
                         uiState = studioState,
@@ -205,15 +184,6 @@ fun AircheckApp(
                     )
                 }
 
-                showCorePipelineModal -> {
-                    CorePipelineScreen(
-                        uiState = studioState,
-                        viewModel = studioViewModel,
-                        onBack = { showCorePipelineModal = false },
-                        onOpenOptionalOverlayBuilder = { showNewsroomStudioModal = true }
-                    )
-                }
-
                 showSettingsModal -> {
                     SystemDeckSheet(
                         uiState = studioState,
@@ -221,30 +191,14 @@ fun AircheckApp(
                         onClearCasCache = studioViewModel::clearCasCache,
                         onSaveTailscaleRigUrl = { url ->
                             studioViewModel.saveTailscaleRigUrl(url)
-                            if (!studioState.settings.phoneOnlyVoiceMode) {
-                                draftViewModel.probeRigHealth()
-                            }
+                            draftViewModel.probeRigHealth()
                         },
                         onTestRigConnection = { url ->
                             studioViewModel.testMacRigConnection(url)
                             draftViewModel.probeRigHealth()
                         },
-                        onOpenVoiceModelCare = {
-                            studioViewModel.refreshVoiceModelCare(verifyChecksums = false)
-                            showVoiceModelCareModal = true
-                        },
                         onOpenNewsroomStudio = {
                             showNewsroomStudioModal = true
-                        },
-                        onOpenCorePipeline = {
-                            if (studioState.corePipelineSession.clauses.isEmpty()) {
-                                val draftText = draftViewModel.currentDraftPlainText()
-                                if (draftText.isNotBlank()) {
-                                    studioViewModel.openStoryInCorePipeline(draftText)
-                                }
-                            }
-                            showSettingsModal = false
-                            showCorePipelineModal = true
                         },
                         onClose = { showSettingsModal = false }
                     )

@@ -336,6 +336,14 @@ class DraftDeckViewModel internal constructor(
     // STAGE 1: 01 SEED
     // =========================================================================
 
+    fun startSeedLatch() {
+        if (!_uiState.value.isRecordingSeed) toggleLatchMic()
+    }
+
+    fun stopSeedLatch() {
+        if (_uiState.value.isRecordingSeed) toggleLatchMic()
+    }
+
     fun toggleLatchMic() {
         val current = _uiState.value
         if (current.isRecordingSteer || current.isRecordingSplice) return
@@ -892,7 +900,11 @@ class DraftDeckViewModel internal constructor(
                 busyLabel = null,
                 densityDeltaPercent = 0,
                 lastSeedRigOnline = if (offline) false else state.lastSeedRigOnline,
-                errorMessage = "$prefix: $detail"
+                errorMessage = if (offline || com.example.engine.userFacingStageError(error, detail) == com.example.engine.MacStudioOfflineException().message) {
+                    com.example.engine.MacStudioOfflineException().message
+                } else {
+                    "$prefix: $detail"
+                }
             )
         }
     }
@@ -1096,6 +1108,32 @@ class DraftDeckViewModel internal constructor(
         val doc = _uiState.value.document
         if (index !in doc.arcBeats.indices) return
         generateArcInternal(doc.id, rerollIndex = index)
+    }
+
+    /** Directly updates the spoken text of beat [index] in place (preserving shots & undo history). */
+    fun updateArcBeatText(index: Int, newText: String) {
+        val clean = DraftStateReducer.sanitizeAscii(newText).trim()
+        if (clean.isEmpty()) return
+        val sessionId = _uiState.value.document.id
+        var changed = false
+        updateSession(sessionId) { state ->
+            val doc = state.document
+            val current = doc.arcBeats.getOrNull(index) ?: return@updateSession state
+            if (current.text.trim() == clean) return@updateSession state
+            changed = true
+            val updatedBeats = doc.arcBeats.mapIndexed { i, b ->
+                if (i == index) b.copy(text = clean) else b
+            }
+            val nextUndo = (doc.arcUndoStack + listOf(doc.arcBeats)).takeLast(MAX_ARC_UNDO)
+            state.copy(
+                document = doc.copy(
+                    arcBeats = updatedBeats,
+                    arcUndoStack = nextUndo
+                ),
+                errorMessage = null
+            )
+        }
+        if (changed) showToast("beat updated")
     }
 
     private fun generateArcInternal(targetSessionId: String, rerollIndex: Int?) {
@@ -2665,7 +2703,7 @@ class DraftDeckViewModel internal constructor(
                     state.copy(
                         isDraftingFollowup = false,
                         lastSeedRigOnline = if (offline) false else state.lastSeedRigOnline,
-                        errorMessage = "Follow-up draft failed: ${e.localizedMessage ?: "unknown error"}"
+                        errorMessage = com.example.engine.userFacingStageError(e, "unknown error").let { m -> if (m == com.example.engine.MacStudioOfflineException().message) m else "Follow-up draft failed: $m" }
                     )
                 }
             }
@@ -2774,7 +2812,7 @@ class DraftDeckViewModel internal constructor(
                     st.copy(
                         isDraftingFollowup = false,
                         lastSeedRigOnline = if (offline) false else st.lastSeedRigOnline,
-                        errorMessage = "Follow-up draft failed: ${e.localizedMessage ?: "unknown error"}"
+                        errorMessage = com.example.engine.userFacingStageError(e, "unknown error").let { m -> if (m == com.example.engine.MacStudioOfflineException().message) m else "Follow-up draft failed: $m" }
                     )
                 }
             }
@@ -3198,7 +3236,13 @@ class DraftDeckViewModel internal constructor(
                 lastSeedRigOnline = if (isTransportFailure) false else state.lastSeedRigOnline,
                 isBusy = false,
                 busyLabel = null,
-                errorMessage = "$prefix: ${error.localizedMessage ?: error::class.java.simpleName}"
+                errorMessage = com.example.engine.userFacingStageError(error, error::class.java.simpleName).let { m ->
+                    if (isTransportFailure || m == com.example.engine.MacStudioOfflineException().message) {
+                        com.example.engine.MacStudioOfflineException().message
+                    } else {
+                        "$prefix: $m"
+                    }
+                }
             )
         }
     }

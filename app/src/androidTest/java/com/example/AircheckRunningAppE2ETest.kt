@@ -177,6 +177,23 @@ class AircheckRunningAppE2ETest {
         composeRule.waitForIdle()
         captureScreenshot(screenshotDir, "02_spark_outline_v5.png")
 
+        // Inline beat editing on 01 SPARK: tap beat 0 text -> edit -> save -> verify persisted beat text
+        composeRule.onNodeWithTag("cs_beat_text_0").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodesWithTag("cs_beat_editor_0").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("cs_beat_editor_0").performTextReplacement(
+            "Edited hook: stop paying monthly rent for AI video editing."
+        )
+        Espresso.closeSoftKeyboard()
+        captureScreenshot(screenshotDir, "02b_spark_beat_editing_v5.png")
+        composeRule.onNodeWithTag("cs_beat_save_0").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            draftVm.uiState.value.document.arcBeats.firstOrNull()?.text ==
+                "Edited hook: stop paying monthly rent for AI video editing."
+        }
+        dismissToastIfPresent()
+
         // Open Anchors sheet -> toggle anchor + "more" + "keep N anchors"
         composeRule.onNodeWithTag("cs_anchors_button").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
@@ -612,10 +629,10 @@ class AircheckRunningAppE2ETest {
 
         dismissToastIfPresent()
 
-        // Open Settings modal from 03 CUT and verify live Mac :8443 rig health & Voice Care entry
+        // Open Settings modal from 03 CUT and verify Studio Settings sheet renders
         composeRule.onNodeWithTag("cs_cut_settings").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
-            composeRule.onAllNodesWithTag("open_voice_model_care_button").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithTag("system_deck_lazy_list").fetchSemanticsNodes().isNotEmpty()
         }
         captureScreenshot(screenshotDir, "13_cut_settings_v5.png")
     }

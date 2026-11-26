@@ -50,6 +50,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -644,6 +646,35 @@ fun RowScope.CsSegment(
 }
 
 /**
+ * Rock-solid hold-to-record gesture that consumes down + move pointer events on [PointerEventPass.Initial]
+ * so parent scroll containers never hijack the hold and minor thumb drift never ends recording early.
+ * Only calls [onRelease] when the tracked finger physically lifts (or the gesture is cancelled by OS).
+ */
+internal suspend fun PointerInputScope.detectHoldGesture(
+    onPress: () -> Unit,
+    onRelease: () -> Unit
+) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        down.consume()
+        onPress()
+        try {
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val tracked = event.changes.firstOrNull { it.id == down.id }
+                if (tracked == null || !tracked.pressed) {
+                    tracked?.consume()
+                    break
+                }
+                tracked.consume()
+            }
+        } finally {
+            onRelease()
+        }
+    }
+}
+
+/**
  * Press-and-hold key (records while held). [onPress] fires on finger down and [onRelease]
  * on lift or cancel; accessibility "click" toggles press then release.
  */
@@ -675,12 +706,7 @@ fun CsHoldKey(
             }
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    press()
-                    waitForUpOrCancellation()
-                    release()
-                }
+                detectHoldGesture(onPress = { press() }, onRelease = { release() })
             }
             .padding(horizontal = 10.dp),
         horizontalArrangement = Arrangement.Center,
@@ -728,12 +754,7 @@ fun CsVoiceDockKey(
             }
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    press()
-                    waitForUpOrCancellation()
-                    release()
-                }
+                detectHoldGesture(onPress = { press() }, onRelease = { release() })
             }
             .padding(horizontal = 14.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
@@ -855,7 +876,7 @@ fun CsBusyBox(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            ThinkingOrbSolving(size = 24.dp, tint = Cs.White)
+            ThinkingOrbSolving(size = 32.dp, tint = Cs.White)
             Text(
                 text = label,
                 style = mono(14.sp, Cs.White, FontWeight.Medium),

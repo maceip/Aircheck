@@ -893,7 +893,7 @@ private fun LookStyleAndLogoTab(
                 contentAlignment = Alignment.Center
             ) {
                 if (state.isRefreshingHeadline) {
-                    ThinkingOrbSolving(size = 22.dp, tint = Cs.White)
+                    ThinkingOrbSolving(size = 26.dp, tint = Cs.White)
                 } else {
                     Icon(
                         imageVector = Icons.Outlined.AutoAwesome,

@@ -4,9 +4,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -112,7 +109,9 @@ fun SparkScreen(
     renderGlobalOverlays: Boolean = true
 ) {
     val doc = state.document
-    val sparkEmpty = doc.seedTranscript.isBlank() && !state.followupLoaded && doc.arcBeats.isEmpty()
+    // Stay on the empty hold-to-record surface while actively holding the seed mic (so incremental
+    // VAD chunks never unmount the red button out from under the user's thumb mid-sentence).
+    val sparkEmpty = (doc.seedTranscript.isBlank() || state.isRecordingSeed) && !state.followupLoaded && doc.arcBeats.isEmpty()
 
     var typedSheetOpen by rememberSaveable { mutableStateOf(false) }
     var noteEditSheetOpen by rememberSaveable { mutableStateOf(false) }
@@ -329,12 +328,10 @@ private fun SparkEmptyContent(
                     busyLabel = state.busyLabel,
                     enabled = !state.isRecordingSteer && !state.isRecordingSplice,
                     onPress = {
-                        onRequestMic {
-                            if (!state.isRecordingSeed) vm.toggleLatchMic()
-                        }
+                        onRequestMic { vm.startSeedLatch() }
                     },
                     onRelease = {
-                        if (state.isRecordingSeed) vm.toggleLatchMic()
+                        vm.stopSeedLatch()
                     }
                 )
             }
@@ -396,7 +393,7 @@ private fun SeedRecordHeroKey(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            ThinkingOrbSolving(size = 28.dp, tint = Cs.White)
+            ThinkingOrbSolving(size = 34.dp, tint = Cs.White)
             Text(
                 text = busyLabel ?: "outlining your idea…",
                 style = mono(15.sp, Cs.White, FontWeight.Bold),
@@ -426,12 +423,7 @@ private fun SeedRecordHeroKey(
             }
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    press()
-                    waitForUpOrCancellation()
-                    release()
-                }
+                detectHoldGesture(onPress = { press() }, onRelease = { release() })
             }
             .padding(horizontal = 20.dp)
             .testTag("cs_seed_hold_record"),
@@ -699,12 +691,21 @@ private fun SparkOutlineContent(
         }
 
         // Segmented 4-beat Outline Panel — clean individual beat sections (no rainbow section borders);
-        // rainbow metallic shimmer lives directly on the flat unfilled sparkle icon.
+        // tap any beat's text to edit inline; rainbow metallic shimmer lives directly on the sparkle icon.
+        var editingBeatIndex by rememberSaveable { mutableStateOf<Int?>(null) }
+        BackHandler(enabled = editingBeatIndex != null) { editingBeatIndex = null }
+        LaunchedEffect(doc.id, doc.arcBeats.size) {
+            if (editingBeatIndex != null && editingBeatIndex !in doc.arcBeats.indices) {
+                editingBeatIndex = null
+            }
+        }
+
         Column(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp)
+                .then(if (editingBeatIndex != null) Modifier.verticalScroll(rememberScrollState()) else Modifier)
                 .testTag("cs_outline_panel"),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -718,7 +719,7 @@ private fun SparkOutlineContent(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     if (state.isBusy || state.isExtractingAngles) {
-                        ThinkingOrbSolving(size = 48.dp, tint = Cs.Ink)
+                        ThinkingOrbSolving(size = 60.dp, tint = Cs.White)
                     }
                     Text(
                         text = if (state.isBusy || state.isExtractingAngles) {
@@ -743,24 +744,46 @@ private fun SparkOutlineContent(
             } else {
                 doc.arcBeats.forEachIndexed { i, beat ->
                     val isRerolling = state.rerollingBeatIndex == i
+                    val isEditing = editingBeatIndex == i
+                    val cardModifier = if (editingBeatIndex != null) {
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = if (isEditing) 144.dp else 96.dp)
+                    } else {
+                        Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                    }
                     OutlineBeatRow(
                         index = i,
                         beat = beat,
                         isRerolling = isRerolling,
+                        isEditing = isEditing,
                         shotPreviews = state.shotPreviews,
                         inFlightShotIds = state.inFlightShotIds,
                         isBusy = state.isBusy,
+                        onStartEdit = { editingBeatIndex = i },
+                        onSaveEdit = { updated ->
+                            vm.updateArcBeatText(i, updated)
+                            editingBeatIndex = null
+                        },
+                        onCancelEdit = { editingBeatIndex = null },
                         onCycleShot = { shotIdx -> vm.cycleBeatShot(i, shotIdx) },
                         onAddShot = { vm.addBeatBrollShot(i) },
-                        onReroll = { vm.rerollArcBeat(i) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
+                        onReroll = {
+                            editingBeatIndex = null
+                            vm.rerollArcBeat(i)
+                        },
+                        modifier = cardModifier
                             .clip(RoundedCornerShape(16.dp))
                             .background(Cs.SunkenPanel)
                             .border(
                                 width = 1.dp,
-                                color = if (isRerolling) Color(0xFF42444E) else Color(0xFF26262E),
+                                color = when {
+                                    isEditing -> Cs.Amber
+                                    isRerolling -> Color(0xFF42444E)
+                                    else -> Color(0xFF26262E)
+                                },
                                 shape = RoundedCornerShape(16.dp)
                             )
                     )
@@ -798,9 +821,13 @@ private fun OutlineBeatRow(
     index: Int,
     beat: ArcBeat,
     isRerolling: Boolean,
+    isEditing: Boolean,
     shotPreviews: Map<String, String>,
     inFlightShotIds: Set<String>,
     isBusy: Boolean,
+    onStartEdit: () -> Unit,
+    onSaveEdit: (String) -> Unit,
+    onCancelEdit: () -> Unit,
     onCycleShot: (Int) -> Unit,
     onAddShot: () -> Unit,
     onReroll: () -> Unit,
@@ -808,7 +835,7 @@ private fun OutlineBeatRow(
 ) {
     Row(
         modifier = modifier
-            .padding(start = 16.dp, top = 4.dp, end = 6.dp, bottom = 4.dp)
+            .padding(start = 16.dp, top = 6.dp, end = 6.dp, bottom = 6.dp)
             .testTag("cs_arc_beat_$index"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -823,18 +850,75 @@ private fun OutlineBeatRow(
                 style = mono(11.sp, Cs.Muted),
                 maxLines = 1
             )
+            if (!isEditing && !isRerolling) {
+                Icon(
+                    imageVector = Icons.Sharp.Edit,
+                    contentDescription = "Edit beat ${index + 1}",
+                    tint = Cs.Muted,
+                    modifier = Modifier
+                        .padding(top = 4.dp)
+                        .size(15.dp)
+                        .clickable(enabled = !isBusy, role = Role.Button, onClick = onStartEdit)
+                        .testTag("cs_edit_beat_$index")
+                )
+            }
         }
 
         Column(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Text(
-                text = if (isRerolling) "rewriting…" else beat.text,
-                style = sans(16.sp, if (isRerolling) Cs.Muted else Cs.Ink, 21.sp),
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis
-            )
+            if (isEditing) {
+                val fieldState = rememberTextFieldState(initialText = beat.text)
+                BasicTextField(
+                    state = fieldState,
+                    textStyle = sans(15.5.sp, Cs.White, 21.sp),
+                    cursorBrush = SolidColor(Cs.White),
+                    lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 2, maxHeightInLines = 4),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Cs.Body)
+                        .border(1.dp, Cs.Amber, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                        .testTag("cs_beat_editor_$index")
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CsKeyLabel(
+                        label = "save",
+                        onClick = { onSaveEdit(fieldState.text.toString()) },
+                        role = KeyRole.ACTIVE,
+                        radius = 10.dp,
+                        size = 12.sp,
+                        weight = FontWeight.SemiBold,
+                        enabled = fieldState.text.toString().isNotBlank(),
+                        modifier = Modifier
+                            .height(36.dp)
+                            .testTag("cs_beat_save_$index")
+                    )
+                    CsKeyLabel(
+                        label = "cancel",
+                        onClick = onCancelEdit,
+                        role = KeyRole.STD,
+                        radius = 10.dp,
+                        size = 12.sp,
+                        modifier = Modifier
+                            .height(36.dp)
+                            .testTag("cs_beat_cancel_$index")
+                    )
+                }
+            } else {
+                Text(
+                    text = if (isRerolling) "rewriting…" else beat.text,
+                    style = sans(16.sp, if (isRerolling) Cs.Muted else Cs.Ink, 21.sp),
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !isBusy && !isRerolling, role = Role.Button, onClick = onStartEdit)
+                        .testTag("cs_beat_text_$index")
+                )
+            }
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -893,7 +977,7 @@ private fun OutlineBeatRow(
         }
 
         // Flat, unfilled (outlined) sparkle icon with rainbow shimmer directly on the icon strokes
-        // — NO border, NO box, NO elevation. Shows solving orb while re-rolling.
+        // — NO border, NO box, NO elevation. Shows bold solving orb while re-rolling.
         Box(
             modifier = Modifier
                 .size(44.dp)
@@ -902,7 +986,7 @@ private fun OutlineBeatRow(
             contentAlignment = Alignment.Center
         ) {
             if (isRerolling) {
-                ThinkingOrbSolving(size = 22.dp, tint = Cs.White)
+                ThinkingOrbSolving(size = 28.dp, tint = Cs.White)
             } else {
                 ShimmerSparkleIcon(
                     contentDescription = "Rewrite beat ${index + 1}",

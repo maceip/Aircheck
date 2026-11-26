@@ -627,7 +627,7 @@ private fun PhraseSwapSheet(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 if (state.isBusy) {
-                    ThinkingOrbSolving(size = 20.dp, tint = Cs.Ink)
+                    ThinkingOrbSolving(size = 26.dp, tint = Cs.White)
                 }
                 Text(
                     text = if (state.isBusy) (state.busyLabel ?: "Finding alternatives…") else "No alternatives yet.",

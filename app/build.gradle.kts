@@ -25,6 +25,11 @@ android {
     versionName = "2.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // Deepgram key is read at build time from ~/.config/aircheck/deepgram_api_key (never committed).
+    val deepgramKeyFile = File(System.getProperty("user.home"), ".config/aircheck/deepgram_api_key")
+    val deepgramKey = if (deepgramKeyFile.isFile) deepgramKeyFile.readText().trim() else ""
+    buildConfigField("String", "DEEPGRAM_API_KEY", "\"$deepgramKey\"")
   }
 
   signingConfigs {
