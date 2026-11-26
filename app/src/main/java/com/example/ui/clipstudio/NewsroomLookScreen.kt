@@ -47,6 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -307,7 +308,10 @@ fun NewsroomLookScreen(
                         icon = Icons.Outlined.AutoAwesome,
                         enabled = !isLookBusy,
                         horizontal = true,
-                        onClick = { aiTweakSheetOpen = true },
+                        onClick = {
+                            vm.dismissToast()
+                            aiTweakSheetOpen = true
+                        },
                         modifier = Modifier.testTag("cs_tweak_ai_button")
                     )
                 },
@@ -750,6 +754,7 @@ private fun LookStyleAndLogoTab(
     breakingStyle: BreakingNewsStyle
 ) {
     // 1. Top-Left News Logo / Brand Bug editor
+    val latestOptions by rememberUpdatedState(options)
     val bugFieldState = rememberTextFieldState(initialText = options.cornerBugText)
     LaunchedEffect(options.cornerBugText) {
         if (options.cornerBugText != bugFieldState.text.toString()) {
@@ -761,8 +766,9 @@ private fun LookStyleAndLogoTab(
             .distinctUntilChanged()
             .drop(1)
             .collect { edited ->
-                if (edited.trim() != options.cornerBugText.trim() && edited.isNotBlank()) {
-                    vm.setCoreBrandBug(show = options.showBrandBug, text = edited)
+                val cur = latestOptions
+                if (edited.trim() != cur.cornerBugText.trim() && edited.isNotBlank()) {
+                    vm.setCoreBrandBug(show = cur.showBrandBug, text = edited)
                 }
             }
     }

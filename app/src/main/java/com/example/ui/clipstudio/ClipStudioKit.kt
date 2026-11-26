@@ -1026,7 +1026,7 @@ fun CsTopBar(
     }
 }
 
-/** Global 48dp raised toast sitting 112dp above the bottom edge with an "ok" dismiss key. */
+/** Global 48dp machined dark hardware toast sitting 112dp above the bottom edge with an "ok" dismiss key. */
 @Composable
 fun BoxScope.CsToastOverlay(
     message: String?,
@@ -1040,31 +1040,33 @@ fun BoxScope.CsToastOverlay(
             .padding(start = 12.dp, end = 12.dp, bottom = 112.dp)
             .fillMaxWidth()
             .height(48.dp)
+            .neumorphicSurface(role = KeyRole.ACTIVE, pressed = false, radius = 14.dp, enabled = true)
             .clip(RoundedCornerShape(14.dp))
-            .background(Cs.Ink)
-            .border(1.dp, Cs.White.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
-            .padding(start = 16.dp, end = 6.dp)
+            .padding(start = 14.dp, end = 6.dp)
             .testTag("cs_toast"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        CsLedDot(color = Cs.Mint, size = 7.dp)
         Text(
             text = message,
-            style = mono(13.sp, Cs.Black),
+            style = mono(13.sp, Cs.White, FontWeight.Medium),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
         Box(
             modifier = Modifier
-                .height(36.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .height(34.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(Cs.SunkenTrack)
+                .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(9.dp))
                 .clickable(role = Role.Button, onClick = onDismiss)
                 .padding(horizontal = 12.dp)
                 .testTag("cs_toast_ok"),
             contentAlignment = Alignment.Center
         ) {
-            Text("ok", style = mono(13.sp, Cs.Black, FontWeight.Medium), maxLines = 1)
+            Text("ok", style = mono(12.5.sp, Cs.Ink, FontWeight.SemiBold), maxLines = 1)
         }
     }
 }

@@ -494,6 +494,10 @@ class AircheckRunningAppE2ETest {
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             persistedSession().renderOptions.cornerBugText == "AIRCHECK LIVE"
         }
+        assertTrue(
+            "Editing corner bug text must preserve showBrandBug=true",
+            persistedSession().renderOptions.showBrandBug
+        )
 
         composeRule.onNodeWithTag("cs_title_input").performScrollTo().performTextReplacement("Monthly editing subscriptions are over")
         Espresso.closeSoftKeyboard()
@@ -541,6 +545,7 @@ class AircheckRunningAppE2ETest {
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             studioVm.uiState.value.savedOverlays.firstOrNull { it.id == seededQuoteCard.id }?.headline == "Own the silicon once"
         }
+        dismissToastIfPresent()
         captureScreenshot(screenshotDir, "11_video_look_cards_v5.png")
 
         // Toggle saved card off -> "0 cards attached", then toggle back on -> "1 quote card attached"
