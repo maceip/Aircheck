@@ -312,66 +312,83 @@ fun CutScreen(
                 )
             }
 
-            // Sunken 2-way `words` · `b-roll` mode switch
-            CsSegmentedRow(
-                modifier = Modifier.padding(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 10.dp)
-            ) {
-                CsSegment(
-                    selected = mode == "transcript",
-                    onClick = { mode = "transcript" },
-                    height = 44.dp,
-                    modifier = Modifier.testTag("cs_cut_mode_transcript")
-                ) { tint ->
-                    Icon(Icons.AutoMirrored.Sharp.Notes, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
-                    Text("words", style = mono(13.sp, tint), maxLines = 1)
-                }
-                CsSegment(
-                    selected = mode == "timeline",
-                    onClick = { mode = "timeline" },
-                    height = 44.dp,
-                    modifier = Modifier.testTag("cs_cut_mode_timeline")
-                ) { tint ->
-                    Icon(Icons.Sharp.Movie, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
-                    Text("b-roll", style = mono(13.sp, tint), maxLines = 1)
-                }
-            }
-
-            // Sunken #000 Transcript / B-roll Panel
-            Box(
+            // Unified Sunken #000 Transcript / B-roll Workspace with minimal flush flat header
+            // (`words` | `b-roll`) — keeps the bright silver console deck above as the sole silver focal strip.
+            Column(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 10.dp)
+                    .padding(start = 10.dp, top = 10.dp, end = 10.dp)
                     .sunkenPanel(radius = 18.dp)
             ) {
-                if (session.clauses.isEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .background(Color(0xFF0A0A0E))
+                        .hairlineBottom(Cs.RowDivider),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CutWorkspaceTab(
+                        label = "words",
+                        icon = Icons.AutoMirrored.Sharp.Notes,
+                        selected = mode == "transcript",
+                        onClick = { mode = "transcript" },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_mode_transcript")
+                    )
                     Box(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .padding(20.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "No story loaded yet. Go to 02 SCRIPT and tap make the video.",
-                            style = sans(15.sp, Cs.Muted, 21.sp)
+                            .width(1.dp)
+                            .height(20.dp)
+                            .background(Cs.RowDivider)
+                    )
+                    CutWorkspaceTab(
+                        label = "b-roll",
+                        icon = Icons.Sharp.Movie,
+                        selected = mode == "timeline",
+                        onClick = { mode = "timeline" },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_mode_timeline")
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) {
+                    if (session.clauses.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(20.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No story loaded yet. Go to 02 SCRIPT and tap make the video.",
+                                style = sans(15.sp, Cs.Muted, 21.sp)
+                            )
+                        }
+                    } else if (mode == "transcript") {
+                        TranscriptWordsPane(
+                            state = state,
+                            vm = vm,
+                            positionMs = positionMs,
+                            unsynced = unsynced,
+                            editingClause = editingClause,
+                            onEdit = { editingClause = it },
+                            onSeekLocal = { ms -> positionMs = ms }
+                        )
+                    } else {
+                        BrollModePane(
+                            clauses = session.clauses,
+                            vm = vm,
+                            onSeekLocal = { ms -> positionMs = ms }
                         )
                     }
-                } else if (mode == "transcript") {
-                    TranscriptWordsPane(
-                        state = state,
-                        vm = vm,
-                        positionMs = positionMs,
-                        unsynced = unsynced,
-                        editingClause = editingClause,
-                        onEdit = { editingClause = it },
-                        onSeekLocal = { ms -> positionMs = ms }
-                    )
-                } else {
-                    BrollModePane(
-                        clauses = session.clauses,
-                        vm = vm,
-                        onSeekLocal = { ms -> positionMs = ms }
-                    )
                 }
             }
 
@@ -425,6 +442,43 @@ private data class CutPrimarySpec(
     val enabled: Boolean,
     val onClick: () -> Unit
 )
+
+@Composable
+private fun CutWorkspaceTab(
+    label: String,
+    icon: ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val tint = if (selected) Cs.White else Cs.Muted
+    Row(
+        modifier = modifier
+            .fillMaxHeight()
+            .clickable(role = Role.Tab, onClick = onClick)
+            .drawBehind {
+                if (selected) {
+                    val barW = (size.width * 0.42f).coerceIn(36.dp.toPx(), 72.dp.toPx())
+                    val barH = 2.dp.toPx()
+                    drawRect(
+                        color = Cs.InkBright,
+                        topLeft = Offset((size.width - barW) / 2f, size.height - barH),
+                        size = Size(barW, barH)
+                    )
+                }
+            }
+            .padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(imageVector = icon, contentDescription = null, tint = tint, modifier = Modifier.size(17.dp))
+        Text(
+            text = label,
+            style = mono(12.5.sp, tint, if (selected) FontWeight.SemiBold else FontWeight.Normal),
+            maxLines = 1
+        )
+    }
+}
 
 private fun resolveCutPrimarySpec(
     hasClauses: Boolean,

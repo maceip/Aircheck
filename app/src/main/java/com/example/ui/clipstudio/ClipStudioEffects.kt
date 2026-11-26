@@ -889,43 +889,51 @@ object HwLed {
     val Amber = Color(0xFFF0A500)
 }
 
+enum class HardwareShellTone {
+    /** Bright brushed-aluminum OP-1 faceplate (used exclusively for the single primary video console bar). */
+    SILVER,
+    /** Dark anodized brushed-titanium bezel (used for inline OLED keys & strips inside dark panels so there is zero light/dark ping-pong). */
+    TITANIUM
+}
+
 /**
- * Draws a recessed spherical 3D hardware LED jewel onto a light-silver faceplate:
- * - When [lit] is true: real colored radial light bloom on the surrounding aluminum + glossy 3D colored dome + specular glint.
- * - When [lit] is false: dark anodized recessed LED socket + unlit glass lens (or faint [dimTint] preview when supplied).
+ * Draws a recessed spherical 3D hardware LED jewel onto a light-silver or dark-titanium faceplate:
+ * - When [lit] is true: real colored radial light bloom on the surrounding housing + glossy 3D colored dome + specular glint.
+ * - When [lit] is false: recessed LED socket + unlit glass lens (or faint [dimTint] preview when supplied).
  */
 internal fun DrawScope.drawHardwareLedJewel(
     center: Offset,
     radius: Float,
     color: Color,
     lit: Boolean,
-    dimTint: Color? = null
+    dimTint: Color? = null,
+    darkHost: Boolean = false
 ) {
-    // 1. Subtle recessed socket ring cut into the silver housing
+    // 1. Subtle recessed socket ring cut into the housing
     drawCircle(
-        color = Color(0xFF707580).copy(alpha = 0.72f),
-        radius = radius * 1.18f,
+        color = if (darkHost) Color(0xFF0A0B0E).copy(alpha = 0.90f) else Color(0xFF707580).copy(alpha = 0.72f),
+        radius = radius * 1.22f,
         center = Offset(center.x, center.y - radius * 0.10f)
     )
     drawCircle(
-        color = Color.White.copy(alpha = 0.65f),
-        radius = radius * 1.16f,
+        color = if (darkHost) Color.White.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.65f),
+        radius = radius * 1.18f,
         center = Offset(center.x, center.y + radius * 0.14f)
     )
 
     if (lit) {
-        // Real colored light halo spilled onto the brushed-silver housing around the LED
+        // Real colored light halo spilled onto the housing around the LED
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
-                    color.copy(alpha = 0.58f),
-                    color.copy(alpha = 0.18f),
+                    color.copy(alpha = if (darkHost) 0.65f else 0.58f),
+                    color.copy(alpha = if (darkHost) 0.24f else 0.18f),
                     Color.Transparent
                 ),
                 center = center,
-                radius = radius * 2.55f
+                radius = radius * 2.65f
             ),
-            radius = radius * 2.55f,
+            radius = radius * 2.65f,
             center = center
         )
         // Saturated 3D refractive jewel body
@@ -936,9 +944,9 @@ internal fun DrawScope.drawHardwareLedJewel(
             alpha = 1f
         )
         val hotCore = Color(
-            red = (color.red + (1f - color.red) * 0.42f).coerceIn(0f, 1f),
-            green = (color.green + (1f - color.green) * 0.42f).coerceIn(0f, 1f),
-            blue = (color.blue + (1f - color.blue) * 0.42f).coerceIn(0f, 1f),
+            red = (color.red + (1f - color.red) * 0.44f).coerceIn(0f, 1f),
+            green = (color.green + (1f - color.green) * 0.44f).coerceIn(0f, 1f),
+            blue = (color.blue + (1f - color.blue) * 0.44f).coerceIn(0f, 1f),
             alpha = 1f
         )
         drawCircle(
@@ -952,27 +960,27 @@ internal fun DrawScope.drawHardwareLedJewel(
         )
         // Specular glass pinpoint
         drawCircle(
-            color = Color.White.copy(alpha = 0.90f),
+            color = Color.White.copy(alpha = 0.92f),
             radius = radius * 0.30f,
             center = Offset(center.x - radius * 0.28f, center.y - radius * 0.28f)
         )
     } else {
         // Physical unlit dark lens sitting inside the recessed socket
-        val base = dimTint ?: Color(0xFF474C56)
+        val base = dimTint ?: if (darkHost) Color(0xFF3A3E48) else Color(0xFF474C56)
         val centerCol = if (dimTint != null) {
             Color(
-                red = base.red * 0.55f + 0.18f,
-                green = base.green * 0.55f + 0.18f,
-                blue = base.blue * 0.55f + 0.18f,
+                red = base.red * 0.58f + (if (darkHost) 0.10f else 0.18f),
+                green = base.green * 0.58f + (if (darkHost) 0.10f else 0.18f),
+                blue = base.blue * 0.58f + (if (darkHost) 0.10f else 0.18f),
                 alpha = 1f
             )
         } else {
-            Color(0xFF565B66)
+            if (darkHost) Color(0xFF3B3F4A) else Color(0xFF565B66)
         }
         val edgeCol = if (dimTint != null) {
-            Color(base.red * 0.30f, base.green * 0.30f, base.blue * 0.30f, 1f)
+            Color(base.red * 0.26f, base.green * 0.26f, base.blue * 0.26f, 1f)
         } else {
-            Color(0xFF2B2E36)
+            if (darkHost) Color(0xFF1A1C22) else Color(0xFF2B2E36)
         }
         drawCircle(
             brush = Brush.radialGradient(
@@ -984,7 +992,7 @@ internal fun DrawScope.drawHardwareLedJewel(
             center = center
         )
         drawCircle(
-            color = Color.White.copy(alpha = 0.24f),
+            color = Color.White.copy(alpha = if (darkHost) 0.20f else 0.24f),
             radius = radius * 0.24f,
             center = Offset(center.x - radius * 0.28f, center.y - radius * 0.28f)
         )
@@ -992,11 +1000,12 @@ internal fun DrawScope.drawHardwareLedJewel(
 }
 
 /**
- * Draws the sculpted 3D molded light-silver / off-white hardware shell (used for console bars,
- * individual OLED keycaps, and unified hardware strips).
+ * Draws the sculpted 3D molded hardware shell in either [HardwareShellTone.SILVER] (OP-1 brushed aluminum)
+ * or [HardwareShellTone.TITANIUM] (dark anodized brushed titanium for zero ping-pong inside dark panels).
  */
-private fun DrawScope.drawMoldedSilverShell(
+private fun DrawScope.drawMoldedHardwareShell(
     radiusPx: Float,
+    tone: HardwareShellTone,
     pressed: Boolean = false,
     enabled: Boolean = true
 ) {
@@ -1007,82 +1016,129 @@ private fun DrawScope.drawMoldedSilverShell(
     // Outer ambient drop shadow onto the dark chassis
     if (!pressed) {
         drawRoundRect(
-            color = Color.Black.copy(alpha = if (enabled) 0.58f else 0.28f),
+            color = Color.Black.copy(alpha = if (enabled) 0.62f else 0.28f),
             topLeft = Offset(0f, 2.5.dp.toPx()),
             size = size,
             cornerRadius = corner
         )
     }
 
-    // Lower 3D beveled skirt rim
-    drawRoundRect(
-        brush = Brush.verticalGradient(
-            colors = listOf(Color(0xFFAEB4BE), Color(0xFF838994)),
-            startY = faceH * 0.55f,
-            endY = size.height
-        ),
-        topLeft = Offset(0f, 0.75.dp.toPx()),
-        size = Size(size.width, (size.height - 0.75.dp.toPx()).coerceAtLeast(1f)),
-        cornerRadius = corner
-    )
-
-    // Main sculpted matte light-silver faceplate body
-    val topFace = if (pressed) Color(0xFFD5D8DF) else Color(0xFFF1F3F6)
-    val midFace = if (pressed) Color(0xFFC5C9D2) else Color(0xFFDCDFE5)
-    val botFace = if (pressed) Color(0xFFB4B9C3) else Color(0xFFC4C9D2)
-    drawRoundRect(
-        brush = Brush.verticalGradient(
-            colors = listOf(
-                if (enabled) topFace else topFace.copy(alpha = 0.55f),
-                if (enabled) midFace else midFace.copy(alpha = 0.55f),
-                if (enabled) botFace else botFace.copy(alpha = 0.55f)
+    if (tone == HardwareShellTone.SILVER) {
+        // Lower 3D beveled skirt rim (bright brushed aluminum)
+        drawRoundRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(Color(0xFFAEB4BE), Color(0xFF838994)),
+                startY = faceH * 0.55f,
+                endY = size.height
             ),
-            startY = 0f,
-            endY = faceH
-        ),
-        topLeft = Offset.Zero,
-        size = Size(size.width, faceH),
-        cornerRadius = corner
-    )
+            topLeft = Offset(0f, 0.75.dp.toPx()),
+            size = Size(size.width, (size.height - 0.75.dp.toPx()).coerceAtLeast(1f)),
+            cornerRadius = corner
+        )
 
-    // Crisp upper specular highlight + subtle inner bevel contour
-    drawRoundRect(
-        brush = Brush.verticalGradient(
-            colors = listOf(
-                Color.White.copy(alpha = if (pressed) 0.35f else 0.92f),
-                Color.White.copy(alpha = 0.14f),
-                Color(0xFF7B818C).copy(alpha = 0.45f)
+        val topFace = if (pressed) Color(0xFFD5D8DF) else Color(0xFFF1F3F6)
+        val midFace = if (pressed) Color(0xFFC5C9D2) else Color(0xFFDCDFE5)
+        val botFace = if (pressed) Color(0xFFB4B9C3) else Color(0xFFC4C9D2)
+        drawRoundRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(
+                    if (enabled) topFace else topFace.copy(alpha = 0.55f),
+                    if (enabled) midFace else midFace.copy(alpha = 0.55f),
+                    if (enabled) botFace else botFace.copy(alpha = 0.55f)
+                ),
+                startY = 0f,
+                endY = faceH
             ),
-            startY = 0f,
-            endY = faceH
-        ),
-        topLeft = Offset(0.5.dp.toPx(), 0.5.dp.toPx()),
-        size = Size((size.width - 1.dp.toPx()).coerceAtLeast(1f), (faceH - 1.dp.toPx()).coerceAtLeast(1f)),
-        cornerRadius = CornerRadius((radiusPx - 0.5.dp.toPx()).coerceAtLeast(1f)),
-        style = Stroke(width = 1.dp.toPx())
-    )
+            topLeft = Offset.Zero,
+            size = Size(size.width, faceH),
+            cornerRadius = corner
+        )
+
+        drawRoundRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = if (pressed) 0.35f else 0.92f),
+                    Color.White.copy(alpha = 0.14f),
+                    Color(0xFF7B818C).copy(alpha = 0.45f)
+                ),
+                startY = 0f,
+                endY = faceH
+            ),
+            topLeft = Offset(0.5.dp.toPx(), 0.5.dp.toPx()),
+            size = Size((size.width - 1.dp.toPx()).coerceAtLeast(1f), (faceH - 1.dp.toPx()).coerceAtLeast(1f)),
+            cornerRadius = CornerRadius((radiusPx - 0.5.dp.toPx()).coerceAtLeast(1f)),
+            style = Stroke(width = 1.dp.toPx())
+        )
+    } else {
+        // Dark anodized brushed-titanium 3D hardware bezel (same sculpted relief, cohesive dark-metal tone)
+        drawRoundRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(Color(0xFF20222A), Color(0xFF101217)),
+                startY = faceH * 0.55f,
+                endY = size.height
+            ),
+            topLeft = Offset(0f, 0.75.dp.toPx()),
+            size = Size(size.width, (size.height - 0.75.dp.toPx()).coerceAtLeast(1f)),
+            cornerRadius = corner
+        )
+
+        val topFace = if (pressed) Color(0xFF2C3039) else Color(0xFF424754)
+        val midFace = if (pressed) Color(0xFF242730) else Color(0xFF333742)
+        val botFace = if (pressed) Color(0xFF1C1E26) else Color(0xFF262933)
+        drawRoundRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(
+                    if (enabled) topFace else topFace.copy(alpha = 0.55f),
+                    if (enabled) midFace else midFace.copy(alpha = 0.55f),
+                    if (enabled) botFace else botFace.copy(alpha = 0.55f)
+                ),
+                startY = 0f,
+                endY = faceH
+            ),
+            topLeft = Offset.Zero,
+            size = Size(size.width, faceH),
+            cornerRadius = corner
+        )
+
+        drawRoundRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(
+                    Color(0xFF7B8296).copy(alpha = if (pressed) 0.25f else 0.72f),
+                    Color.White.copy(alpha = 0.08f),
+                    Color.Black.copy(alpha = 0.55f)
+                ),
+                startY = 0f,
+                endY = faceH
+            ),
+            topLeft = Offset(0.5.dp.toPx(), 0.5.dp.toPx()),
+            size = Size((size.width - 1.dp.toPx()).coerceAtLeast(1f), (faceH - 1.dp.toPx()).coerceAtLeast(1f)),
+            cornerRadius = CornerRadius((radiusPx - 0.5.dp.toPx()).coerceAtLeast(1f)),
+            style = Stroke(width = 1.dp.toPx())
+        )
+    }
 }
 
 /**
- * Draws a deeply recessed glossy pure-black OLED screen window inlaid inside a silver housing.
+ * Draws a deeply recessed glossy pure-black OLED screen window inlaid inside a silver or titanium housing.
  */
 private fun DrawScope.drawRecessedOledWindow(
     topLeft: Offset,
     winSize: Size,
     radiusPx: Float,
-    activeSurface: Boolean = true
+    activeSurface: Boolean = true,
+    darkHost: Boolean = false
 ) {
     val corner = CornerRadius(radiusPx, radiusPx)
-    // Recessed chamfer border on silver bezel around the cutout (shadow top, bright catch bottom)
+    // Recessed chamfer border on bezel around the cutout (shadow top, bright catch bottom)
     drawRoundRect(
-        color = Color(0xFF838894).copy(alpha = 0.75f),
+        color = if (darkHost) Color.Black.copy(alpha = 0.85f) else Color(0xFF838894).copy(alpha = 0.75f),
         topLeft = Offset(topLeft.x - 0.75.dp.toPx(), topLeft.y - 0.9.dp.toPx()),
         size = Size(winSize.width + 1.5.dp.toPx(), winSize.height + 1.5.dp.toPx()),
         cornerRadius = CornerRadius(radiusPx + 0.75.dp.toPx()),
         style = Stroke(width = 1.dp.toPx())
     )
     drawRoundRect(
-        color = Color.White.copy(alpha = 0.72f),
+        color = if (darkHost) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.72f),
         topLeft = Offset(topLeft.x - 0.5.dp.toPx(), topLeft.y + 0.6.dp.toPx()),
         size = Size(winSize.width + 1.dp.toPx(), winSize.height + 0.8.dp.toPx()),
         cornerRadius = CornerRadius(radiusPx + 0.5.dp.toPx()),
@@ -1090,8 +1146,8 @@ private fun DrawScope.drawRecessedOledWindow(
     )
 
     // Glossy jet-black OLED display cavity
-    val topCol = if (activeSurface) Color(0xFF151820) else Color(0xFF262A33)
-    val botCol = if (activeSurface) Color(0xFF040507) else Color(0xFF13151B)
+    val topCol = if (activeSurface) Color(0xFF111319) else Color(0xFF1D2028)
+    val botCol = if (activeSurface) Color(0xFF030406) else Color(0xFF0E1015)
     drawRoundRect(
         brush = Brush.verticalGradient(
             colors = listOf(topCol, botCol),
@@ -1104,7 +1160,7 @@ private fun DrawScope.drawRecessedOledWindow(
     )
     // Subtle crisp inner glass stroke
     drawRoundRect(
-        color = Color.Black.copy(alpha = 0.85f),
+        color = Color.Black.copy(alpha = 0.88f),
         topLeft = topLeft,
         size = winSize,
         cornerRadius = corner,
@@ -1131,7 +1187,12 @@ fun VideoEditConsoleBar(
         modifier = modifier
             .fillMaxWidth()
             .drawBehind {
-                drawMoldedSilverShell(radiusPx = 18.dp.toPx(), pressed = false, enabled = true)
+                drawMoldedHardwareShell(
+                    radiusPx = 18.dp.toPx(),
+                    tone = HardwareShellTone.SILVER,
+                    pressed = false,
+                    enabled = true
+                )
             }
             .clip(RoundedCornerShape(18.dp))
             .padding(start = 7.dp, top = 7.dp, end = 7.dp, bottom = 7.dp)
@@ -1285,9 +1346,10 @@ fun VideoEditConsoleModule(
 }
 
 /**
- * Individual Molded Silver-White Recessed-OLED Hardware Keycap (exact match to Ryan's 1st reference):
- * thick sculpted light-silver rounded shell + centered recessed jet-black OLED window with crisp
- * pure-white icon/label + tiny recessed spherical colored LED jewel tucked in the bottom-right corner.
+ * Individual Molded Recessed-OLED Hardware Keycap:
+ * sculpted hardware bezel ([HardwareShellTone.TITANIUM] by default for seamless dark-workspace harmony,
+ * or [HardwareShellTone.SILVER]) + centered recessed jet-black OLED window with crisp pure-white icon/label
+ * + tiny recessed spherical colored LED jewel tucked in the bottom-right corner.
  */
 @Composable
 fun VideoEditOledKey(
@@ -1301,40 +1363,49 @@ fun VideoEditOledKey(
     height: Dp = 44.dp,
     fontSize: TextUnit = 12.sp,
     dimLedPreview: Color? = null,
-    trailingText: String? = null
+    trailingText: String? = null,
+    tone: HardwareShellTone = HardwareShellTone.TITANIUM
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val isPressed = pressed && enabled
+    val darkHost = tone == HardwareShellTone.TITANIUM
 
     Box(
         modifier = modifier
             .height(height)
             .offset(y = if (isPressed) 1.dp else 0.dp)
             .drawBehind {
-                drawMoldedSilverShell(radiusPx = 13.dp.toPx(), pressed = isPressed, enabled = enabled)
-                // Recessed jet-black OLED window centered inside the sculpted silver frame
-                val padH = 6.dp.toPx()
-                val padTop = 5.dp.toPx()
-                val padBot = 7.dp.toPx()
+                drawMoldedHardwareShell(
+                    radiusPx = 13.dp.toPx(),
+                    tone = tone,
+                    pressed = isPressed,
+                    enabled = enabled
+                )
+                // Recessed jet-black OLED window centered inside the sculpted bezel
+                val padH = 5.5.dp.toPx()
+                val padTop = 4.5.dp.toPx()
+                val padBot = 6.5.dp.toPx()
                 val winW = (size.width - padH * 2f).coerceAtLeast(8f)
                 val winH = (size.height - padTop - padBot).coerceAtLeast(8f)
                 drawRecessedOledWindow(
                     topLeft = Offset(padH, padTop),
                     winSize = Size(winW, winH),
                     radiusPx = 8.5.dp.toPx(),
-                    activeSurface = true
+                    activeSurface = true,
+                    darkHost = darkHost
                 )
             }
             .drawWithContent {
                 drawContent()
-                // Bottom-right corner recessed glossy colored LED jewel (exact Image 1 placement)
+                // Bottom-right corner recessed glossy colored LED jewel
                 drawHardwareLedJewel(
                     center = Offset(size.width - 6.dp.toPx(), size.height - 7.dp.toPx()),
                     radius = 3.3.dp.toPx(),
                     color = ledColor,
                     lit = active && enabled,
-                    dimTint = dimLedPreview
+                    dimTint = dimLedPreview,
+                    darkHost = darkHost
                 )
             }
             .clip(RoundedCornerShape(13.dp))
@@ -1382,14 +1453,16 @@ fun VideoEditOledKey(
 }
 
 /**
- * Unified Molded Silver-White Hardware Strip (exact match to the bottom faceplate bar of Ryan's 1st reference):
- * a single continuous light-silver rounded hardware chassis containing side-by-side recessed jet-black
- * OLED screen insets, each with its own bottom-right corner spherical colored LED jewel.
+ * Unified Molded Hardware Strip:
+ * continuous rounded hardware chassis ([HardwareShellTone.TITANIUM] by default for dark-panel harmony)
+ * containing side-by-side recessed jet-black OLED screen insets, each with its own bottom-right corner
+ * spherical colored LED jewel.
  */
 @Composable
 fun VideoEditOledStrip(
     modifier: Modifier = Modifier,
     height: Dp = 46.dp,
+    tone: HardwareShellTone = HardwareShellTone.TITANIUM,
     content: @Composable RowScope.() -> Unit
 ) {
     Row(
@@ -1397,11 +1470,16 @@ fun VideoEditOledStrip(
             .fillMaxWidth()
             .height(height)
             .drawBehind {
-                drawMoldedSilverShell(radiusPx = 14.dp.toPx(), pressed = false, enabled = true)
+                drawMoldedHardwareShell(
+                    radiusPx = 14.dp.toPx(),
+                    tone = tone,
+                    pressed = false,
+                    enabled = true
+                )
             }
             .clip(RoundedCornerShape(14.dp))
-            .padding(start = 7.dp, top = 5.dp, end = 7.dp, bottom = 7.dp),
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
+            .padding(start = 6.dp, top = 5.dp, end = 6.dp, bottom = 7.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
         content = content
     )
@@ -1409,7 +1487,7 @@ fun VideoEditOledStrip(
 
 /**
  * Single recessed jet-black OLED button inset inside [VideoEditOledStrip], paired with a
- * bottom-right corner spherical colored LED jewel right on the silver bezel corner.
+ * bottom-right corner spherical colored LED jewel right on the bezel corner.
  */
 @Composable
 fun RowScope.VideoEditStripInset(
@@ -1420,7 +1498,8 @@ fun RowScope.VideoEditStripInset(
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
     enabled: Boolean = true,
-    dimLedPreview: Color? = null
+    dimLedPreview: Color? = null,
+    darkHost: Boolean = true
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -1436,7 +1515,8 @@ fun RowScope.VideoEditStripInset(
                     topLeft = Offset(0f, 0f),
                     winSize = Size(size.width, size.height),
                     radiusPx = 8.5.dp.toPx(),
-                    activeSurface = selected || isPressed
+                    activeSurface = selected || isPressed,
+                    darkHost = darkHost
                 )
             }
             .drawWithContent {
@@ -1446,7 +1526,8 @@ fun RowScope.VideoEditStripInset(
                     radius = 3.2.dp.toPx(),
                     color = ledColor,
                     lit = selected && enabled,
-                    dimTint = dimLedPreview
+                    dimTint = dimLedPreview,
+                    darkHost = darkHost
                 )
             }
             .clickable(
