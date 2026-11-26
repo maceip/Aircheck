@@ -3484,7 +3484,7 @@ def _run_ai_assist(
             f"USER REQUEST: {text}\n"
             f"STORY CONTEXT: {context}\n"
             f"CURRENT LOOK STATE: {current_json}\n\n"
-            "Return STRICT JSON ONLY with a short 'summary' string and ONLY the keys that should change:\n"
+            "Return STRICT JSON ONLY with a short 'summary' string and the keys matching the user's request (include requested values even if they already match):\n"
             "- accent_hex: '#D71921' (crimson), '#E6A100' (amber/gold), '#3A86F2' (cobalt/blue), '#44D498' (mint/green), or another valid '#RRGGBB'\n"
             "- light: 'warm' | 'neutral' | 'cool'\n"
             "- blur_percent: integer 0..100\n"
@@ -3711,7 +3711,8 @@ def _run_ai_assist(
             )
             if k in out
         ]
-        if not changed_keys:
+        summary = str(inner.get("summary") or "").strip()[:80]
+        if not changed_keys and not summary:
             raise LlmProviderError(
                 "AI look tweak returned no recognized look fields.",
                 provider=res.provider,
@@ -3720,7 +3721,6 @@ def _run_ai_assist(
                 status_code=502,
                 error_code="llm_invalid_response",
             )
-        summary = str(inner.get("summary") or "").strip()[:80]
         out["summary"] = summary or ("updated " + ", ".join(changed_keys[:3]))
         return out
 

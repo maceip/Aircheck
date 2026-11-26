@@ -579,7 +579,7 @@ class AircheckRunningAppE2ETest {
             composeRule.onAllNodesWithTag("cs_ai_tweak_sheet").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithTag("cs_ai_tweak_input").performTextReplacement(
-            "Use cobalt blue accent, keep warm lighting, set blur to 10% and brightness +0.2 EV, and keep top-left logo AIRCHECK LIVE"
+            "Switch accent color to amber gold #E6A100, keep warm lighting, 10% blur, +0.2 EV brightness, and set top-left logo bug to RYAN LIVE"
         )
         Espresso.closeSoftKeyboard()
         captureScreenshot(screenshotDir, "11c_video_look_tweak_ai_sheet.png")
@@ -589,6 +589,8 @@ class AircheckRunningAppE2ETest {
                 composeRule.onAllNodesWithTag("cs_toast").fetchSemanticsNodes().isNotEmpty()
         }
         assertNull("Tweak AI must succeed without error", studioVm.uiState.value.errorMessage)
+        assertEquals("RYAN LIVE", persistedSession().renderOptions.cornerBugText)
+        assertTrue(persistedSession().renderOptions.showBrandBug)
         dismissToastIfPresent()
 
         // Tap "use this look" -> returns to 03 CUT with persisted default look + v5 toast
@@ -606,7 +608,7 @@ class AircheckRunningAppE2ETest {
         assertEquals(10, persistedLook.blurPercent)
         assertEquals(0.2, persistedLook.brightnessEv, 1e-6)
         assertEquals(NewsroomLook.LIGHT_WARM, persistedLook.light)
-        assertEquals(NewsroomLook.ACCENT_COBALT, persistedLook.accentHex)
+        assertEquals(NewsroomLook.ACCENT_AMBER, persistedLook.accentHex)
 
         dismissToastIfPresent()
 
