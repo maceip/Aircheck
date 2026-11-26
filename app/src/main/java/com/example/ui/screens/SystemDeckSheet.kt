@@ -77,9 +77,7 @@ fun SystemDeckSheet(
     onClose: () -> Unit,
     onSaveTailscaleRigUrl: (String) -> Unit,
     onTestRigConnection: (String) -> Unit,
-    onOpenVoiceModelCare: () -> Unit = {},
     onOpenNewsroomStudio: () -> Unit = {},
-    onOpenCorePipeline: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalAircheckTokens.current
@@ -148,52 +146,6 @@ fun SystemDeckSheet(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Canonical 5-Stage Core Story Pipeline
-            item(key = "core_pipeline_entry") {
-                StudioCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onOpenCorePipeline)
-                        .testTag("open_core_pipeline_button")
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            text = "Core Story Pipeline",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = StudioCrisp
-                        )
-                        Text(
-                            text = "TTS -> Iterate Story -> Talking Head -> B-Roll -> Final Review",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TelemetryMuted
-                        )
-                    }
-                }
-            }
-
-            // Dedicated Phone-Only Voice Model Care Page
-            item(key = "voice_model_care_entry") {
-                StudioCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onOpenVoiceModelCare)
-                        .testTag("open_voice_model_care_button")
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            text = "Voice Model Care & Location",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = StudioCrisp
-                        )
-                        Text(
-                            text = "Phone-only lock, local LoRA upgrades & quality check",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TelemetryMuted
-                        )
-                    }
-                }
-            }
-
             // Optional Savable Newsroom Overlays Page
             item(key = "newsroom_studio_entry") {
                 StudioCard(

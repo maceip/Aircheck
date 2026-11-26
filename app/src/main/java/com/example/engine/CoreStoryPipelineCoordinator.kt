@@ -239,175 +239,81 @@ class CoreStoryPipelineCoordinator(
                     updatedAtMillis = System.currentTimeMillis()
                 )
             } else {
-                val settings = profileStore?.current()
-                val routeLocalV002 = settings != null &&
-                    (settings.phoneOnlyVoiceMode || !settings.providers.useLanVoice)
-
-                if (routeLocalV002) {
-                    val coordinator = voiceStudioCoordinator
-                        ?: return@withContext Result.failure(
-                            IllegalStateException(
-                                "Local v002 voice synthesis is selected, but VoiceStudioSyncCoordinator is not configured."
-                            )
+                // One voice route: the Mac studio. The old on-phone v002 (llama.cpp CPU) voice was too
+                // slow to finish a clip and is no longer routed to; when the Mac is unreachable the user
+                // gets a plain "Mac offline" message instead of a raw stack error.
+                val health = runCatching { macRigGateway.resolveAndCheckHealth(rigBaseUrl) }.getOrNull()
+                    ?: return@withContext Result.failure(MacStudioOfflineException())
+                val ttsRes = macRigGateway.synthesizeCoreStoryTts(
+                    rigBaseUrl = health.resolvedUrl,
+                    projectId = effectiveProjectId,
+                    clauses = activeClauses,
+                    task = task
+                )
+                val storedWav = macRigGateway.downloadAudioWavToCas(ttsRes.audioUrl)
+                val mergedClauses = activeClauses.mapIndexed { idx, existing ->
+                    val timed = ttsRes.timedClauses.getOrNull(idx)
+                    if (timed != null) {
+                        existing.copy(
+                            index = idx,
+                            startMs = timed.startMs,
+                            endMs = timed.endMs
                         )
-                    val directInputs = activeClauses.map { clause ->
-                        DirectSynthesisClauseInput(
-                            clauseId = clause.id,
-                            spokenText = clause.spokenText
-                        )
-                    }
-                    val directResult = coordinator.synthesizeClausesDirectly(
-                        projectId = effectiveProjectId,
-                        clauses = directInputs,
-                        onProgress = { _, msg -> task?.onProgress?.invoke(msg) }
-                    ).getOrElse { err ->
-                        return@withContext Result.failure(err)
-                    }
-
-                    val tmpWav = casStore.createTempScratchFile("v002_tts_", "wav")
-                    val storedWav = try {
-                        writeFloat32PcmAs16BitMonoWav(
-                            pcm44k = directResult.stitchedPcm44k,
-                            outFile = tmpWav,
-                            sampleRateHz = SYNTHESIS_SAMPLE_RATE_HZ
-                        )
-                        casStore.putFile(tmpWav, "wav")
-                    } finally {
-                        if (tmpWav.exists()) tmpWav.delete()
-                    }
-                    val wavInfo = parseWavDurationAndPeaks(storedWav.file)
-                    val mergedClauses = activeClauses.mapIndexed { idx, existing ->
-                        val bounds = directResult.clauseTimeBoundsMs[existing.id]
-                        if (bounds != null) {
-                            existing.copy(
-                                index = idx,
-                                startMs = bounds.first,
-                                endMs = bounds.second
-                            )
-                        } else {
-                            existing.copy(index = idx)
-                        }
-                    }.let { list ->
-                        if (list.all { it.endMs <= 0L } && wavInfo.durationMs > 0L) {
-                            distributeClauseTimings(list, wavInfo.durationMs)
-                        } else {
-                            list
-                        }
-                    }
-                    val localWords = directResult.alignedWords.map { w ->
-                        AlignedWord(word = w.word, startMs = w.startMs, endMs = w.endMs)
-                    }
-                    val localMetrics = RigQualityMetrics(
-                        cer = directResult.summaryMetrics.cer.toDouble(),
-                        wespeakerCosine = directResult.summaryMetrics.speakerCosineSim.toDouble(),
-                        dnsmosP808 = directResult.summaryMetrics.dnsmosP808.toDouble(),
-                        tailRmsDbfs = directResult.summaryMetrics.tailRmsDb.toDouble(),
-                        syllablesPerSec = directResult.summaryMetrics.syllablesPerSec.toDouble(),
-                        maxPhonemeDurationMs = directResult.summaryMetrics.maxPhonemeDurationMs.toDouble(),
-                        passedAllStrictGates = directResult.summaryMetrics.passedAllGates
-                    )
-                    session.copy(
-                        title = session.title.ifBlank { mergedClauses.first().spokenText.take(40) },
-                        stage = CorePipelineStage.ITERATE_STORY,
-                        clauses = mergedClauses,
-                        voicedClauseTexts = mergedClauses.map { it.spokenText.trim() },
-                        ttsVoiceSha = storedWav.sha256,
-                        ttsAudioUrl = null,
-                        ttsDurationMs = wavInfo.durationMs,
-                        waveformPeaks = wavInfo.peaks,
-                        ttsIterationCount = session.ttsIterationCount + 1,
-                        talkingHeadJobId = null,
-                        pendingHeadJobId = null,
-                        pendingRigTasks = emptyMap(),
-                        talkingHeadSha = null,
-                        talkingHeadVideoUrl = null,
-                        alignedWords = localWords,
-                        alignUrl = null,
-                        ttsMetrics = localMetrics,
-                        headMetrics = null,
-                        ttsSource = TTS_SOURCE_LOCAL_V002,
-                        silenceGaps = emptyList(),
-                        silenceGapsJobId = null,
-                        finalClipId = null,
-                        finalVideoSha = null,
-                        finalVideoUrl = null,
-                        lastCutStats = null,
-                        lastCutSignature = null,
-                        updatedAtMillis = System.currentTimeMillis()
-                    )
-                } else {
-                    val health = macRigGateway.resolveAndCheckHealth(rigBaseUrl)
-                    val ttsRes = macRigGateway.synthesizeCoreStoryTts(
-                        rigBaseUrl = health.resolvedUrl,
-                        projectId = effectiveProjectId,
-                        clauses = activeClauses,
-                        task = task
-                    )
-                    val storedWav = macRigGateway.downloadAudioWavToCas(ttsRes.audioUrl)
-                    val mergedClauses = activeClauses.mapIndexed { idx, existing ->
-                        val timed = ttsRes.timedClauses.getOrNull(idx)
-                        if (timed != null) {
-                            existing.copy(
-                                index = idx,
-                                startMs = timed.startMs,
-                                endMs = timed.endMs
-                            )
-                        } else {
-                            existing.copy(index = idx)
-                        }
-                    }.let { list ->
-                        if (list.all { it.endMs <= 0L } && ttsRes.durationMs > 0L) {
-                            distributeClauseTimings(list, ttsRes.durationMs)
-                        } else {
-                            list
-                        }
-                    }
-                    val peaks = if (ttsRes.waveformPeaks.isNotEmpty()) {
-                        ttsRes.waveformPeaks
                     } else {
-                        parseWavDurationAndPeaks(storedWav.file).peaks
+                        existing.copy(index = idx)
                     }
-                    val fullText = mergedClauses.joinToString(" ") { it.spokenText }
-                    val remoteAlignedWords = when {
-                        ttsRes.words.isNotEmpty() -> ttsRes.words
-                        !ttsRes.alignUrl.isNullOrBlank() ->
-                            runCatching { macRigGateway.fetchAlignedWords(ttsRes.alignUrl) }
-                                .getOrNull()
-                                ?.takeIf { it.isNotEmpty() }
-                                ?: runLocalCtcAlignment(storedWav.file, fullText)
-                        else -> runLocalCtcAlignment(storedWav.file, fullText)
+                }.let { list ->
+                    if (list.all { it.endMs <= 0L } && ttsRes.durationMs > 0L) {
+                        distributeClauseTimings(list, ttsRes.durationMs)
+                    } else {
+                        list
                     }
-                    clearStaleLocalPcmManifest(effectiveProjectId)
-                    session.copy(
-                        title = session.title.ifBlank { mergedClauses.first().spokenText.take(40) },
-                        stage = CorePipelineStage.ITERATE_STORY,
-                        clauses = mergedClauses,
-                        voicedClauseTexts = mergedClauses.map { it.spokenText.trim() },
-                        ttsVoiceSha = storedWav.sha256,
-                        ttsAudioUrl = ttsRes.audioUrl,
-                        ttsDurationMs = ttsRes.durationMs,
-                        waveformPeaks = peaks,
-                        ttsIterationCount = session.ttsIterationCount + 1,
-                        talkingHeadJobId = null,
-                        pendingHeadJobId = null,
-                        pendingRigTasks = emptyMap(),
-                        talkingHeadSha = null,
-                        talkingHeadVideoUrl = null,
-                        alignedWords = remoteAlignedWords,
-                        alignUrl = ttsRes.alignUrl,
-                        ttsMetrics = ttsRes.metrics,
-                        headMetrics = null,
-                        ttsSource = TTS_SOURCE_REMOTE_RIG,
-                        silenceGaps = emptyList(),
-                        silenceGapsJobId = null,
-                        finalClipId = null,
-                        finalVideoSha = null,
-                        finalVideoUrl = null,
-                        lastCutStats = null,
-                        lastCutSignature = null,
-                        updatedAtMillis = System.currentTimeMillis()
-                    )
                 }
+                val peaks = if (ttsRes.waveformPeaks.isNotEmpty()) {
+                    ttsRes.waveformPeaks
+                } else {
+                    parseWavDurationAndPeaks(storedWav.file).peaks
+                }
+                val fullText = mergedClauses.joinToString(" ") { it.spokenText }
+                val remoteAlignedWords = when {
+                    ttsRes.words.isNotEmpty() -> ttsRes.words
+                    !ttsRes.alignUrl.isNullOrBlank() ->
+                        runCatching { macRigGateway.fetchAlignedWords(ttsRes.alignUrl) }
+                            .getOrNull()
+                            ?.takeIf { it.isNotEmpty() }
+                            ?: runLocalCtcAlignment(storedWav.file, fullText)
+                    else -> runLocalCtcAlignment(storedWav.file, fullText)
+                }
+                clearStaleLocalPcmManifest(effectiveProjectId)
+                session.copy(
+                    title = session.title.ifBlank { mergedClauses.first().spokenText.take(40) },
+                    stage = CorePipelineStage.ITERATE_STORY,
+                    clauses = mergedClauses,
+                    voicedClauseTexts = mergedClauses.map { it.spokenText.trim() },
+                    ttsVoiceSha = storedWav.sha256,
+                    ttsAudioUrl = ttsRes.audioUrl,
+                    ttsDurationMs = ttsRes.durationMs,
+                    waveformPeaks = peaks,
+                    ttsIterationCount = session.ttsIterationCount + 1,
+                    talkingHeadJobId = null,
+                    pendingHeadJobId = null,
+                    pendingRigTasks = emptyMap(),
+                    talkingHeadSha = null,
+                    talkingHeadVideoUrl = null,
+                    alignedWords = remoteAlignedWords,
+                    alignUrl = ttsRes.alignUrl,
+                    ttsMetrics = ttsRes.metrics,
+                    headMetrics = null,
+                    ttsSource = TTS_SOURCE_REMOTE_RIG,
+                    silenceGaps = emptyList(),
+                    silenceGapsJobId = null,
+                    finalClipId = null,
+                    finalVideoSha = null,
+                    finalVideoUrl = null,
+                    lastCutStats = null,
+                    lastCutSignature = null,
+                    updatedAtMillis = System.currentTimeMillis()
+                )
             }
 
             localRepo.saveCorePipelineSession(updated)
@@ -1263,3 +1169,9 @@ class CoreStoryPipelineCoordinator(
         }
     }
 }
+
+/** The Mac studio could not be reached on any configured route (tunnel, USB, LAN). */
+class MacStudioOfflineException : IllegalStateException(
+    "Your Mac studio is offline, so this step can't run right now. Your story is saved. " +
+        "Check that the Mac is on and connected, then tap retry."
+)

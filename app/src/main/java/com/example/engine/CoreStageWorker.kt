@@ -66,7 +66,7 @@ class CoreStageWorker(context: Context, params: WorkerParameters) : CoroutineWor
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            val msg = e.localizedMessage ?: "${labelFor(op)} failed."
+            val msg = userFacingStageError(e, "${labelFor(op)} failed.")
             notifyDone(msg, success = false)
             Result.failure(workDataOf(KEY_ERROR to msg, KEY_OP to op))
         } finally {

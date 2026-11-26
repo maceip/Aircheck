@@ -130,7 +130,7 @@ data class CoreRenderOptions(
     val chyronHeadline: String = "",
     val chyronSubline: String = "",
     val showBrandBug: Boolean = false,
-    val cornerBugText: String = "AIRCHECK",
+    val cornerBugText: String = "LIVE",
     /** Cut-scene B-roll framing: "pip" (Corner PiP), "full" (Full Cutaway), or "split" (50/50 Split). */
     val brollFraming: String = BROLL_FRAMING_PIP,
     val useRemotion: Boolean? = null

@@ -401,8 +401,10 @@ private fun VideoLookPreviewPanel(
     val breakingStyle = options.breakingStyle
     val tagKey = breakingStyle.titleTagKey
     val showKicker = tagKey != "none"
+    val accentLuma = 0.2126f * accentColor.red + 0.7152f * accentColor.green + 0.0722f * accentColor.blue
+    val accentFg = if (accentLuma >= 0.6f) Cs.Black else Cs.White
     val (kickerBg, kickerFg) = when (tagKey) {
-        "breaking" -> accentColor to Cs.White
+        "breaking" -> accentColor to accentFg
         "developing" -> Cs.AmberBright to Cs.Black
         "explainer" -> Cs.Ink to Cs.Black
         else -> Color.Transparent to Cs.White

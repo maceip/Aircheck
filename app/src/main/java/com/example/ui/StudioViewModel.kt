@@ -211,9 +211,7 @@ class StudioViewModel internal constructor(
                 )
                 if (!didInitialAutoHealthCheck) {
                     didInitialAutoHealthCheck = true
-                    if (!settings.phoneOnlyVoiceMode) {
-                        testMacRigConnection(settings.tailscaleRigUrl)
-                    }
+                    testMacRigConnection(settings.tailscaleRigUrl)
                 }
             }
         }
@@ -1972,9 +1970,7 @@ class StudioViewModel internal constructor(
                     statusNotice = "Studio server URL saved."
                 )
             }
-            if (!_uiState.value.settings.phoneOnlyVoiceMode) {
-                testMacRigConnection(trimmed)
-            }
+            testMacRigConnection(trimmed)
         }
     }
 

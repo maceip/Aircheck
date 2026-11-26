@@ -24,6 +24,7 @@ class CoreStageRunner(
 ) {
     class StageFailure(message: String) : IllegalStateException(message)
 
+
     private suspend fun rigUrl(): String =
         runCatching { profileStore.current() }.getOrNull()?.tailscaleRigUrl?.trim()
             ?.ifBlank { null } ?: DEFAULT_MAC_RIG_LAN_URL
@@ -54,13 +55,7 @@ class CoreStageRunner(
 
     suspend fun tts(localMicWav: File?, onProgress: (Float, String) -> Unit): String {
         val base = session()
-        val settings = runCatching { profileStore.current() }.getOrNull()
-        val isLocal = localMicWav != null || (settings != null && (settings.phoneOnlyVoiceMode || !settings.providers.useLanVoice))
-        val progressLabel = when {
-            localMicWav != null -> "Preparing recorded voiceover…"
-            isLocal -> "Synthesizing local v002 voice…"
-            else -> "Voicing script on rig…"
-        }
+        val progressLabel = if (localMicWav != null) "Preparing recorded voiceover…" else "Voicing script on your Mac studio…"
         onProgress(0.1f, progressLabel)
         val result = coordinator.synthesizeStage1Tts(
             session = base,
@@ -72,7 +67,7 @@ class CoreStageRunner(
         )
         val voiced = result.getOrElse {
             clearTask(KEY_TTS)
-            throw StageFailure(it.localizedMessage ?: "TTS synthesis failed.")
+            throw StageFailure(userFacingStageError(it, "TTS synthesis failed."))
         }
         val updated = voiced.copy(
             voicedClauseTexts = voiced.clauses.map { it.spokenText.trim() },
@@ -96,7 +91,7 @@ class CoreStageRunner(
             pollIntervalMs = 2_000L,
             onProgress = onProgress
         )
-        result.getOrElse { throw StageFailure(it.localizedMessage ?: "Talking-head render failed.") }
+        result.getOrElse { throw StageFailure(userFacingStageError(it, "Talking-head render failed.")) }
         runCatching { detectSilence() }
         return "Talking head ready."
     }
@@ -128,7 +123,7 @@ class CoreStageRunner(
         )
         val (chopped, _) = result.getOrElse {
             clearTask(KEY_CUT)
-            throw StageFailure(it.localizedMessage ?: "Studio cut failed.")
+            throw StageFailure(userFacingStageError(it, "Studio cut failed."))
         }
         localRepo.saveCorePipelineSession(
             chopped.copy(
@@ -150,7 +145,7 @@ class CoreStageRunner(
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             clearTask(key)
-            throw StageFailure(e.localizedMessage ?: "Backdrop generation failed.")
+            throw StageFailure(userFacingStageError(e, "Backdrop generation failed."))
         }
         clearTask(key)
         val look = localRepo.getNewsroomLook(lookId) ?: throw StageFailure("Look was deleted.")
@@ -169,4 +164,22 @@ class CoreStageRunner(
         const val KEY_TTS = "tts"
         const val KEY_CUT = "chop"
     }
+}
+
+/** Turns network/rig failures into one plain message instead of raw exception text. */
+fun userFacingStageError(t: Throwable, fallback: String): String {
+    if (t is MacStudioOfflineException) return t.message.orEmpty()
+    var c: Throwable? = t
+    while (c != null) {
+        if (c is java.net.UnknownHostException || c is java.net.ConnectException ||
+            c is java.net.SocketTimeoutException || c is java.net.NoRouteToHostException ||
+            c is javax.net.ssl.SSLException
+        ) return MacStudioOfflineException().message.orEmpty()
+        val m = c.message.orEmpty()
+        if (m.contains("unreachable", true) || m.contains("HTTP 530") || m.contains("HTTP 502") ||
+            m.contains("HTTP 503") || m.contains("HTTP 504") || m.contains("failed to connect", true)
+        ) return MacStudioOfflineException().message.orEmpty()
+        c = c.cause
+    }
+    return t.localizedMessage?.takeIf { it.isNotBlank() } ?: fallback
 }
