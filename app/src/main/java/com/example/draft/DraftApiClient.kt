@@ -62,10 +62,6 @@ data class LlmConfigUpdateResponse(
     @SerialName("provider_urls") val providerUrls: Map<String, String> = emptyMap()
 )
 
-@Serializable
-data class TranscribeRequest(
-    @SerialName("audio_wav_base64") val audioWavBase64: String
-)
 
 @Serializable
 data class TranscribeResponse(
@@ -413,7 +409,9 @@ class DraftApiClient(
     private val usbLoopbackUrl: String = DEFAULT_RIG_USB_URL,
     private val okHttpClient: OkHttpClient = defaultOkHttpClient(),
     private val healthProbeTimeoutMs: Long = DEFAULT_HEALTH_PROBE_TIMEOUT_MS,
-    private val lanFallbackUrl: String? = null
+    private val lanFallbackUrl: String? = null,
+    /** Speech-to-text for idea voice notes; Deepgram Nova-3 unless a test injects a fake. */
+    private val transcriber: (suspend (ByteArray) -> TranscribeResponse)? = null
 ) {
 
     private val json = Json {
@@ -497,7 +495,7 @@ class DraftApiClient(
         cachedBaseUrl = null
     }
 
-    /** 1. `POST /v1/draft/transcribe` (from WAV file). */
+    /** 1. Transcribes a WAV file (Deepgram, see [transcribeWavBytes]). */
     suspend fun transcribe(wavFile: File): TranscribeResponse = withContext(Dispatchers.IO) {
         if (!wavFile.exists() || wavFile.length() == 0L) {
             throw IOException("Audio WAV file is missing or empty: ${wavFile.absolutePath}")
@@ -505,17 +503,14 @@ class DraftApiClient(
         transcribeWavBytes(wavFile.readBytes())
     }
 
-    /** 1b. `POST /v1/draft/transcribe` (from raw WAV bytes). */
+    /** 1b. Transcribes raw WAV bytes with Deepgram Nova-3 directly from the phone (no Mac needed). */
     suspend fun transcribeWavBytes(wavBytes: ByteArray): TranscribeResponse {
         if (wavBytes.isEmpty()) {
             throw IOException("Audio WAV payload is empty.")
         }
-        val b64 = Base64.getEncoder().encodeToString(wavBytes)
-        return postJson(
-            path = "/v1/draft/transcribe",
-            requestBody = json.encodeToString(TranscribeRequest(audioWavBase64 = b64)),
-            parse = { body -> json.decodeFromString<TranscribeResponse>(body) }
-        )
+        transcriber?.let { return it(wavBytes) }
+        val t = com.example.data.gateway.DeepgramClient(okHttpClient).transcribe(wavBytes)
+        return TranscribeResponse(transcript = t.text, durationMs = t.durationMs)
     }
 
     /** 2. `POST /v1/draft/angles`. */

@@ -665,13 +665,8 @@ class CoreStoryPipelineCoordinator(
         expectedText: String
     ): List<AlignedWord> {
         if (expectedText.isBlank()) return emptyList()
-        localCtcAligner?.let { aligner ->
-            return runCatching { aligner.invoke(wavFile, expectedText) }.getOrDefault(emptyList())
-        }
-        val ota = otaBundleSyncManager ?: return emptyList()
-        val sherpaDir = ota.resolveVerifiedBundleForSynthesis().getOrNull()?.sherpaCtcModelDir
-            ?: return emptyList()
-        return alignWavWithOrtCtc(wavFile, expectedText, sherpaDir)
+        val aligner = localCtcAligner ?: return emptyList()
+        return runCatching { aligner.invoke(wavFile, expectedText) }.getOrDefault(emptyList())
     }
 
     private suspend fun clearStaleLocalPcmManifest(projectId: String) {

@@ -173,18 +173,9 @@ class AircheckContainer(context: Context) {
             profileStore = profileStore,
             otaBundleSyncManager = otaBundleSyncManager,
             voiceStudioCoordinator = voiceStudioCoordinator,
-            localCtcAligner = { wavFile, expectedText ->
-                val sherpaDir = otaBundleSyncManager.resolveVerifiedBundleForSynthesis()
-                    .getOrNull()
-                    ?.sherpaCtcModelDir
-                    ?: otaBundleSyncManager.bundleState.value.installedDirPath
-                        ?.let { File(it, OtaBundleSyncManager.SHERPA_CTC_EXTRACTED_DIR) }
-                        ?.takeIf { it.isDirectory && File(it, "tokens.txt").isFile }
-                if (sherpaDir != null) {
-                    CoreStoryPipelineCoordinator.alignWavWithOrtCtc(wavFile, expectedText, sherpaDir)
-                } else {
-                    emptyList()
-                }
+            localCtcAligner = { wavFile, _ ->
+                // Word timings for the clip voice come from Deepgram Nova-3 (one STT system).
+                com.example.data.gateway.DeepgramClient(okHttpClient).transcribe(wavFile.readBytes()).words
             },
             onDeviceVoice = onDeviceVoice
         )

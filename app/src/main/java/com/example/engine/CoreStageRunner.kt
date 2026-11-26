@@ -176,8 +176,9 @@ fun userFacingStageError(t: Throwable, fallback: String): String {
             c is javax.net.ssl.SSLException
         ) return MacStudioOfflineException().message.orEmpty()
         val m = c.message.orEmpty()
-        if (m.contains("unreachable", true) || m.contains("HTTP 530") || m.contains("HTTP 502") ||
-            m.contains("HTTP 503") || m.contains("HTTP 504") || m.contains("failed to connect", true)
+        // 530 = the outside tunnel has no Mac behind it. A 502/503 can be a hosted model's own error
+        // relayed by a healthy Mac, so it is shown as-is rather than as "Mac offline".
+        if (m.contains("unreachable", true) || m.contains("HTTP 530") || m.contains("failed to connect", true)
         ) return MacStudioOfflineException().message.orEmpty()
         c = c.cause
     }
