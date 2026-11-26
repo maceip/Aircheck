@@ -688,18 +688,18 @@ fun Modifier.neumorphicDockKey(
     // 1. Etched outer hairline bezel ring (left-side style in Ryan's dark neumorphic reference)
     if (outerFrame) {
         drawRoundRect(
-            color = Color.Black.copy(alpha = 0.48f),
+            color = Color.Black.copy(alpha = 0.56f),
             topLeft = Offset(0.5.dp.toPx(), 0.5.dp.toPx()),
             size = Size((size.width - 1.dp.toPx()).coerceAtLeast(1f), (size.height - 1.dp.toPx()).coerceAtLeast(1f)),
             cornerRadius = CornerRadius(rPx + 2.dp.toPx(), rPx + 2.dp.toPx()),
             style = Stroke(width = 1.dp.toPx())
         )
         drawRoundRect(
-            color = Color.White.copy(alpha = 0.05f),
-            topLeft = Offset(1.dp.toPx(), 1.dp.toPx()),
-            size = Size((size.width - 2.dp.toPx()).coerceAtLeast(1f), (size.height - 2.dp.toPx()).coerceAtLeast(1f)),
+            color = Color.White.copy(alpha = 0.09f),
+            topLeft = Offset(1.25.dp.toPx(), 1.25.dp.toPx()),
+            size = Size((size.width - 2.5.dp.toPx()).coerceAtLeast(1f), (size.height - 2.5.dp.toPx()).coerceAtLeast(1f)),
             cornerRadius = CornerRadius(rPx + 1.5.dp.toPx(), rPx + 1.5.dp.toPx()),
-            style = Stroke(width = 0.75.dp.toPx())
+            style = Stroke(width = 0.85.dp.toPx())
         )
     }
 
