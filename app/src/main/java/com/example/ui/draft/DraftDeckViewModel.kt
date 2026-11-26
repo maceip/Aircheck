@@ -892,7 +892,11 @@ class DraftDeckViewModel internal constructor(
                 busyLabel = null,
                 densityDeltaPercent = 0,
                 lastSeedRigOnline = if (offline) false else state.lastSeedRigOnline,
-                errorMessage = "$prefix: $detail"
+                errorMessage = if (offline || com.example.engine.userFacingStageError(error, detail) == com.example.engine.MacStudioOfflineException().message) {
+                    com.example.engine.MacStudioOfflineException().message
+                } else {
+                    "$prefix: $detail"
+                }
             )
         }
     }
@@ -2665,7 +2669,7 @@ class DraftDeckViewModel internal constructor(
                     state.copy(
                         isDraftingFollowup = false,
                         lastSeedRigOnline = if (offline) false else state.lastSeedRigOnline,
-                        errorMessage = "Follow-up draft failed: ${e.localizedMessage ?: "unknown error"}"
+                        errorMessage = com.example.engine.userFacingStageError(e, "unknown error").let { m -> if (m == com.example.engine.MacStudioOfflineException().message) m else "Follow-up draft failed: $m" }
                     )
                 }
             }
@@ -2774,7 +2778,7 @@ class DraftDeckViewModel internal constructor(
                     st.copy(
                         isDraftingFollowup = false,
                         lastSeedRigOnline = if (offline) false else st.lastSeedRigOnline,
-                        errorMessage = "Follow-up draft failed: ${e.localizedMessage ?: "unknown error"}"
+                        errorMessage = com.example.engine.userFacingStageError(e, "unknown error").let { m -> if (m == com.example.engine.MacStudioOfflineException().message) m else "Follow-up draft failed: $m" }
                     )
                 }
             }
@@ -3198,7 +3202,13 @@ class DraftDeckViewModel internal constructor(
                 lastSeedRigOnline = if (isTransportFailure) false else state.lastSeedRigOnline,
                 isBusy = false,
                 busyLabel = null,
-                errorMessage = "$prefix: ${error.localizedMessage ?: error::class.java.simpleName}"
+                errorMessage = com.example.engine.userFacingStageError(error, error::class.java.simpleName).let { m ->
+                    if (isTransportFailure || m == com.example.engine.MacStudioOfflineException().message) {
+                        com.example.engine.MacStudioOfflineException().message
+                    } else {
+                        "$prefix: $m"
+                    }
+                }
             )
         }
     }
