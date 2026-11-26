@@ -461,6 +461,11 @@ class OnDevicePromptEngine internal constructor(
                 appendLine("Existing beats: ${existingBeats.joinToString(" | ")}")
             } else {
                 appendLine("Build a 4-beat spoken broadcast arc totaling ~${clampedSec}s (~$expectedWordBudget words).")
+                appendLine("Exactly four beats, in this order, with exactly these labels:")
+                appendLine("HOOK = the surprising core tension in one line")
+                appendLine("DETAIL = the concrete evidence or mechanism behind it")
+                appendLine("SHIFT = what people are doing about it, or the turn")
+                appendLine("PAYOFF = the takeaway or demand that closes the video")
             }
             if (selectedAngles.isNotEmpty()) {
                 appendLine("Selected angles: ${selectedAngles.joinToString("; ")}")
@@ -477,7 +482,10 @@ class OnDevicePromptEngine internal constructor(
                 val cleanText = DraftStateReducer.sanitizeAscii(beat.text).trim()
                 if (cleanText.isBlank()) null
                 else ArcBeatDto(
-                    label = DraftStateReducer.sanitizeAscii(beat.label).trim().ifBlank { "BEAT ${idx + 1}" },
+                    // Same contract as the Mac rig: a beat's label is its position in the 4-beat arc
+                    // (HOOK / DETAIL / SHIFT / PAYOFF), never free text invented by the model.
+                    label = ARC_BEAT_LABELS.getOrNull(idx)
+                        ?: DraftStateReducer.sanitizeAscii(beat.label).trim().ifBlank { "BEAT ${idx + 1}" },
                     startSec = beat.startSec.coerceAtLeast(0),
                     endSec = beat.endSec.coerceAtLeast(beat.startSec + 1),
                     text = cleanText
@@ -938,6 +946,9 @@ Respond ONLY with valid ASCII JSON:
     }
 
     companion object {
+        /** Positional beat labels of a full arc; mirrors `ARC_BEAT_LABELS` in the rig's drafting_passes.py. */
+        val ARC_BEAT_LABELS: List<String> = listOf("HOOK", "DETAIL", "SHIFT", "PAYOFF")
+
         /**
          * AICore client pinned to the FULL (highest-quality, TPU-accelerated) stable system model.
          * On Pixel 11 Pro XL this resolves to `nano-v4-full`; the default client resolves to the
