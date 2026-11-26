@@ -1922,7 +1922,7 @@ class RenderJobManager:
         report_progress(
             status="LIPSYNC",
             progress_fraction=0.60,
-            stage_detail=f"Rendering {resolution} talking-head video (LivePortrait + LatentSync 1.6)",
+            stage_detail=f"Rendering {resolution} talking-head video (HeyGen Avatar 6)",
             metrics=metrics,
         )
 
@@ -1952,14 +1952,6 @@ class RenderJobManager:
         ]
         if spoken_text:
             head_cmd.extend(["--transcript", spoken_text])
-        if timed_clauses:
-            clauses_json = work_dir / "talking_head_clauses.json"
-            clauses_json.write_text(json.dumps(timed_clauses, ensure_ascii=False), encoding="utf-8")
-            head_cmd.extend(["--clauses-json", str(clauses_json)])
-        if words:
-            words_json = work_dir / "talking_head_words.json"
-            words_json.write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
-            head_cmd.extend(["--words-json", str(words_json)])
         head_timeout_sec = max(TALKING_HEAD_TIMEOUT_BASE_SEC, max_duration * 25)
         try:
             head_proc = subprocess.run(

@@ -188,197 +188,21 @@ def test_resolution_clamping_and_validation(tmp_path: Path) -> None:
     sf.write(str(wav), _make_speech_wave_with_pauses(2.5), 44100, subtype="PCM_16")
     avatar = tmp_path / "avatar.jpg"
     avatar.write_bytes(b"\xff\xd8\xff\xe0AVATAR\xff\xd9")
-    fake_bl = _create_fake_bl_script(tmp_path, tmp_path / "bl.jsonl")
-
     with pytest.raises(ValueError, match="Unsupported ratio"):
-        gth.generate_talking_head(wav, avatar, tmp_path / "out.mp4", ratio="21:9", bl_bin=fake_bl)
+        gth.generate_talking_head(wav, avatar, tmp_path / "out.mp4", ratio="21:9")
     for bad_dur in (1, 76, True):
         with pytest.raises(ValueError, match="max_duration"):
-            gth.generate_talking_head(wav, avatar, tmp_path / "out.mp4", max_duration=bad_dur, bl_bin=fake_bl)
+            gth.generate_talking_head(wav, avatar, tmp_path / "out.mp4", max_duration=bad_dur)
 
 
-@pytest.mark.parametrize(
-    "total_ms",
-    [3_000, 10_000, 10_500, 11_000, 12_000, 41_000, 60_000, 75_000],
-)
-def test_plan_talking_head_beats_invariant_no_short_tails(total_ms: int) -> None:
-    beats = gth.plan_talking_head_beats(total_ms)
-    assert beats, f"Empty beat plan for {total_ms}"
-    assert beats[0]["start_ms"] == 0
-    assert beats[-1]["end_ms"] == total_ms
-    assert sum(b["duration_ms"] for b in beats) == total_ms
-    for i in range(len(beats) - 1):
-        assert beats[i]["end_ms"] == beats[i + 1]["start_ms"]
-
-    if total_ms <= 10_000:
-        assert len(beats) == 1
-        assert 4 <= beats[0]["wan_duration_sec"] <= 10
-    else:
-        for b in beats:
-            assert 4_000 <= b["duration_ms"] <= 10_000, f"Beat out of 4-10s bounds for {total_ms}ms: {beats}"
-            assert 4 <= b["wan_duration_sec"] <= 10
 
 
-def test_plan_talking_head_beats_prefers_clauses_words_and_silences(tmp_path: Path) -> None:
-    # 1. Clause boundary at 6200ms on an 11.5s clip -> cuts exactly near 6200ms
-    clauses = [
-        {"id": "c1", "spoken_text": "First clause.", "start_ms": 0, "end_ms": 6100},
-        {"id": "c2", "spoken_text": "Second clause.", "start_ms": 6300, "end_ms": 11500},
-    ]
-    beats_cl = gth.plan_talking_head_beats(11_500, clauses=clauses)
-    assert len(beats_cl) == 2
-    assert beats_cl[0]["end_ms"] == 6200
-    assert beats_cl[1]["duration_ms"] == 5300
-
-    # 2. Word boundary with >=150ms pause at 5400ms on an 11.0s clip
-    words = [
-        {"word": "Alpha", "start_ms": 100, "end_ms": 500},
-        {"word": "pause", "start_ms": 4800, "end_ms": 5250},
-        {"word": "next", "start_ms": 5550, "end_ms": 6000},
-        {"word": "end", "start_ms": 10200, "end_ms": 10900},
-    ]
-    beats_w = gth.plan_talking_head_beats(11_000, words=words)
-    assert len(beats_w) == 2
-    assert beats_w[0]["end_ms"] == 5400
-
-    # 3. Real ffmpeg silencedetect gap on WAV (silence at 5.8..6.4s in 12.0s WAV)
-    wav_path = tmp_path / "silences.wav"
-    sf.write(
-        str(wav_path),
-        _make_speech_wave_with_pauses(12.0, [(5.8, 6.4)]),
-        44100,
-        subtype="PCM_16",
-    )
-    beats_sil = gth.plan_talking_head_beats(12_000, wav_path=wav_path)
-    assert len(beats_sil) == 2
-    assert 5_750 <= beats_sil[0]["end_ms"] <= 6_450
-    assert all(4_000 <= b["duration_ms"] <= 10_000 for b in beats_sil)
 
 
-def test_generate_talking_head_multibeat_exact_wav_mux_and_clamping(tmp_path: Path) -> None:
-    # 15.0s audio with pauses at 5.5-6.0s and 10.5-11.0s -> splits into 3 coherent beats
-    voice_wav = tmp_path / "story_15s.wav"
-    pcm = _make_speech_wave_with_pauses(15.0, [(5.5, 6.0), (10.5, 11.0)], f0_hz=195.0)
-    sf.write(str(voice_wav), pcm, 44100, subtype="PCM_16")
-
-    avatar = tmp_path / "avatar.jpg"
-    avatar.write_bytes(b"\xff\xd8\xff\xe0AVATAR_BYTES\xff\xd9")
-    bl_log = tmp_path / "bl_calls.jsonl"
-    # Fake bl emits slightly shorter Wan clips (e.g. 4.8s) to prove tpad + exact master WAV mux keeps exact 15.0s
-    fake_bl = _create_fake_bl_script(tmp_path, bl_log, wan_dur_override=4.8)
-    out_mp4 = tmp_path / "head_out.mp4"
-
-    words = [
-        {"word": "Breaking", "start_ms": 100, "end_ms": 600},
-        {"word": "update", "start_ms": 650, "end_ms": 1200},
-        {"word": "middle", "start_ms": 6200, "end_ms": 6900},
-        {"word": "closing", "start_ms": 11200, "end_ms": 12000},
-    ]
-
-    with pytest.warns(UserWarning, match="480P"):
-        res = gth.generate_talking_head(
-            voice_input=voice_wav,
-            avatar_path=avatar,
-            output_mp4=out_mp4,
-            resolution="480P",
-            ratio="9:16",
-            max_duration=75,
-            words=words,
-            bl_bin=fake_bl,
-            seed=777,
-        )
-
-    assert res["resolution"] == "720P"
-    assert res["beat_count"] >= 2
-    for b in res["beats"]:
-        assert 4_000 <= b["duration_ms"] <= 10_000
-    assert res["av_sync_drift_ms"] <= gth.MAX_AV_SYNC_DRIFT_MS
-
-    exact_mp4 = Path(res["exact_input_voice_mp4"])
-    assert exact_mp4.is_file() and exact_mp4.stat().st_size > 0
-    assert Path(res["output_mp4"]).is_file()
-
-    # Verify bl NEVER received 480P, always got 720P, consistent seed, and 4..10s duration
-    calls = [json.loads(line) for line in bl_log.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(calls) == res["beat_count"]
-    for c in calls:
-        assert c["resolution"] == "720P"
-        assert c["seed"] == "777"
-        assert 4 <= int(c["duration"]) <= 10
-
-    # Verify exact_input_voice_mp4 preserves exact 15.0s duration & 44.1kHz audio (NOT 4.8s Wan beats)
-    qa = gth.verify_av_sync_ffprobe(
-        exact_mp4,
-        expected_audio_ms=15_000,
-        expected_width=720,
-        expected_height=1280,
-    )
-    assert qa["av_sync_drift_ms"] <= 120.0
-    assert abs(qa["audio_duration_ms"] - 15_000) <= 120
-
-    # Verify audio frequency in exact_input_voice_mp4 matches input WAV (195Hz, NOT Wan's 990Hz)
-    extracted_wav = tmp_path / "extracted.wav"
-    subprocess.run(
-        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(exact_mp4), "-vn", "-ac", "1", "-ar", "44100", str(extracted_wav)],
-        check=True,
-        timeout=30,
-    )
-    samples, sr = sf.read(str(extracted_wav), dtype="float32")
-    assert sr == 44100
-    seg = samples[:44100]
-    freqs = np.fft.rfftfreq(len(seg), d=1.0 / sr)
-    peak_hz = float(freqs[int(np.argmax(np.abs(np.fft.rfft(seg))))])
-    assert abs(peak_hz - 195.0) < 5.0, f"Expected input 195Hz voice, got {peak_hz}Hz"
 
 
-def test_generate_talking_head_60s_multibeat_end_to_end(tmp_path: Path) -> None:
-    pauses = [(8.0, 8.4), (16.5, 16.9), (25.0, 25.4), (33.5, 33.9), (42.0, 42.4), (51.0, 51.4)]
-    voice_wav = tmp_path / "story_60s.wav"
-    sf.write(str(voice_wav), _make_speech_wave_with_pauses(60.0, pauses, f0_hz=175.0), 44100, subtype="PCM_16")
-    avatar = tmp_path / "avatar.jpg"
-    avatar.write_bytes(b"\xff\xd8\xff\xe0AVATAR60\xff\xd9")
-    bl_log = tmp_path / "bl_60s.jsonl"
-    fake_bl = _create_fake_bl_script(tmp_path, bl_log)
-    out_mp4 = tmp_path / "head_60s.mp4"
-
-    res = gth.generate_talking_head(
-        voice_input=voice_wav,
-        avatar_path=avatar,
-        output_mp4=out_mp4,
-        resolution="720P",
-        ratio="9:16",
-        max_duration=75,
-        bl_bin=fake_bl,
-        seed=123,
-    )
-    assert res["beat_count"] >= 6
-    assert all(4_000 <= b["duration_ms"] <= 10_000 for b in res["beats"])
-    assert sum(b["duration_ms"] for b in res["beats"]) == 60_000
-    assert res["av_sync_drift_ms"] <= gth.MAX_AV_SYNC_DRIFT_MS
-    assert abs(res["audio_duration_ms"] - 60_000) <= 120
-    assert abs(res["video_duration_ms"] - 60_000) <= 120
 
 
-def test_generate_talking_head_pcm_input_and_trim_only_when_exceeding_max(tmp_path: Path) -> None:
-    # 6.0s float32 PCM input with max_duration=4 -> cleanly trimmed to 4.0s
-    pcm_path = tmp_path / "voice.pcm"
-    pcm = _make_speech_wave_with_pauses(6.0, f0_hz=210.0)
-    pcm.tofile(str(pcm_path))
-    avatar = tmp_path / "avatar.jpg"
-    avatar.write_bytes(b"\xff\xd8\xff\xe0AVATAR\xff\xd9")
-    fake_bl = _create_fake_bl_script(tmp_path, tmp_path / "bl_pcm.jsonl")
-
-    res = gth.generate_talking_head(
-        voice_input=pcm_path,
-        avatar_path=avatar,
-        output_mp4=tmp_path / "trimmed.mp4",
-        resolution="720P",
-        ratio="9:16",
-        max_duration=4,
-        bl_bin=fake_bl,
-    )
-    assert abs(res["duration_ms"] - 4000) <= 80
-    assert res["av_sync_drift_ms"] <= 120.0
 
 
 def test_verify_av_sync_ffprobe_rejects_missing_streams_and_drift(tmp_path: Path) -> None:
@@ -406,31 +230,6 @@ def test_verify_av_sync_ffprobe_rejects_missing_streams_and_drift(tmp_path: Path
         gth.verify_av_sync_ffprobe(good_mp4, expected_audio_ms=2600, max_drift_ms=120.0)
 
 
-def test_generate_talking_head_timeout_expired_raises_clean_runtime_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    wav = tmp_path / "voice.wav"
-    sf.write(str(wav), _make_speech_wave_with_pauses(3.0), 44100, subtype="PCM_16")
-    avatar = tmp_path / "avatar.jpg"
-    avatar.write_bytes(b"\xff\xd8\xff\xe0AVATAR\xff\xd9")
-    fake_bl = _create_fake_bl_script(tmp_path, tmp_path / "bl_to.jsonl")
-
-    real_run = gth.subprocess.run
-
-    def _timeout_bl(cmd: list[str], *args: Any, **kwargs: Any) -> Any:
-        if str(fake_bl) in " ".join(str(x) for x in cmd):
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 1))
-        return real_run(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(gth.subprocess, "run", _timeout_bl)
-    with pytest.raises(RuntimeError, match="timed out"):
-        gth.generate_talking_head(
-            voice_input=wav,
-            avatar_path=avatar,
-            output_mp4=tmp_path / "timeout.mp4",
-            bl_bin=fake_bl,
-            bl_timeout_sec=1,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -1146,82 +945,47 @@ def test_opposite_sign_start_time_drift_is_rejected_by_both_verifiers(
         ota_server._probe_av_sync_metrics(mp4_path)
 
 
-def test_generate_talking_head_lambda_1080p_endpoint_single_pass(tmp_path: Path) -> None:
-    import http.server
+def test_generate_talking_head_heygen_1080p_single_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """HeyGen is the only talking-head engine: upload voice, create Avatar 6 video, poll, download."""
+    log = tmp_path / "heygen_calls.jsonl"
+    fake = tmp_path / "heygen"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json,subprocess,sys\n"
+        f"open({str(log)!r},'a').write(json.dumps(sys.argv[1:])+'\\n')\n"
+        "a=sys.argv[1:]\n"
+        "if a[:2]==['asset','create']: print(json.dumps({'data':{'asset_id':'aud123'}}))\n"
+        "elif a[:2]==['video','create']: print(json.dumps({'data':{'video_id':'vid456'}}))\n"
+        "elif a[:2]==['video','get']: print(json.dumps({'data':{'status':'completed'}}))\n"
+        "elif a[:2]==['video','download']:\n"
+        "    out=a[a.index('--output-path')+1]\n"
+        "    subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-f','lavfi','-i','color=c=black:s=1080x1920:r=25:d=4.000',"
+        "'-f','lavfi','-i','sine=f=200:d=4','-c:v','libx264','-preset','ultrafast','-pix_fmt','yuv420p','-c:a','aac','-t','4.000',out],check=True)\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setattr(gth, "HEYGEN_BIN", fake)
+    monkeypatch.setattr(gth, "HEYGEN_POLL_SEC", 0)
 
-    seen_reqs: list[dict[str, Any]] = []
+    wav = tmp_path / "voice4s.wav"
+    sf.write(str(wav), _make_speech_wave_with_pauses(4.0, f0_hz=205.0), 44100, subtype="PCM_16")
+    avatar = tmp_path / "avatar.jpg"
+    avatar.write_bytes(b"\xff\xd8\xff\xe0AVATAR1080\xff\xd9")
+    out_mp4 = tmp_path / "heygen_1080p.mp4"
 
-    class _FakeLambdaVideoHandler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:  # noqa: N802
-            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            body = json.loads(raw.decode("utf-8"))
-            seen_reqs.append(
-                {
-                    "width": body["width"],
-                    "height": body["height"],
-                    "motion_mode": body["motion_mode"],
-                    "seed": body["seed"],
-                }
-            )
-            wav_in = tmp_path / "srv_in.wav"
-            wav_in.write_bytes(base64.b64decode(body["voice_wav_b64"]))
-            mp4_out = tmp_path / "srv_out.mp4"
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                    "-f", "lavfi", "-i", f"color=c=black:s={body['width']}x{body['height']}:r=25:d=4.000",
-                    "-i", str(wav_in),
-                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-ar", "48000", "-ac", "1", "-t", "4.000",
-                    str(mp4_out),
-                ],
-                check=True,
-                timeout=30,
-            )
-            resp = {
-                "mp4_b64": base64.b64encode(mp4_out.read_bytes()).decode("ascii"),
-                "identity_qa": {"csim_mean": 0.9775, "csim_min": 0.9593},
-            }
-            payload = json.dumps(resp).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def log_message(self, fmt: str, *args: Any) -> None:
-            return
-
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeLambdaVideoHandler)
-    port = httpd.server_address[1]
-    th = threading.Thread(target=httpd.serve_forever, daemon=True)
-    th.start()
-    try:
-        wav = tmp_path / "voice4s.wav"
-        sf.write(str(wav), _make_speech_wave_with_pauses(4.0, f0_hz=205.0), 44100, subtype="PCM_16")
-        avatar = tmp_path / "avatar.jpg"
-        avatar.write_bytes(b"\xff\xd8\xff\xe0AVATAR1080\xff\xd9")
-        out_mp4 = tmp_path / "lambda_1080p.mp4"
-
-        res = gth.generate_talking_head(
-            voice_input=wav,
-            avatar_path=avatar,
-            output_mp4=out_mp4,
-            resolution="1080P",
-            ratio="9:16",
-            max_duration=15,
-            video_endpoint=f"http://127.0.0.1:{port}",
-            seed=99,
-        )
-        assert res["engine"] == "liveportrait_hf+latentsync_1.6_512"
-        assert res["resolution"] == "1080P"
-        assert res["beat_count"] == 1
-        assert res["identity_qa"]["csim_mean"] == 0.9775
-        assert seen_reqs == [{"width": 1080, "height": 1920, "motion_mode": "liveportrait_hf", "seed": 99}]
-        assert Path(res["exact_input_voice_mp4"]).is_file()
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
+    res = gth.generate_talking_head(
+        voice_input=wav, avatar_path=avatar, output_mp4=out_mp4,
+        resolution="1080P", ratio="9:16", max_duration=15,
+    )
+    calls = [json.loads(l) for l in log.read_text().splitlines()]
+    create = json.loads(next(c for c in calls if c[:2] == ["video", "create"])[3])
+    assert create == {
+        "type": "avatar", "avatar_id": gth.HEYGEN_LOOK_ID, "audio_asset_id": "aud123",
+        "engine": {"type": "heygen-avatar-6"}, "aspect_ratio": "9:16", "resolution": "1080p",
+    }
+    assert res["engine"] == "heygen:heygen-avatar-6"
+    assert res["heygen"]["heygen_video_id"] == "vid456"
+    assert res["resolution"] == "1080P"
+    assert out_mp4.is_file()
 
 
 def test_build_lambda_voice_synthesizer_fn_decodes_48k_wav_to_44k_pcm(tmp_path: Path) -> None:
