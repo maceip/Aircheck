@@ -246,10 +246,11 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
           mediaHeight: isLandscape ? height : Math.round(height * 0.5),
         }
       : {
-          left: isLandscape ? 56 : 48,
-          top: isLandscape ? 96 : 504,
-          width: isLandscape ? 1160 : width - 96,
-          mediaHeight: isLandscape ? 560 : 580,
+          // PiP cutaway: b-roll fills the whole frame behind the corner presenter (no empty band).
+          left: 0,
+          top: 0,
+          width,
+          mediaHeight: height,
         };
 
   return (
@@ -274,7 +275,7 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             top: brollBox.top,
             width: brollBox.width,
             opacity: pipProgress,
-            transform: isSplitCutaway
+            transform: !isFullCutaway
               ? undefined
               : `translateY(${interpolate(pipProgress, [0, 1], [24, 0], {
                   extrapolateLeft: "clamp",
@@ -288,9 +289,9 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
               style={{
                 width: "100%",
                 height: brollBox.mediaHeight,
-                borderRadius: isSplitCutaway ? 0 : 16,
+                borderRadius: isFullCutaway ? 16 : 0,
                 overflow: "hidden",
-                border: isSplitCutaway ? "none" : `2px solid ${theme.accent}`,
+                border: isFullCutaway ? `2px solid ${theme.accent}` : "none",
                 borderBottom: isSplitCutaway && !isLandscape ? `3px solid ${theme.accent}` : undefined,
                 borderRight: isSplitCutaway && isLandscape ? `3px solid ${theme.accent}` : undefined,
                 backgroundColor: "#12151C",

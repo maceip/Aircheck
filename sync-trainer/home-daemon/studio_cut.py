@@ -599,6 +599,43 @@ def _between(windows: Sequence[tuple[float, float]]) -> str:
     return "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in windows)
 
 
+_DICT_WORDS: set[str] | None = None
+
+
+def _visible_words_in_image(path: Path) -> list[str]:
+    """Real English words (5+ letters) that macOS Vision OCR reads in an image; [] if OCR is unavailable.
+
+    Used to reject generated b-roll stills that contain headline-style text. Screen glyphs and fake code
+    rarely form dictionary words, so they pass.
+    """
+    global _DICT_WORDS
+    try:
+        import Vision  # pyobjc-framework-Vision
+        from Foundation import NSURL
+    except Exception:
+        return []
+    if _DICT_WORDS is None:
+        dict_path = Path("/usr/share/dict/words")
+        _DICT_WORDS = (
+            {w.strip().lower() for w in dict_path.read_text(errors="ignore").split() if len(w.strip()) >= 5}
+            if dict_path.is_file()
+            else set()
+        )
+    req = Vision.VNRecognizeTextRequest.alloc().init()
+    handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(NSURL.fileURLWithPath_(str(path)), None)
+    handler.performRequests_error_([req], None)
+    found: list[str] = []
+    for obs in req.results() or []:
+        cand = obs.topCandidates_(1)[0]
+        if cand.confidence() < 0.5:
+            continue
+        for tok in re.findall(r"[A-Za-z]{5,}", str(cand.string())):
+            if tok.lower() in _DICT_WORDS:
+                found.append(tok)
+    return found
+
+
+
 def generate_broll_images(
     prompts: list[str],
     aspect: str,
@@ -628,11 +665,25 @@ def generate_broll_images(
                 "No news presenter or anchor, no person talking to camera, no words, letters, titles, "
                 "captions, logos or watermark anywhere in the image."
             )
-            _generate_image_into(full_prompt, aspect, work, bl_bin=bl_bin, runner=runner)
-            produced = sorted(p for p in work.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
-            if not produced:
-                raise RuntimeError(f"No b-roll image was produced for: {prompt[:80]}")
-            with Image.open(produced[0]) as img:
+            # Self-check: regenerate (up to 3 tries) when OCR reads real words in the still; keep the
+            # attempt with the fewest words if every try has some.
+            best: tuple[int, Path] | None = None
+            for attempt in range(3):
+                attempt_dir = work / f"try{attempt}"
+                attempt_dir.mkdir()
+                _generate_image_into(full_prompt, aspect, attempt_dir, bl_bin=bl_bin, runner=runner)
+                produced = sorted(
+                    p for p in attempt_dir.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
+                )
+                if not produced:
+                    raise RuntimeError(f"No b-roll image was produced for: {prompt[:80]}")
+                words = _visible_words_in_image(produced[0])
+                if best is None or len(words) < best[0]:
+                    best = (len(words), produced[0])
+                if not words:
+                    break
+            assert best is not None
+            with Image.open(best[1]) as img:
                 img.convert("RGB").save(target, format="PNG")
         finally:
             shutil.rmtree(work, ignore_errors=True)
