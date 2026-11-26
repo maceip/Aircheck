@@ -270,6 +270,28 @@ class ClipStudioV5ComposeTest {
             ex.sendResponseHeaders(200, resp.size.toLong())
             ex.responseBody.use { it.write(resp) }
         }
+        val recordedAiAssistBodies = CopyOnWriteArrayList<String>()
+        server.createContext("/v1/ai-assist") { ex ->
+            val body = ex.requestBody.readBytes().toString(Charsets.UTF_8)
+            recordedAiAssistBodies += body
+            val resp = """
+                {
+                  "mode": "tweak_video_look",
+                  "accent_hex": "#3A86F2",
+                  "light": "cool",
+                  "blur_percent": 30,
+                  "brightness_ev": 0.4,
+                  "breaking_style": "developing",
+                  "show_brand_bug": true,
+                  "corner_bug_text": "TECH DESK",
+                  "broll_framing": "split",
+                  "summary": "cobalt accent, cool light, TECH DESK logo"
+                }
+            """.trimIndent().toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
         server.start()
         httpServer = server
         val port = server.address.port
@@ -412,14 +434,60 @@ class ClipStudioV5ComposeTest {
             studioVm.uiState.value.savedOverlays.any { it.kind == OverlayObjectKind.QUOTE_BRIEF }
         }
 
-        // 3. 03 CUT -> Video look -> verify real attached quote card & "use this look" toast
+        // 3. 03 CUT -> Video look -> test accent swatch, logo bug, inline card edit, B-Roll framing, and Tweak AI
         onNodeWithTag("cs_cut_look").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             onAllNodesWithTag("cs_newsroom_root").fetchSemanticsNodes().isNotEmpty()
         }
+        onNodeWithTag("cs_accent_amber").performClick()
+        onNodeWithTag("cs_scrub_blur_inc").performClick()
+
+        // Tab 1 (Style): toggle News Logo Bug ON & edit bug text
+        onNodeWithTag("cs_newsroom_tab_1").performClick()
+        onNodeWithTag("cs_bug_toggle").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.renderOptions.showBrandBug
+        }
+        onNodeWithTag("cs_bug_input").performTextReplacement("RYAN DESK")
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.renderOptions.cornerBugText == "RYAN DESK"
+        }
+
+        // Tab 2 (Cards): verify attached quote card & edit its headline inline
         onNodeWithTag("cs_newsroom_tab_2").performClick()
         onNodeWithText("1 quote card attached").assertIsDisplayed()
+        val firstQuoteId = studioVm.uiState.value.savedOverlays.first { it.kind == OverlayObjectKind.QUOTE_BRIEF }.id
+        onNodeWithTag("cs_overlay_edit_$firstQuoteId").performScrollTo().performClick()
+        onNodeWithTag("cs_card_headline_field_$firstQuoteId").performTextReplacement("Own silicon once forever")
+        onNodeWithTag("cs_card_save_$firstQuoteId").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.savedOverlays.first { it.id == firstQuoteId }.headline == "Own silicon once forever"
+        }
+
+        // Tab 3 (B-Roll): switch framing to Full Cutaway
+        onNodeWithTag("cs_newsroom_tab_3").performClick()
+        onNodeWithTag("cs_broll_framing_full").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.renderOptions.brollFraming == "full"
+        }
+
+        // Tweak AI button -> opens sheet -> sends POST /v1/ai-assist (mode=tweak_video_look) -> updates state
+        onNodeWithTag("cs_tweak_ai_button").performClick()
+        onNodeWithTag("cs_ai_tweak_sheet").assertIsDisplayed()
+        onNodeWithTag("cs_ai_tweak_input").performTextReplacement("Cobalt blue, cool light, TECH DESK logo, split B-roll")
+        onNodeWithTag("cs_ai_tweak_submit").performClick()
+        waitUntil(timeoutMillis = 8_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            !studioVm.uiState.value.isTweakingLook &&
+                studioVm.uiState.value.corePipelineSession.renderOptions.brollFraming == "split" &&
+                studioVm.uiState.value.corePipelineSession.renderOptions.cornerBugText == "TECH DESK"
+        }
+        assertTrue(recordedAiAssistBodies.any { it.contains("\"mode\":\"tweak_video_look\"") })
 
         onNodeWithTag("cs_use_look").performClick()
         waitUntil(timeoutMillis = 5_000) {

@@ -41,45 +41,66 @@ interface StyleTheme {
   accent: string;
 }
 
-function getStyleTheme(style?: BreakingStyle): StyleTheme {
-  switch (style) {
-    case "developing":
-      return {
-        bannerLabel: "DEVELOPING",
-        kickerBg: "#FFB800",
-        kickerFg: "#000000",
-        accent: "#FFB800",
-      };
-    case "exclusive":
-      return {
-        bannerLabel: "EXCLUSIVE",
-        kickerBg: "#FFFFFF",
-        kickerFg: "#000000",
-        accent: "#FFFFFF",
-      };
-    case "alert_stat":
-      return {
-        bannerLabel: "DATA ALERT",
-        kickerBg: "#D71921",
-        kickerFg: "#FFFFFF",
-        accent: "#FFB800",
-      };
-    case "clean":
-      return {
-        bannerLabel: "",
-        kickerBg: null,
-        kickerFg: "#EBEBEF",
-        accent: "#8E8E96",
-      };
-    case "breaking":
-    default:
-      return {
-        bannerLabel: "BREAKING NEWS",
-        kickerBg: "#D71921",
-        kickerFg: "#FFFFFF",
-        accent: "#D71921",
-      };
+const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
+
+function isLightHex(hex: string): boolean {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b >= 155;
+}
+
+function getStyleTheme(style?: BreakingStyle, accentHex?: string): StyleTheme {
+  const customAccent = accentHex && HEX_COLOR_RE.test(accentHex) ? accentHex.toUpperCase() : undefined;
+  const base = ((): StyleTheme => {
+    switch (style) {
+      case "developing":
+        return {
+          bannerLabel: "DEVELOPING",
+          kickerBg: "#FFB800",
+          kickerFg: "#000000",
+          accent: "#FFB800",
+        };
+      case "exclusive":
+        return {
+          bannerLabel: "EXCLUSIVE",
+          kickerBg: "#FFFFFF",
+          kickerFg: "#000000",
+          accent: "#FFFFFF",
+        };
+      case "alert_stat":
+        return {
+          bannerLabel: "DATA ALERT",
+          kickerBg: "#D71921",
+          kickerFg: "#FFFFFF",
+          accent: "#FFB800",
+        };
+      case "clean":
+        return {
+          bannerLabel: "",
+          kickerBg: null,
+          kickerFg: "#EBEBEF",
+          accent: "#8E8E96",
+        };
+      case "breaking":
+      default:
+        return {
+          bannerLabel: "BREAKING NEWS",
+          kickerBg: "#D71921",
+          kickerFg: "#FFFFFF",
+          accent: "#D71921",
+        };
+    }
+  })();
+  if (!customAccent || customAccent === "#D71921") {
+    return base;
   }
+  return {
+    ...base,
+    accent: customAccent,
+    kickerBg: base.kickerBg ? customAccent : null,
+    kickerFg: base.kickerBg ? (isLightHex(customAccent) ? "#0A0B0E" : "#FFFFFF") : base.kickerFg,
+  };
 }
 
 function pickActiveOverlay(
@@ -144,32 +165,50 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
   const pipProgress = activeEvent?.pipShrink ? eventProgress : 0;
   const punchProgress = activeEvent && !activeEvent.pipShrink ? eventProgress : 0;
   const punchScale = 1 + ((activeEvent?.punchInScale ?? 1) - 1) * punchProgress;
+  const brollFraming = packaging.brollFraming ?? "pip";
+  const isFullCutaway = brollFraming === "full";
+  const isSplitCutaway = brollFraming === "split";
 
-  // Responsive non-overlapping PiP target geometry
-  const pipTarget = isLandscape
-    ? { left: 1264, top: 96, width: 600, height: 480, radius: 20 }
-    : { left: width - 44 - 320, top: 56, width: 320, height: 420, radius: 18 };
+  // Responsive non-overlapping PiP / Split target geometry
+  const pipTarget = isSplitCutaway
+    ? isLandscape
+      ? { left: Math.round(width * 0.5), top: 0, width: width - Math.round(width * 0.5), height, radius: 0 }
+      : { left: 0, top: Math.round(height * 0.5), width, height: height - Math.round(height * 0.5), radius: 0 }
+    : isLandscape
+      ? { left: 1264, top: 96, width: 600, height: 480, radius: 20 }
+      : { left: width - 44 - 320, top: 56, width: 320, height: 420, radius: 18 };
 
-  const presenterLeft = interpolate(pipProgress, [0, 1], [0, pipTarget.left], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-  const presenterTop = interpolate(pipProgress, [0, 1], [0, pipTarget.top], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-  const presenterWidth = interpolate(pipProgress, [0, 1], [width, pipTarget.width], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-  const presenterHeight = interpolate(pipProgress, [0, 1], [height, pipTarget.height], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-  const presenterRadius = interpolate(pipProgress, [0, 1], [0, pipTarget.radius], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  const presenterLeft = isFullCutaway
+    ? 0
+    : interpolate(pipProgress, [0, 1], [0, pipTarget.left], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      });
+  const presenterTop = isFullCutaway
+    ? 0
+    : interpolate(pipProgress, [0, 1], [0, pipTarget.top], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      });
+  const presenterWidth = isFullCutaway
+    ? width
+    : interpolate(pipProgress, [0, 1], [width, pipTarget.width], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      });
+  const presenterHeight = isFullCutaway
+    ? height
+    : interpolate(pipProgress, [0, 1], [height, pipTarget.height], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      });
+  const presenterRadius = isFullCutaway
+    ? 0
+    : interpolate(pipProgress, [0, 1], [0, pipTarget.radius], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      });
+  const presenterOpacity = isFullCutaway ? Math.max(0, 1 - pipProgress) : 1;
 
   const contentDuration = Math.max(1, timeline.totalFrames - timeline.coverFrames);
   const contentFrame = Math.max(0, frame - timeline.coverFrames);
@@ -182,8 +221,8 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
 
   const effectiveStyle: BreakingStyle =
     activeLower?.breakingStyle ?? packaging.breakingStyle ?? "breaking";
-  const theme = getStyleTheme(effectiveStyle);
-  const quoteTheme = getStyleTheme(activeQuote?.breakingStyle ?? effectiveStyle);
+  const theme = getStyleTheme(effectiveStyle, packaging.accentHex);
+  const quoteTheme = getStyleTheme(activeQuote?.breakingStyle ?? effectiveStyle, packaging.accentHex);
 
   const activeHeadline = (activeLower?.headline?.trim() || packaging.chyronHeadline || "Aircheck").toUpperCase();
   const activeSubline = activeLower?.subline?.trim() ?? packaging.chyronSubline ?? "";
@@ -191,6 +230,27 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
 
   const cornerLabel = (packaging.cornerBugText ?? "").trim();
   const showChannelChip = Boolean(cornerLabel && cornerLabel.toUpperCase() !== "LIVE");
+
+  const brollBox = isFullCutaway
+    ? {
+        left: isLandscape ? 56 : 40,
+        top: isLandscape ? 92 : 140,
+        width: isLandscape ? width - 112 : width - 80,
+        mediaHeight: isLandscape ? height - 300 : height - 470,
+      }
+    : isSplitCutaway
+      ? {
+          left: isLandscape ? 0 : 0,
+          top: 0,
+          width: isLandscape ? Math.round(width * 0.5) : width,
+          mediaHeight: isLandscape ? height : Math.round(height * 0.5),
+        }
+      : {
+          left: isLandscape ? 56 : 48,
+          top: isLandscape ? 96 : 504,
+          width: isLandscape ? 1160 : width - 96,
+          mediaHeight: isLandscape ? 560 : 580,
+        };
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#000000", fontFamily: "'Space Grotesk', sans-serif" }}>
@@ -205,19 +265,21 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
         />
       )}
 
-      {/* B-Roll / Evidence Stage (behind PiP presenter, non-overlapping in both 9:16 and 16:9) */}
+      {/* B-Roll / Evidence Stage (honors pip / full / split framing) */}
       {activeEvent?.pipShrink && (
         <div
           style={{
             position: "absolute",
-            left: isLandscape ? 56 : 48,
-            top: isLandscape ? 96 : 504,
-            width: isLandscape ? 1160 : width - 96,
+            left: brollBox.left,
+            top: brollBox.top,
+            width: brollBox.width,
             opacity: pipProgress,
-            transform: `translateY(${interpolate(pipProgress, [0, 1], [24, 0], {
-              extrapolateLeft: "clamp",
-              extrapolateRight: "clamp",
-            }).toFixed(2)}px)`,
+            transform: isSplitCutaway
+              ? undefined
+              : `translateY(${interpolate(pipProgress, [0, 1], [24, 0], {
+                  extrapolateLeft: "clamp",
+                  extrapolateRight: "clamp",
+                }).toFixed(2)}px)`,
             zIndex: 5,
           }}
         >
@@ -225,10 +287,12 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             <div
               style={{
                 width: "100%",
-                height: isLandscape ? 560 : 580,
-                borderRadius: 16,
+                height: brollBox.mediaHeight,
+                borderRadius: isSplitCutaway ? 0 : 16,
                 overflow: "hidden",
-                border: `2px solid ${theme.accent}`,
+                border: isSplitCutaway ? "none" : `2px solid ${theme.accent}`,
+                borderBottom: isSplitCutaway && !isLandscape ? `3px solid ${theme.accent}` : undefined,
+                borderRight: isSplitCutaway && isLandscape ? `3px solid ${theme.accent}` : undefined,
                 backgroundColor: "#12151C",
               }}
             >
@@ -436,13 +500,14 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             top: presenterTop,
             width: presenterWidth,
             height: presenterHeight,
+            opacity: presenterOpacity,
             transform: activeEvent?.pipShrink ? undefined : `scale(${punchScale.toFixed(4)})`,
             transformOrigin: "center center",
             borderRadius: presenterRadius,
             overflow: "hidden",
-            border: pipProgress > 0.05 ? `3px solid ${theme.accent}` : "none",
-            boxShadow: pipProgress > 0.05 ? "0 18px 42px rgba(0, 0, 0, 0.55)" : "none",
-            zIndex: activeEvent?.pipShrink ? 10 : 2,
+            border: pipProgress > 0.05 && !isFullCutaway && !isSplitCutaway ? `3px solid ${theme.accent}` : "none",
+            boxShadow: pipProgress > 0.05 && !isFullCutaway && !isSplitCutaway ? "0 18px 42px rgba(0, 0, 0, 0.55)" : "none",
+            zIndex: activeEvent?.pipShrink ? (isFullCutaway ? 2 : 10) : 2,
           }}
         >
           {lipsyncUrl ? (
@@ -464,7 +529,7 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             top: isLandscape ? 98 : 132,
             left: isLandscape ? 56 : 44,
             width: isLandscape ? 560 : 580,
-            maxWidth: activeEvent?.pipShrink && !isLandscape ? width - 440 : width - 88,
+            maxWidth: activeEvent?.pipShrink && !isLandscape && !isFullCutaway && !isSplitCutaway ? width - 440 : width - 88,
             backgroundColor: "rgba(10,12,18,0.92)",
             border: "2px solid #2C2E38",
             borderLeft: `8px solid ${quoteTheme.accent}`,
@@ -515,7 +580,7 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
       )}
 
       {/* Top-Left LIVE + Brand Corner Bug */}
-      {packaging.showBrandBug && effectiveStyle !== "clean" && (
+      {packaging.showBrandBug && (effectiveStyle !== "clean" || showChannelChip) && (
         <div
           style={{
             position: "absolute",
@@ -527,33 +592,35 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             zIndex: 28,
           }}
         >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "8px 16px",
-              borderRadius: 8,
-              backgroundColor: "#D71921",
-              color: "#FFFFFF",
-              fontSize: isLandscape ? 20 : 22,
-              fontWeight: 800,
-              letterSpacing: 1.4,
-              fontFamily: "'JetBrains Mono', monospace",
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            <span
+          {effectiveStyle !== "clean" && (
+            <div
               style={{
-                width: 10,
-                height: 10,
-                borderRadius: "50%",
-                backgroundColor: "#FFFFFF",
-                display: "inline-block",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 16px",
+                borderRadius: 8,
+                backgroundColor: theme.kickerBg ?? "#D71921",
+                color: theme.kickerFg,
+                fontSize: isLandscape ? 20 : 22,
+                fontWeight: 800,
+                letterSpacing: 1.4,
+                fontFamily: "'JetBrains Mono', monospace",
+                fontVariantNumeric: "tabular-nums",
               }}
-            />
-            <span>LIVE</span>
-          </div>
+            >
+              <span
+                style={{
+                  width: 10,
+                  height: 10,
+                  borderRadius: "50%",
+                  backgroundColor: theme.kickerFg,
+                  display: "inline-block",
+                }}
+              />
+              <span>LIVE</span>
+            </div>
+          )}
           {showChannelChip && (
             <div
               style={{
@@ -602,16 +669,20 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
                   padding: isLandscape ? "5px 12px" : "6px 14px",
                   borderRadius: 8,
                   backgroundColor: spoken
-                    ? effectiveStyle === "developing"
-                      ? "#FFB800"
-                      : effectiveStyle === "breaking"
-                        ? "#D71921"
-                        : "#FFFFFF"
+                    ? packaging.accentHex && HEX_COLOR_RE.test(packaging.accentHex)
+                      ? theme.accent
+                      : effectiveStyle === "developing"
+                        ? "#FFB800"
+                        : effectiveStyle === "breaking"
+                          ? "#D71921"
+                          : "#FFFFFF"
                     : "rgba(8,9,12,0.84)",
                   color: spoken
-                    ? effectiveStyle === "breaking"
-                      ? "#FFFFFF"
-                      : "#000000"
+                    ? packaging.accentHex && HEX_COLOR_RE.test(packaging.accentHex)
+                      ? isLightHex(theme.accent) ? "#0A0B0E" : "#FFFFFF"
+                      : effectiveStyle === "breaking"
+                        ? "#FFFFFF"
+                        : "#000000"
                     : "#F4F6FA",
                 }}
               >

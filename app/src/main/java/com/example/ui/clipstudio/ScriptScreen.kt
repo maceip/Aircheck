@@ -427,7 +427,7 @@ fun ScriptScreen(
                     CsDock(
                         leading = {
                             CsVoiceDockKey(
-                                label = if (state.isRecordingSplice) "listening" else "hold: say",
+                                label = if (state.isRecordingSplice) "STOP" else "HOLD",
                                 icon = Icons.Sharp.Mic,
                                 held = state.isRecordingSplice,
                                 enabled = candidate != null && !state.isRecordingSeed && !state.isRecordingSteer,
@@ -465,14 +465,10 @@ fun ScriptScreen(
                 message = state.toastMessage,
                 onDismiss = vm::dismissToast
             )
-            if (state.isAnyRecording) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .border(2.dp, Cs.Red)
-                        .testTag("cs_recording_border")
-                )
-            }
+            VoiceGlowDitherOverlay(
+                active = state.isAnyRecording,
+                level = state.liveRmsLevel
+            )
         }
     }
 }
@@ -621,14 +617,18 @@ private fun PhraseSwapSheet(
         }
 
         if (state.brushAlternatives.isEmpty()) {
-            Box(
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 46.dp)
                     .neumorphicSurface(role = KeyRole.DOWN, pressed = true, radius = 14.dp, enabled = true)
                     .padding(horizontal = 14.dp, vertical = 12.dp),
-                contentAlignment = Alignment.CenterStart
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                if (state.isBusy) {
+                    ThinkingOrbSolving(size = 20.dp, tint = Cs.Ink)
+                }
                 Text(
                     text = if (state.isBusy) (state.busyLabel ?: "Finding alternatives…") else "No alternatives yet.",
                     style = sans(15.sp, Cs.Muted, 20.sp),
@@ -716,13 +716,17 @@ private fun NudgePillKey(
 ) {
     CsKey(
         onClick = onClick,
-        role = if (active) KeyRole.COMMIT else KeyRole.STD,
+        role = if (active) KeyRole.ACTIVE else KeyRole.STD,
         enabled = enabled,
-        radius = 22.dp,
+        radius = 12.dp,
+        pip = !active,
         horizontalPadding = 8.dp,
-        contentAlignment = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
+        contentAlignment = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
         modifier = modifier.height(44.dp)
     ) { tint ->
+        if (active) {
+            CsLedDot(color = Cs.Voice, size = 6.dp)
+        }
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
         Text(label, style = mono(12.sp, tint), maxLines = 1, softWrap = false)
     }

@@ -131,11 +131,16 @@ data class CoreRenderOptions(
     val chyronSubline: String = "",
     val showBrandBug: Boolean = false,
     val cornerBugText: String = "LIVE",
+    /** Cut-scene B-roll framing: "pip" (Corner PiP), "full" (Full Cutaway), or "split" (50/50 Split). */
+    val brollFraming: String = BROLL_FRAMING_PIP,
     val useRemotion: Boolean? = null
 ) {
     companion object {
         const val ASPECT_VERTICAL: String = "9:16"
         const val ASPECT_HORIZONTAL: String = "16:9"
+        const val BROLL_FRAMING_PIP: String = "pip"
+        const val BROLL_FRAMING_FULL: String = "full"
+        const val BROLL_FRAMING_SPLIT: String = "split"
     }
 }
 
@@ -187,6 +192,8 @@ data class NewsroomLook(
     val brightnessEv: Double = 0.0,
     /** "warm", "cool", or "neutral". */
     val light: String = LIGHT_NEUTRAL,
+    /** Primary broadcast accent swatch hex (e.g. "#D71921", "#E6A100", "#3A86F2", "#44D498"). */
+    val accentHex: String = DEFAULT_ACCENT_HEX,
     val grain: Boolean = false,
     val border: Boolean = false,
     val isDefault: Boolean = false,
@@ -197,6 +204,11 @@ data class NewsroomLook(
         const val LIGHT_WARM: String = "warm"
         const val LIGHT_COOL: String = "cool"
         const val LIGHT_NEUTRAL: String = "neutral"
+        const val DEFAULT_ACCENT_HEX: String = "#D71921"
+        const val ACCENT_CRIMSON: String = "#D71921"
+        const val ACCENT_AMBER: String = "#E6A100"
+        const val ACCENT_COBALT: String = "#3A86F2"
+        const val ACCENT_MINT: String = "#44D498"
     }
 }
 
@@ -258,7 +270,7 @@ data class CorePipelineSession(
         append(talkingHeadJobId.orEmpty()).append('\n')
         if (look != null) {
             append(look.plateId.orEmpty()).append(look.blurPercent).append(look.brightnessEv)
-                .append(look.light).append(look.grain).append(look.border)
+                .append(look.light).append(look.accentHex).append(look.grain).append(look.border)
         }
     }
 

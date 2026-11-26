@@ -1,6 +1,7 @@
 package com.example.ui.clipstudio
 
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,15 +12,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.TextFieldLineLimits
@@ -28,12 +29,14 @@ import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.sharp.ArrowBack
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.sharp.Add
 import androidx.compose.material.icons.sharp.Check
+import androidx.compose.material.icons.sharp.Close
 import androidx.compose.material.icons.sharp.ContentCopy
+import androidx.compose.material.icons.sharp.Edit
 import androidx.compose.material.icons.sharp.FormatQuote
-import androidx.compose.material.icons.sharp.Refresh
-import androidx.compose.material.icons.sharp.Remove
+import androidx.compose.material.icons.sharp.Movie
 import androidx.compose.material.icons.sharp.Title
 import androidx.compose.material.icons.sharp.Wallpaper
 import androidx.compose.material3.Icon
@@ -65,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.example.data.BreakingNewsStyle
+import com.example.data.CoreRenderOptions
 import com.example.data.CoreStoryClause
 import com.example.data.NewsroomLook
 import com.example.data.OverlayObjectKind
@@ -75,20 +79,27 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlin.math.pow
 
+private fun parseAccentHex(hex: String): Color {
+    val clean = hex.trim().removePrefix("#")
+    return runCatching {
+        if (clean.length == 6) Color((0xFF000000L or clean.toLong(16)).toInt()) else Cs.Red
+    }.getOrDefault(Cs.Red)
+}
+
 /**
- * Video look (Clip Studio v5, replaces 04 NEWSROOM):
- * - 56dp header: `arrow_back`, `"Video look"` (Geist 500 17sp), `content_copy` (`duplicateNewsroomLook`).
- * - 232dp sunken `#000` live preview (real plate with blur, EV, warm/neutral/cool tint + optional kicker tag +
- *   `rgba(0,0,0,.82)` title box; zero `LIVE` bug or `ACTIVE:` debug clutter).
- * - Sunken 3-way `background` · `title` · `cards` control:
- *   - `background`: 48dp round `−`/`+` keys + 14dp sunken `#101013` track (`#EBEBEF` fill) for `BLUR` (±5%)
- *     and `BRIGHTNESS` (±0.2 EV), 3-way `LIGHT` (`warm` / `neutral` / `cool`), plus saved look selector &
- *     rig backdrop prompt + `generate`.
- *   - `title`: sunken editable `TITLE ON SCREEN` field (`updateTitleOnScreen`) + 48x48dp `refresh` AI key
- *     (`refreshHeadlineWithAi`) + `TAG ABOVE TITLE` 44dp pills (`none` · `breaking` · `developing` · `explainer`).
- *   - `cards`: real attached cards summary & timing from `savedOverlays` / `selectedOverlayIds`, attach toggles,
- *     and `"create / manage cards"` (`onOpenOverlayBuilder`).
- * - Dock: `"use this look"` (`check`) -> `useLookAndReturn` + `onBack()`.
+ * 04 Video look (Clip Studio v5+ Hardware):
+ * - Tappable live broadcast preview showing top-left News Logo Bug (`cornerBugText` / `showBrandBug`),
+ *   top-right Cut-Scene Card slot, and bottom Breaking Kicker + Title Bar tinted by live `accentHex`.
+ * - 4 raised hardware tabs:
+ *   - 0 `Look`: Accent Palette swatches (`crimson`/`amber`/`cobalt`/`mint`), restored old-school
+ *     red-needle drag `CsTickRuler` for `BLUR` & `BRIGHTNESS`, 3-way `LIGHT` (`warm`/`neutral`/`cool`),
+ *     plus backdrop prompt + saved looks.
+ *   - 1 `Style`: Editable top-left News Logo Bug text + `Show Bug` toggle, `BreakingNewsStyle` presets,
+ *     and editable `TITLE ON SCREEN` with flat unfilled sparkle AI polish.
+ *   - 2 `Cards`: Inline editable Quote/Stat cut-scene cards (edit text/stat/style in place, attach/detach,
+ *     or open full A2UI Overlay Builder / generate 3-card set).
+ *   - 3 `B-Roll`: Cut-Scene B-Roll framing (`Corner PiP`, `Full Cutaway`, `Split 50/50`) + cutaway preview.
+ * - Soft-neumorphic etched-frame dock: `Tweak w/ AI` (natural-language LLM sheet) + `Use Look ✓`.
  */
 @Composable
 fun NewsroomLookScreen(
@@ -118,23 +129,26 @@ fun NewsroomLookScreen(
         )
     }
 
-    // Pick up rig-side plate updates without discarding unsaved slider adjustments.
     LaunchedEffect(persisted?.plateId, persisted?.plateUrl) {
         val p = persisted ?: return@LaunchedEffect
         draft = draft.copy(plateId = p.plateId, plateUrl = p.plateUrl, platePrompt = p.platePrompt)
     }
 
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    var aiTweakSheetOpen by rememberSaveable { mutableStateOf(false) }
+
+    BackHandler(enabled = aiTweakSheetOpen) { aiTweakSheetOpen = false }
 
     val session = state.corePipelineSession
-    val breakingStyle = session.renderOptions.breakingStyle
+    val opts = session.renderOptions
+    val breakingStyle = opts.breakingStyle
     val resolvedTitle = remember(
-        session.renderOptions.chyronHeadline,
+        opts.chyronHeadline,
         session.title,
         state.activeProject.stageConfig.chyronHeadline,
         state.activeProject.title
     ) {
-        session.renderOptions.chyronHeadline.trim()
+        opts.chyronHeadline.trim()
             .ifBlank { session.title.trim() }
             .ifBlank { state.activeProject.stageConfig.chyronHeadline.trim() }
             .ifBlank { state.activeProject.title.trim() }
@@ -145,8 +159,10 @@ fun NewsroomLookScreen(
         state.savedOverlays.filter { it.id in selectedSet }
     }
 
-    val isLookBusy = state.isGeneratingBackdrop || state.isRefreshingHeadline || state.isGeneratingOverlaySet
+    val isLookBusy = state.isGeneratingBackdrop || state.isRefreshingHeadline ||
+        state.isGeneratingOverlaySet || state.isTweakingLook
     val busyLabel = when {
+        state.isTweakingLook -> "tweaking look with AI…"
         state.isGeneratingBackdrop -> "generating backdrop…"
         state.isRefreshingHeadline -> "refreshing title…"
         state.isGeneratingOverlaySet -> "generating cards…"
@@ -160,11 +176,11 @@ fun NewsroomLookScreen(
             .testTag("cs_newsroom_root")
     ) {
         Column(Modifier.fillMaxSize()) {
-            // Clean 56dp Header (`arrow_back`, `"Video look"`, `content_copy`)
+            // 52dp Header (`arrow_back`, `"Video look"`, `content_copy`)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp)
+                    .height(52.dp)
                     .padding(start = 8.dp, end = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -209,44 +225,49 @@ fun NewsroomLookScreen(
                 onDismissNotice = vm::dismissNotice
             )
 
-            // 206dp sunken #000 live preview (sized so BLUR + BRIGHTNESS + 3-way LIGHT all fit unclipped above the dock)
+            // 184dp tappable live broadcast preview (tap Logo Bug, Cut-Scene Card, or Title to edit directly!)
             VideoLookPreviewPanel(
                 look = draft,
-                breakingStyle = breakingStyle,
+                options = opts,
                 titleText = resolvedTitle,
-                attachedOverlays = attachedOverlays
+                attachedOverlays = attachedOverlays,
+                activeTab = tab,
+                onTapLogoBug = { tab = 1 },
+                onTapTitle = { tab = 1 },
+                onTapCard = { tab = 2 }
             )
 
-            // Sunken 3-way `background` · `title` · `cards` segmented control
+            // Raised 4-way hardware tab switch well (`Look` · `Style` · `Cards` · `B-Roll`)
             CsSegmentedRow(
-                modifier = Modifier.padding(start = 10.dp, top = 10.dp, end = 10.dp)
+                modifier = Modifier.padding(start = 10.dp, top = 8.dp, end = 10.dp)
             ) {
                 val tabs = listOf(
-                    Triple(0, "background", Icons.Sharp.Wallpaper),
-                    Triple(1, "title", Icons.Sharp.Title),
-                    Triple(2, "cards", Icons.Sharp.FormatQuote)
+                    Triple(0, "Look", Icons.Sharp.Wallpaper),
+                    Triple(1, "Style", Icons.Sharp.Title),
+                    Triple(2, "Cards", Icons.Sharp.FormatQuote),
+                    Triple(3, "B-Roll", Icons.Sharp.Movie)
                 )
                 tabs.forEach { (idx, label, icon) ->
                     CsSegment(
                         selected = tab == idx,
                         onClick = { tab = idx },
-                        height = 44.dp,
+                        height = 42.dp,
                         modifier = Modifier.testTag("cs_newsroom_tab_$idx")
                     ) { tint ->
-                        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
-                        Text(label, style = mono(13.sp, tint), maxLines = 1)
+                        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
+                        Text(label, style = mono(11.5.sp, tint), maxLines = 1, softWrap = false)
                     }
                 }
             }
 
-            // Tab body
+            // Tab body (100% unclipped above-the-fold on Look tab: Accent + Red-Needle Blur + Brightness + Light)
             Column(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
-                    .padding(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                    .padding(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 when (tab) {
                     0 -> LookBackgroundTab(
@@ -257,9 +278,10 @@ fun NewsroomLookScreen(
                         onSelectLook = { id -> selectedId = id },
                         onUpdateDraft = { updated -> draft = updated }
                     )
-                    1 -> LookTitleTab(
+                    1 -> LookStyleAndLogoTab(
                         state = state,
                         vm = vm,
+                        options = opts,
                         currentTitle = resolvedTitle,
                         breakingStyle = breakingStyle
                     )
@@ -269,11 +291,26 @@ fun NewsroomLookScreen(
                         attachedOverlays = attachedOverlays,
                         onOpenOverlayBuilder = onOpenOverlayBuilder
                     )
+                    3 -> LookBrollFramingTab(
+                        state = state,
+                        vm = vm,
+                        options = opts
+                    )
                 }
             }
 
-            // Single Primary Dock Key: "use this look"
+            // Soft-neumorphic etched-frame Bottom Dock: `Tweak w/ AI` + `Use Look ✓`
             CsDock(
+                leading = {
+                    CsDockSideKey(
+                        label = "Tweak AI",
+                        icon = Icons.Outlined.AutoAwesome,
+                        enabled = !isLookBusy,
+                        horizontal = true,
+                        onClick = { aiTweakSheetOpen = true },
+                        modifier = Modifier.testTag("cs_tweak_ai_button")
+                    )
+                },
                 primaryLabel = "use this look",
                 primaryTrailingIcon = Icons.Sharp.Check,
                 primaryRole = KeyRole.COMMIT,
@@ -285,6 +322,21 @@ fun NewsroomLookScreen(
                 },
                 isBusy = isLookBusy,
                 busyLabel = busyLabel
+            )
+        }
+
+        if (aiTweakSheetOpen) {
+            AiLookTweakSheet(
+                isBusy = state.isTweakingLook,
+                onDismiss = { aiTweakSheetOpen = false },
+                onSubmit = { instruction ->
+                    aiTweakSheetOpen = false
+                    vm.tweakVideoLookWithAi(
+                        instruction = instruction,
+                        currentLook = draft,
+                        onLookUpdated = { updated -> draft = updated }
+                    )
+                }
             )
         }
 
@@ -300,9 +352,13 @@ fun NewsroomLookScreen(
 @Composable
 private fun VideoLookPreviewPanel(
     look: NewsroomLook,
-    breakingStyle: BreakingNewsStyle,
+    options: CoreRenderOptions,
     titleText: String,
-    attachedOverlays: List<SavedNewsroomOverlay>
+    attachedOverlays: List<SavedNewsroomOverlay>,
+    activeTab: Int,
+    onTapLogoBug: () -> Unit,
+    onTapTitle: () -> Unit,
+    onTapCard: () -> Unit
 ) {
     val ev = look.brightnessEv
     val gain = 2.0.pow(ev).toFloat()
@@ -320,6 +376,7 @@ private fun VideoLookPreviewPanel(
         )
     )
     val blurDp = ((look.blurPercent / 100f) * 24f).dp
+    val accentColor = remember(look.accentHex) { parseAccentHex(look.accentHex) }
 
     val ambientCenterColor = remember(look.light, gain) {
         val base = when (look.light) {
@@ -336,13 +393,18 @@ private fun VideoLookPreviewPanel(
     }
 
     val chyronOverlay = attachedOverlays.firstOrNull { it.kind == OverlayObjectKind.LOWER_THIRD }
+    val cardOverlay = attachedOverlays.firstOrNull { it.kind != OverlayObjectKind.LOWER_THIRD }
+        ?: attachedOverlays.firstOrNull()
     val displayTitle = chyronOverlay?.headline?.ifBlank { null }
         ?: titleText.ifBlank { "Untitled clip" }
 
+    val breakingStyle = options.breakingStyle
     val tagKey = breakingStyle.titleTagKey
     val showKicker = tagKey != "none"
+    val accentLuma = 0.2126f * accentColor.red + 0.7152f * accentColor.green + 0.0722f * accentColor.blue
+    val accentFg = if (accentLuma >= 0.6f) Cs.Black else Cs.White
     val (kickerBg, kickerFg) = when (tagKey) {
-        "breaking" -> Cs.Red to Cs.White
+        "breaking" -> accentColor to accentFg
         "developing" -> Cs.AmberBright to Cs.Black
         "explainer" -> Cs.Ink to Cs.Black
         else -> Color.Transparent to Cs.White
@@ -352,8 +414,8 @@ private fun VideoLookPreviewPanel(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 10.dp)
-            .height(206.dp)
-            .sunkenPanel(radius = 18.dp)
+            .height(184.dp)
+            .sunkenPanel(radius = 16.dp)
             .testTag("cs_look_canvas")
     ) {
         val plate = look.plateUrl
@@ -386,17 +448,84 @@ private fun VideoLookPreviewPanel(
             Box(
                 Modifier
                     .fillMaxSize()
-                    .padding(14.dp)
+                    .padding(12.dp)
                     .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
             )
         }
 
-        // Optional kicker tag + rgba(0,0,0,.82) title box
+        // Top-left tappable News Logo / Brand Bug
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 12.dp, top = 12.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.Black.copy(alpha = if (options.showBrandBug) 0.78f else 0.42f))
+                .border(
+                    width = if (activeTab == 1) 1.5.dp else 1.dp,
+                    color = if (activeTab == 1) Cs.White else Color.White.copy(alpha = 0.28f),
+                    shape = RoundedCornerShape(8.dp)
+                )
+                .clickable(role = Role.Button, onClick = onTapLogoBug)
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+                .testTag("cs_preview_logo_bug"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(if (options.showBrandBug) accentColor else Cs.Dim)
+            )
+            Text(
+                text = if (options.showBrandBug) {
+                    options.cornerBugText.ifBlank { "AIRCHECK" }
+                } else {
+                    "LOGO OFF"
+                },
+                style = ndot(11.sp, if (options.showBrandBug) Cs.White else Cs.Muted),
+                maxLines = 1
+            )
+        }
+
+        // Top-right tappable Cut-Scene Card preview slot
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(end = 12.dp, top = 12.dp)
+                .width(138.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.Black.copy(alpha = 0.78f))
+                .border(
+                    width = if (activeTab == 2) 1.5.dp else 1.dp,
+                    color = if (activeTab == 2) Cs.White else accentColor.copy(alpha = 0.85f),
+                    shape = RoundedCornerShape(8.dp)
+                )
+                .clickable(role = Role.Button, onClick = onTapCard)
+                .padding(horizontal = 8.dp, vertical = 6.dp)
+                .testTag("cs_preview_card_slot"),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                text = cardOverlay?.kind?.name?.replace("_", " ") ?: "CUT-SCENE CARD",
+                style = mono(8.5.sp, accentColor, FontWeight.Bold, 0.06f),
+                maxLines = 1
+            )
+            Text(
+                text = cardOverlay?.headline?.ifBlank { null } ?: "Tap to add/edit",
+                style = sans(11.5.sp, Cs.White, 15.sp, FontWeight.Medium),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        // Bottom tappable Breaking Kicker + Title Bar
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+                .padding(start = 12.dp, end = 12.dp, bottom = 12.dp)
                 .fillMaxWidth()
+                .clickable(role = Role.Button, onClick = onTapTitle)
                 .testTag("cs_zone_headline"),
             horizontalAlignment = Alignment.Start
         ) {
@@ -426,11 +555,21 @@ private fun VideoLookPreviewPanel(
                         )
                     )
                     .background(Color.Black.copy(alpha = 0.82f))
-                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                    .border(
+                        width = if (activeTab == 1) 1.dp else 0.75.dp,
+                        color = if (activeTab == 1) Cs.White.copy(alpha = 0.65f) else Color.White.copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(
+                            topStart = if (showKicker) 0.dp else 10.dp,
+                            topEnd = 10.dp,
+                            bottomStart = 10.dp,
+                            bottomEnd = 10.dp
+                        )
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
                 Text(
                     text = displayTitle,
-                    style = sans(15.sp, Cs.White, 20.sp, FontWeight.Medium),
+                    style = sans(14.5.sp, Cs.White, 19.sp, FontWeight.Medium),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -448,60 +587,77 @@ private fun LookBackgroundTab(
     onSelectLook: (String) -> Unit,
     onUpdateDraft: (NewsroomLook) -> Unit
 ) {
-    // 1. BLUR (±5%, 0..100%)
-    LookStepperSlider(
+    // 1. Editable Design System Accent Palette (4 raised hardware swatches with glowing LEDs)
+    CsSegmentedRow {
+        val accents = listOf(
+            Triple("crimson", NewsroomLook.ACCENT_CRIMSON, Cs.Red),
+            Triple("amber", NewsroomLook.ACCENT_AMBER, Cs.AmberBright),
+            Triple("cobalt", NewsroomLook.ACCENT_COBALT, Cs.Cobalt),
+            Triple("mint", NewsroomLook.ACCENT_MINT, Cs.Mint)
+        )
+        accents.forEach { (name, hex, color) ->
+            val selected = draft.accentHex.equals(hex, ignoreCase = true)
+            CsSegment(
+                selected = selected,
+                onClick = { onUpdateDraft(draft.copy(accentHex = hex)) },
+                height = 40.dp,
+                ledColor = color,
+                modifier = Modifier.testTag("cs_accent_$name")
+            ) { tint ->
+                if (!selected) {
+                    CsLedDot(color = color, size = 6.dp)
+                }
+                Text(name, style = mono(11.sp, tint), maxLines = 1, softWrap = false)
+            }
+        }
+    }
+
+    // 2. Restored v4 Old-School Red-Needle Drag Tick Rulers for BLUR & BRIGHTNESS!
+    CsTickRuler(
         label = "BLUR",
         valueText = "${draft.blurPercent}%",
-        fraction = (draft.blurPercent / 100f).coerceIn(0f, 1f),
-        onDecrement = {
-            onUpdateDraft(draft.copy(blurPercent = (draft.blurPercent - 5).coerceIn(0, 100)))
-        },
-        onIncrement = {
-            onUpdateDraft(draft.copy(blurPercent = (draft.blurPercent + 5).coerceIn(0, 100)))
+        normalizedValue = (draft.blurPercent / 100f).coerceIn(0f, 1f),
+        enabled = true,
+        onStep = { delta ->
+            onUpdateDraft(draft.copy(blurPercent = (draft.blurPercent + delta * 5).coerceIn(0, 100)))
         },
         tag = "cs_scrub_blur"
     )
 
-    // 2. BRIGHTNESS (±0.2 EV, -3.0..+3.0)
-    val evLabel = "${if (draft.brightnessEv > 0) "+" else ""}${"%.1f".format(draft.brightnessEv)}"
-    LookStepperSlider(
+    val evLabel = "${if (draft.brightnessEv > 0) "+" else ""}${"%.1f".format(draft.brightnessEv)} EV"
+    CsTickRuler(
         label = "BRIGHTNESS",
         valueText = evLabel,
-        fraction = (((draft.brightnessEv + 3.0) / 6.0).toFloat()).coerceIn(0f, 1f),
-        onDecrement = {
-            val next = (Math.round((draft.brightnessEv - 0.2) * 10.0) / 10.0).coerceIn(-3.0, 3.0)
-            onUpdateDraft(draft.copy(brightnessEv = next))
-        },
-        onIncrement = {
-            val next = (Math.round((draft.brightnessEv + 0.2) * 10.0) / 10.0).coerceIn(-3.0, 3.0)
+        normalizedValue = (((draft.brightnessEv + 3.0) / 6.0).toFloat()).coerceIn(0f, 1f),
+        enabled = true,
+        onStep = { delta ->
+            val next = (Math.round((draft.brightnessEv + delta * 0.2) * 10.0) / 10.0).coerceIn(-3.0, 3.0)
             onUpdateDraft(draft.copy(brightnessEv = next))
         },
         tag = "cs_scrub_ev"
     )
 
-    // 3. LIGHT 3-way segmented control (`warm` · `neutral` · `cool`)
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("LIGHT", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
-        CsSegmentedRow {
-            val lightChoices = listOf(
-                NewsroomLook.LIGHT_WARM to "warm",
-                NewsroomLook.LIGHT_NEUTRAL to "neutral",
-                NewsroomLook.LIGHT_COOL to "cool"
-            )
-            lightChoices.forEach { (wire, label) ->
-                CsSegment(
-                    selected = draft.light == wire,
-                    onClick = { onUpdateDraft(draft.copy(light = wire)) },
-                    height = 44.dp,
-                    modifier = Modifier.testTag("cs_light_$label")
-                ) { tint ->
-                    Text(label, style = mono(13.sp, tint), maxLines = 1)
-                }
+    // 3. LIGHT 3-way raised hardware switch well (`warm` · `neutral` · `cool`)
+    CsSegmentedRow {
+        val lightChoices = listOf(
+            Triple(NewsroomLook.LIGHT_WARM, "warm", Cs.AmberBright),
+            Triple(NewsroomLook.LIGHT_NEUTRAL, "neutral", Cs.Ink),
+            Triple(NewsroomLook.LIGHT_COOL, "cool", Cs.Cobalt)
+        )
+        lightChoices.forEach { (wire, label, ledCol) ->
+            CsSegment(
+                selected = draft.light == wire,
+                onClick = { onUpdateDraft(draft.copy(light = wire)) },
+                height = 42.dp,
+                ledColor = ledCol,
+                modifier = Modifier.testTag("cs_light_$label")
+            ) { tint ->
+                Text(label, style = mono(12.5.sp, tint), maxLines = 1)
             }
         }
     }
 
-    // 4. Backdrop plate generator & saved look selector (keeps real Mac-rig plate creation working)
+    // 4. Backdrop plate generator & saved looks (scrolls cleanly right below fold)
     val promptState = rememberTextFieldState(initialText = draft.platePrompt)
     LaunchedEffect(draft.id, draft.platePrompt) {
         if (promptState.text.isEmpty() && draft.platePrompt.isNotBlank()) {
@@ -515,7 +671,7 @@ private fun LookBackgroundTab(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 52.dp)
-                .sunkenPanel(radius = 16.dp)
+                .sunkenPanel(radius = 14.dp)
                 .padding(start = 14.dp, top = 4.dp, end = 6.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -548,10 +704,10 @@ private fun LookBackgroundTab(
                     vm.generateBackdropForLook(lookId, promptState.text.toString())
                 },
                 enabled = promptState.text.toString().isNotBlank() && !state.isGeneratingBackdrop,
-                radius = 12.dp,
+                radius = 10.dp,
                 size = 12.sp,
                 modifier = Modifier
-                    .height(44.dp)
+                    .height(42.dp)
                     .testTag("cs_backdrop_generate")
             )
         }
@@ -584,104 +740,110 @@ private fun LookBackgroundTab(
     }
 }
 
-@Composable
-private fun LookStepperSlider(
-    label: String,
-    valueText: String,
-    fraction: Float,
-    onDecrement: () -> Unit,
-    onIncrement: () -> Unit,
-    tag: String
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag(tag),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(label, style = SectionLabelStyle, maxLines = 1)
-            Text(
-                text = valueText,
-                style = mono(13.sp, Cs.Ink, FontWeight.Medium),
-                maxLines = 1,
-                modifier = Modifier.testTag("${tag}_value")
-            )
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(44.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            CsIconKey(
-                icon = Icons.Sharp.Remove,
-                contentDescription = "Decrease $label",
-                onClick = onDecrement,
-                size = 44.dp,
-                radius = 22.dp,
-                iconSize = 22.dp,
-                modifier = Modifier.testTag("${tag}_dec")
-            )
-
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(14.dp)
-                    .sunkenPanel(radius = 7.dp, fill = Cs.SunkenTrack)
-                    .padding(2.dp),
-                contentAlignment = Alignment.CenterStart
-            ) {
-                if (fraction > 0f) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .fillMaxWidth(fraction)
-                            .widthIn(min = 10.dp)
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(Cs.Ink)
-                    )
-                }
-            }
-
-            CsIconKey(
-                icon = Icons.Sharp.Add,
-                contentDescription = "Increase $label",
-                onClick = onIncrement,
-                size = 44.dp,
-                radius = 22.dp,
-                iconSize = 22.dp,
-                modifier = Modifier.testTag("${tag}_inc")
-            )
-        }
-    }
-}
-
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun LookTitleTab(
+private fun LookStyleAndLogoTab(
     state: StudioUiState,
     vm: StudioViewModel,
+    options: CoreRenderOptions,
     currentTitle: String,
     breakingStyle: BreakingNewsStyle
 ) {
-    val titleFieldState = rememberTextFieldState(initialText = currentTitle)
+    // 1. Top-Left News Logo / Brand Bug editor
+    val bugFieldState = rememberTextFieldState(initialText = options.cornerBugText)
+    LaunchedEffect(options.cornerBugText) {
+        if (options.cornerBugText != bugFieldState.text.toString()) {
+            bugFieldState.setTextAndPlaceCursorAtEnd(options.cornerBugText)
+        }
+    }
+    LaunchedEffect(bugFieldState) {
+        snapshotFlow { bugFieldState.text.toString() }
+            .distinctUntilChanged()
+            .drop(1)
+            .collect { edited ->
+                if (edited.trim() != options.cornerBugText.trim() && edited.isNotBlank()) {
+                    vm.setCoreBrandBug(show = options.showBrandBug, text = edited)
+                }
+            }
+    }
 
-    // Keep text field synced when AI headline refresh updates currentTitle externally.
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("TOP-LEFT NEWS LOGO BUG", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 52.dp)
+                .sunkenPanel(radius = 14.dp)
+                .padding(start = 14.dp, top = 4.dp, end = 6.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            BasicTextField(
+                state = bugFieldState,
+                textStyle = ndot(15.sp, Cs.White),
+                cursorBrush = SolidColor(Cs.Ink),
+                lineLimits = TextFieldLineLimits.SingleLine,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("cs_bug_input"),
+                decorator = { inner ->
+                    Box {
+                        if (bugFieldState.text.isEmpty()) {
+                            Text("Channel bug text…", style = mono(13.sp, Cs.Dim))
+                        }
+                        inner()
+                    }
+                }
+            )
+            CsPill(
+                label = if (options.showBrandBug) "bug on" else "bug off",
+                selected = options.showBrandBug,
+                accentBarColor = if (options.showBrandBug) Cs.Red else null,
+                height = 40.dp,
+                onClick = {
+                    vm.setCoreBrandBug(
+                        show = !options.showBrandBug,
+                        text = bugFieldState.text.toString()
+                    )
+                },
+                modifier = Modifier.testTag("cs_bug_toggle")
+            )
+        }
+    }
+
+    // 2. Breaking News Style / Tag Above Title
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("BREAKING NEWS STYLE", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+        val activeTagKey = breakingStyle.titleTagKey
+        val tags = listOf(
+            "none" to null,
+            "breaking" to Cs.Red,
+            "developing" to Cs.AmberBright,
+            "explainer" to Cs.Ink
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            tags.forEach { (tag, accent) ->
+                CsPill(
+                    label = tag,
+                    selected = activeTagKey == tag,
+                    accentBarColor = accent,
+                    onClick = { vm.setTitleTagStyle(tag) },
+                    modifier = Modifier.testTag("cs_tag_$tag")
+                )
+            }
+        }
+    }
+
+    // 3. Title Bar Text + Flat Unfilled Sparkle AI Refresh
+    val titleFieldState = rememberTextFieldState(initialText = currentTitle)
     LaunchedEffect(currentTitle) {
         if (currentTitle != titleFieldState.text.toString()) {
             titleFieldState.setTextAndPlaceCursorAtEnd(currentTitle)
         }
     }
-
-    // Persist user edits back to StudioViewModel / Room cleanly.
     LaunchedEffect(titleFieldState) {
         snapshotFlow { titleFieldState.text.toString() }
             .distinctUntilChanged()
@@ -693,14 +855,14 @@ private fun LookTitleTab(
             }
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("TITLE ON SCREEN", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 56.dp)
-                .sunkenPanel(radius = 16.dp)
-                .padding(start = 16.dp, top = 4.dp, end = 4.dp, bottom = 4.dp),
+                .sunkenPanel(radius = 14.dp)
+                .padding(start = 14.dp, top = 4.dp, end = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -724,8 +886,7 @@ private fun LookTitleTab(
 
             Box(
                 modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(12.dp))
+                    .size(44.dp)
                     .clickable(
                         enabled = !state.isRefreshingHeadline,
                         role = Role.Button,
@@ -734,37 +895,16 @@ private fun LookTitleTab(
                     .testTag("cs_title_refresh"),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Sharp.Refresh,
-                    contentDescription = "Refresh title with AI",
-                    tint = if (!state.isRefreshingHeadline) Cs.Muted else Cs.Dim,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
-        }
-    }
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("TAG ABOVE TITLE", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
-        val activeTagKey = breakingStyle.titleTagKey
-        val tags = listOf(
-            "none" to null,
-            "breaking" to Cs.Red,
-            "developing" to Cs.AmberBright,
-            "explainer" to Cs.Ink
-        )
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            tags.forEach { (tag, accent) ->
-                CsPill(
-                    label = tag,
-                    selected = activeTagKey == tag,
-                    accentBarColor = accent,
-                    onClick = { vm.setTitleTagStyle(tag) },
-                    modifier = Modifier.testTag("cs_tag_$tag")
-                )
+                if (state.isRefreshingHeadline) {
+                    ThinkingOrbSolving(size = 22.dp, tint = Cs.White)
+                } else {
+                    Icon(
+                        imageVector = Icons.Outlined.AutoAwesome,
+                        contentDescription = "Refresh title with AI",
+                        tint = Cs.InkSub,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             }
         }
     }
@@ -779,6 +919,7 @@ private fun LookCardsTab(
 ) {
     val session = state.corePipelineSession
     val allCards = state.savedOverlays
+    var editingCardId by rememberSaveable { mutableStateOf<String?>(null) }
 
     Column(
         modifier = Modifier
@@ -799,12 +940,12 @@ private fun LookCardsTab(
             }
             else -> "${attachedOverlays.size} cards attached"
         }
-        Text(text = countHeadline, style = sans(16.sp, Cs.Ink, 23.sp))
+        Text(text = countHeadline, style = sans(15.sp, Cs.Ink, 21.sp))
 
         if (attachedOverlays.isEmpty()) {
             Text(
                 text = "No quote or stat cards are attached to this cut yet.",
-                style = sans(14.sp, Cs.Muted, 20.sp)
+                style = sans(13.5.sp, Cs.Muted, 19.sp)
             )
         } else {
             val hasVoicedTiming = session.clauses.any { it.endMs > 0L }
@@ -822,7 +963,7 @@ private fun LookCardsTab(
                 }
                 Text(
                     text = summaryLine,
-                    style = sans(14.sp, Cs.Muted, 20.sp),
+                    style = sans(13.5.sp, Cs.Muted, 19.sp),
                     modifier = Modifier.testTag("cs_attached_card_line_$idx")
                 )
             }
@@ -831,7 +972,7 @@ private fun LookCardsTab(
 
     if (allCards.isNotEmpty()) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("SAVED CARDS", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+            Text("SAVED CARDS · TAP TO TOGGLE OR EDIT", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
             allCards.forEach { ovl ->
                 val attached = ovl.id in session.selectedOverlayIds
                 val cleanHeadline = StudioViewModel.sanitizeCardQuoteHeadline(
@@ -839,35 +980,70 @@ private fun LookCardsTab(
                     fallbackText = ovl.headline,
                     maxChars = 56
                 )
-                CsKey(
-                    onClick = { vm.toggleSavedOverlayForPipeline(ovl.id) },
-                    role = if (attached) KeyRole.DOWN else KeyRole.STD,
-                    radius = 14.dp,
-                    horizontalPadding = 14.dp,
-                    contentAlignment = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("cs_overlay_${ovl.id}")
-                ) { tint ->
-                    Icon(
-                        imageVector = if (attached) Icons.Sharp.Check else Icons.Sharp.Add,
-                        contentDescription = null,
-                        tint = tint,
-                        modifier = Modifier.size(18.dp)
+                if (editingCardId == ovl.id) {
+                    InlineCardEditor(
+                        overlay = ovl,
+                        onSave = { newHeadline, newStat ->
+                            vm.updateSavedOverlayInline(
+                                overlayId = ovl.id,
+                                headline = newHeadline,
+                                calloutStat = newStat
+                            )
+                            editingCardId = null
+                        },
+                        onCancel = { editingCardId = null }
                     )
-                    Text(
-                        text = cleanHeadline,
-                        style = sans(15.sp, tint, 20.sp),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        text = "${ovl.durationSec}s",
-                        style = mono(12.sp, Cs.Muted),
-                        maxLines = 1
-                    )
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CsKey(
+                            onClick = { vm.toggleSavedOverlayForPipeline(ovl.id) },
+                            role = if (attached) KeyRole.ACTIVE else KeyRole.STD,
+                            radius = 12.dp,
+                            pip = !attached,
+                            horizontalPadding = 12.dp,
+                            contentAlignment = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(46.dp)
+                                .testTag("cs_overlay_${ovl.id}")
+                        ) { tint ->
+                            if (attached) {
+                                CsLedDot(color = Cs.Mint, size = 6.5.dp)
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Sharp.Add,
+                                    contentDescription = null,
+                                    tint = tint,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+                            Text(
+                                text = cleanHeadline,
+                                style = sans(14.5.sp, tint, 19.sp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "${ovl.durationSec}s",
+                                style = mono(11.5.sp, Cs.Muted),
+                                maxLines = 1
+                            )
+                        }
+                        CsIconKey(
+                            icon = Icons.Sharp.Edit,
+                            contentDescription = "Edit card text",
+                            size = 46.dp,
+                            radius = 12.dp,
+                            iconSize = 18.dp,
+                            onClick = { editingCardId = ovl.id },
+                            modifier = Modifier.testTag("cs_overlay_edit_${ovl.id}")
+                        )
+                    }
                 }
             }
         }
@@ -876,16 +1052,230 @@ private fun LookCardsTab(
     CsKey(
         onClick = onOpenOverlayBuilder,
         role = KeyRole.STD,
-        radius = 14.dp,
+        radius = 12.dp,
+        pip = true,
         horizontalPadding = 16.dp,
         contentAlignment = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp)
+            .height(46.dp)
             .testTag("cs_open_overlay_builder")
     ) { tint ->
-        Icon(Icons.Sharp.FormatQuote, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
-        Text("create / manage cards", style = mono(13.sp, tint), maxLines = 1)
+        Icon(Icons.Sharp.FormatQuote, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+        Text("create / generate cards", style = mono(13.sp, tint), maxLines = 1)
+    }
+}
+
+@Composable
+private fun InlineCardEditor(
+    overlay: SavedNewsroomOverlay,
+    onSave: (String, String) -> Unit,
+    onCancel: () -> Unit
+) {
+    val headState = rememberTextFieldState(initialText = overlay.headline)
+    val statState = rememberTextFieldState(initialText = overlay.calloutStat)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .sunkenPanel(radius = 14.dp)
+            .padding(12.dp)
+            .testTag("cs_card_inline_editor_${overlay.id}"),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text("EDIT ${overlay.kind.name.replace("_", " ")}", style = SectionLabelStyle)
+        BasicTextField(
+            state = headState,
+            textStyle = sans(15.sp, Cs.Ink, 20.sp),
+            cursorBrush = SolidColor(Cs.Ink),
+            lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = 3),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(Cs.Body)
+                .border(1.dp, Cs.Hairline, RoundedCornerShape(10.dp))
+                .padding(10.dp)
+                .testTag("cs_card_headline_field_${overlay.id}")
+        )
+        if (overlay.kind == OverlayObjectKind.STAT_CALLOUT || overlay.calloutStat.isNotBlank()) {
+            BasicTextField(
+                state = statState,
+                textStyle = mono(14.sp, Cs.AmberBright, FontWeight.SemiBold),
+                cursorBrush = SolidColor(Cs.Ink),
+                lineLimits = TextFieldLineLimits.SingleLine,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Cs.Body)
+                    .border(1.dp, Cs.Hairline, RoundedCornerShape(10.dp))
+                    .padding(10.dp)
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CsKeyLabel(
+                label = "save card",
+                onClick = { onSave(headState.text.toString(), statState.text.toString()) },
+                role = KeyRole.ACTIVE,
+                radius = 10.dp,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(42.dp)
+                    .testTag("cs_card_save_${overlay.id}")
+            )
+            CsKeyLabel(
+                label = "cancel",
+                onClick = onCancel,
+                role = KeyRole.STD,
+                radius = 10.dp,
+                modifier = Modifier
+                    .height(42.dp)
+                    .testTag("cs_card_cancel_${overlay.id}")
+            )
+        }
+    }
+}
+
+@Composable
+private fun LookBrollFramingTab(
+    state: StudioUiState,
+    vm: StudioViewModel,
+    options: CoreRenderOptions
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("CUT-SCENE B-ROLL FRAMING", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+        CsSegmentedRow {
+            val modes = listOf(
+                CoreRenderOptions.BROLL_FRAMING_PIP to "Corner PiP",
+                CoreRenderOptions.BROLL_FRAMING_FULL to "Full Cut",
+                CoreRenderOptions.BROLL_FRAMING_SPLIT to "Split 50/50"
+            )
+            modes.forEach { (wire, label) ->
+                CsSegment(
+                    selected = options.brollFraming == wire,
+                    onClick = { vm.setCoreBrollFraming(wire) },
+                    height = 44.dp,
+                    modifier = Modifier.testTag("cs_broll_framing_$wire")
+                ) { tint ->
+                    Text(label, style = mono(12.sp, tint), maxLines = 1, softWrap = false)
+                }
+            }
+        }
+    }
+
+    val brollClauses = state.corePipelineSession.clauses.filter {
+        it.segmentMode == com.example.data.BrollSegmentMode.BROLL_CUTAWAY
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .sunkenPanel(radius = 14.dp)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = "${brollClauses.size} B-ROLL CUT-SCENE${if (brollClauses.size == 1) "" else "S"} IN THIS CLIP",
+            style = SectionLabelStyle
+        )
+        if (brollClauses.isEmpty()) {
+            Text(
+                text = "Mark lines as B-roll in 03 CUT -> b-roll tab to cut away with ${options.brollFraming} framing.",
+                style = sans(13.5.sp, Cs.Muted, 19.sp)
+            )
+        } else {
+            brollClauses.take(4).forEach { cl ->
+                Text(
+                    text = "${mmss(cl.startMs)} · ${cl.bRollPrompt.ifBlank { cl.brollCaption.ifBlank { cl.spokenText } }}",
+                    style = sans(13.5.sp, Cs.InkSub, 19.sp),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AiLookTweakSheet(
+    isBusy: Boolean,
+    onDismiss: () -> Unit,
+    onSubmit: (String) -> Unit
+) {
+    val fieldState = rememberTextFieldState()
+    Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.62f))
+                .clickable(onClick = onDismiss)
+        )
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                .background(Cs.Sheet)
+                .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 24.dp)
+                .testTag("cs_ai_tweak_sheet"),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.AutoAwesome,
+                    contentDescription = null,
+                    tint = Cs.Ink,
+                    modifier = Modifier.size(22.dp)
+                )
+                Text(
+                    text = "  Tweak video look with AI",
+                    style = sans(18.sp, Cs.Ink, 24.sp, FontWeight.Medium),
+                    modifier = Modifier.weight(1f)
+                )
+                CsIconKey(
+                    icon = Icons.Sharp.Close,
+                    contentDescription = "Close AI tweak sheet",
+                    onClick = onDismiss,
+                    modifier = Modifier.testTag("cs_ai_tweak_close")
+                )
+            }
+            Text(
+                text = "Change colors, top-left logo, brightness/blur, breaking style, B-roll framing, or headline in plain English.",
+                style = sans(13.5.sp, Cs.Muted, 19.sp)
+            )
+            BasicTextField(
+                state = fieldState,
+                textStyle = sans(15.5.sp, Cs.Ink, 22.sp),
+                cursorBrush = SolidColor(Cs.Ink),
+                lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 3, maxHeightInLines = 6),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 96.dp)
+                    .sunkenPanel(radius = 14.dp)
+                    .padding(12.dp)
+                    .testTag("cs_ai_tweak_input"),
+                decorator = { inner ->
+                    Box {
+                        if (fieldState.text.isEmpty()) {
+                            Text(
+                                "e.g. \"Cobalt blue accent, show top-left logo RYAN LIVE, full cut B-roll, +0.4 EV\"",
+                                style = sans(14.5.sp, Cs.Dim, 20.sp)
+                            )
+                        }
+                        inner()
+                    }
+                }
+            )
+            CsDock(
+                primaryLabel = "apply AI tweak",
+                primaryTrailingIcon = Icons.Outlined.AutoAwesome,
+                primaryEnabled = fieldState.text.toString().isNotBlank() && !isBusy,
+                primaryTag = "cs_ai_tweak_submit",
+                onPrimaryClick = { onSubmit(fieldState.text.toString()) },
+                isBusy = isBusy,
+                busyLabel = "tweaking look…"
+            )
+        }
     }
 }
 

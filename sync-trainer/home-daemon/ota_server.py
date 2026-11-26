@@ -107,6 +107,7 @@ VALID_AI_ASSIST_MODES = frozenset({
     "polish_segment",
     "generate_overlay_brief",
     "generate_overlay_set",
+    "tweak_video_look",
 })
 
 _TAILSCALE_IPV4_NET = ipaddress.ip_network("100.64.0.0/10")
@@ -2434,8 +2435,16 @@ class RenderJobManager:
                 render_opts_raw.get("chyron_headline") or first_ovl.get("headline") or title or "Aircheck"
             ).strip() or "Aircheck"
             subline = str(render_opts_raw.get("chyron_subline") or first_ovl.get("subline") or "").strip()
+            raw_look = render_opts_raw.get("look") if isinstance(render_opts_raw.get("look"), Mapping) else {}
+            raw_accent = str(raw_look.get("accent_hex") or "").strip().upper()
+            accent_hex = raw_accent if re.match(r"^#[0-9A-F]{6}$", raw_accent) else None
+            raw_framing = str(render_opts_raw.get("broll_framing") or "pip").strip().lower()
+            broll_framing = raw_framing if raw_framing in ("pip", "full", "split") else "pip"
             corner_bug = str(render_opts_raw.get("corner_bug_text") or "LIVE").strip() or "LIVE"
-            show_bug = breaking_style != "clean" and bool(render_opts_raw.get("show_brand_bug", True))
+            if "show_brand_bug" in render_opts_raw and render_opts_raw.get("show_brand_bug") is not None:
+                show_bug = bool(render_opts_raw.get("show_brand_bug"))
+            else:
+                show_bug = breaking_style != "clean"
             remotion_overlays: list[dict[str, Any]] = []
             for ovl_item in overlays:
                 if not isinstance(ovl_item, Mapping):
@@ -2461,15 +2470,19 @@ class RenderJobManager:
                         "durationSec": max(2, min(20, int(ovl_item.get("duration_sec") or 5))),
                     }
                 )
-            input_props["packaging"] = {
+            packaging_payload: dict[str, Any] = {
                 "chyronHeadline": headline,
                 "chyronSubline": subline,
                 "cornerBugText": corner_bug,
                 "showBrandBug": show_bug,
                 "breakingStyle": breaking_style,
+                "brollFraming": broll_framing,
                 "overlays": remotion_overlays,
                 "templateId": template_id,
             }
+            if accent_hex:
+                packaging_payload["accentHex"] = accent_hex
+            input_props["packaging"] = packaging_payload
 
             req_body = json.dumps(
                 {
@@ -3463,6 +3476,28 @@ def _run_ai_assist(
             f'{{"kind":"QUOTE_BRIEF","headline":"MAX 34 CHARS","subline":"MAX 50 CHARS","callout_stat":"DESK BRIEF","duration_sec":5}}'
             f']}}'
         )
+    elif mode == "tweak_video_look":
+        current_look = payload.get("current_look") if isinstance(payload.get("current_look"), Mapping) else {}
+        current_json = json.dumps(current_look, ensure_ascii=False)
+        user_prompt = (
+            "You are a broadcast art director updating the live look & overlay settings for an Aircheck video.\n"
+            f"USER REQUEST: {text}\n"
+            f"STORY CONTEXT: {context}\n"
+            f"CURRENT LOOK STATE: {current_json}\n\n"
+            "Return STRICT JSON ONLY with a short 'summary' string and ONLY the keys that should change:\n"
+            "- accent_hex: '#D71921' (crimson), '#E6A100' (amber/gold), '#3A86F2' (cobalt/blue), '#44D498' (mint/green), or another valid '#RRGGBB'\n"
+            "- light: 'warm' | 'neutral' | 'cool'\n"
+            "- blur_percent: integer 0..100\n"
+            "- brightness_ev: number -3.0..3.0\n"
+            "- breaking_style: 'breaking' | 'developing' | 'exclusive' | 'alert_stat' | 'clean'\n"
+            "- show_brand_bug: boolean (top-left news logo bug visibility)\n"
+            "- corner_bug_text: short uppercase channel/logo label (max 24 chars)\n"
+            "- broll_framing: 'pip' (corner PiP) | 'full' (full cutaway) | 'split' (50/50 split)\n"
+            "- chyron_headline: optional updated headline (max 48 chars)\n"
+            "- backdrop_prompt: optional studio backdrop description ONLY if the user asked to change the backdrop scene\n"
+            "- summary: concise <= 48 char confirmation of what changed\n"
+            'Example: {"accent_hex":"#3A86F2","light":"cool","show_brand_bug":true,"corner_bug_text":"TECH DESK","summary":"cobalt accent, cool light, TECH DESK bug"}'
+        )
     else:  # polish_segment
         user_prompt = (
             f"Rewrite or flesh out this single spoken news anchor segment (14-22 words, deadpan serious cable news tone, "
@@ -3629,6 +3664,65 @@ def _run_ai_assist(
             "overlays": validated_overlays,
             "llm_meta": res.llm_meta,
         }
+
+    if mode == "tweak_video_look":
+        out: dict[str, Any] = {"mode": mode, "llm_meta": res.llm_meta}
+        raw_accent = str(inner.get("accent_hex") or "").strip().upper()
+        if re.match(r"^#[0-9A-F]{6}$", raw_accent):
+            out["accent_hex"] = raw_accent
+        raw_light = str(inner.get("light") or "").strip().lower()
+        if raw_light in ("warm", "neutral", "cool"):
+            out["light"] = raw_light
+        if inner.get("blur_percent") is not None:
+            try:
+                out["blur_percent"] = max(0, min(100, int(round(float(inner["blur_percent"])))))
+            except (TypeError, ValueError):
+                pass
+        if inner.get("brightness_ev") is not None:
+            try:
+                out["brightness_ev"] = round(max(-3.0, min(3.0, float(inner["brightness_ev"]))), 2)
+            except (TypeError, ValueError):
+                pass
+        raw_style = str(inner.get("breaking_style") or "").strip().lower()
+        if raw_style in ("none", "clean"):
+            out["breaking_style"] = "clean"
+        elif raw_style in ("breaking", "developing", "exclusive", "alert_stat"):
+            out["breaking_style"] = raw_style
+        elif raw_style == "explainer":
+            out["breaking_style"] = "exclusive"
+        if isinstance(inner.get("show_brand_bug"), bool):
+            out["show_brand_bug"] = inner["show_brand_bug"]
+        raw_bug = str(inner.get("corner_bug_text") or "").strip()
+        if raw_bug:
+            out["corner_bug_text"] = raw_bug[:24]
+        raw_framing = str(inner.get("broll_framing") or "").strip().lower()
+        if raw_framing in ("pip", "full", "split"):
+            out["broll_framing"] = raw_framing
+        raw_headline = str(inner.get("chyron_headline") or "").strip()
+        if raw_headline:
+            out["chyron_headline"] = raw_headline[:64]
+        raw_backdrop = str(inner.get("backdrop_prompt") or "").strip()
+        if raw_backdrop:
+            out["backdrop_prompt"] = raw_backdrop[:220]
+        changed_keys = [
+            k for k in (
+                "accent_hex", "light", "blur_percent", "brightness_ev", "breaking_style",
+                "show_brand_bug", "corner_bug_text", "broll_framing", "chyron_headline", "backdrop_prompt",
+            )
+            if k in out
+        ]
+        if not changed_keys:
+            raise LlmProviderError(
+                "AI look tweak returned no recognized look fields.",
+                provider=res.provider,
+                stage="ai_assist",
+                model=res.model,
+                status_code=502,
+                error_code="llm_invalid_response",
+            )
+        summary = str(inner.get("summary") or "").strip()[:80]
+        out["summary"] = summary or ("updated " + ", ".join(changed_keys[:3]))
+        return out
 
     polished = str(inner.get("text") or "").strip()
     if not polished:

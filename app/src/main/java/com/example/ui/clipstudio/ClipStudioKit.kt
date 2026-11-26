@@ -45,7 +45,9 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -111,6 +113,8 @@ object Cs {
     val VoiceHi = Color(0xFFFF6B52)
     val Amber = Color(0xFFE6A100)
     val AmberBright = Color(0xFFFFB800)
+    val Cobalt = Color(0xFF3A86F2)
+    val Mint = Color(0xFF44D498)
     val RepairFill = Color(0xFF2E2310)
     val RepairHi = Color(0xFF6B5021)
 }
@@ -152,51 +156,108 @@ fun ndot(size: TextUnit, color: Color = Cs.Ink) = TextStyle(fontFamily = NdotFam
 val SectionLabelStyle = mono(11.sp, Cs.Muted, FontWeight.Medium, 0.06f)
 
 // =============================================================================
-// Soft neumorphic keys & sunken surfaces (v5)
+// Raised tactile hardware keys (v4 3D elevation + etched soft-neumorphic dock)
 // =============================================================================
 
-enum class KeyRole(val fill: Color, val hi: Color, val border: Color, val text: Color) {
-    STD(Cs.Raised, Color(0x0AFFFFFF), Color(0x09FFFFFF), Cs.Ink),
-    DOWN(Cs.Pressed, Color(0x09FFFFFF), Color(0x59000000), Cs.White),
-    COMMIT(Cs.Ink, Cs.White, Color(0x26FFFFFF), Cs.Black),
-    VOICE(Cs.Voice, Cs.VoiceHi, Color(0x33FF6B52), Cs.White),
-    REPAIR(Cs.RepairFill, Cs.RepairHi, Color(0x406B5021), Cs.AmberBright),
-    ACTIVE(Cs.Ink, Cs.White, Color(0x26FFFFFF), Cs.Black)
+enum class KeyRole(
+    val topFill: Color,
+    val fill: Color,
+    val hi: Color,
+    val border: Color,
+    val skirt: Color,
+    val text: Color
+) {
+    STD(
+        topFill = Color(0xFF2A2B32),
+        fill = Color(0xFF1F2026),
+        hi = Color(0xFF565864),
+        border = Color(0xFF17181D),
+        skirt = Color(0xFF0A0A0E),
+        text = Cs.Ink
+    ),
+    DOWN(
+        topFill = Color(0xFF16161B),
+        fill = Color(0xFF141418),
+        hi = Color(0x14FFFFFF),
+        border = Color(0x66000000),
+        skirt = Color(0xFF08080A),
+        text = Cs.White
+    ),
+    COMMIT(
+        topFill = Color(0xFF343742),
+        fill = Color(0xFF24262F),
+        hi = Color(0xFF7C8296),
+        border = Color(0xFF1B1D24),
+        skirt = Color(0xFF0A0B0F),
+        text = Cs.White
+    ),
+    VOICE(
+        topFill = Color(0xFFDF4822),
+        fill = Color(0xFFB33114),
+        hi = Color(0xFFFF906E),
+        border = Color(0xFF7D210C),
+        skirt = Color(0xFF4D1306),
+        text = Cs.White
+    ),
+    REPAIR(
+        topFill = Color(0xFF3E2F16),
+        fill = Color(0xFF2B200E),
+        hi = Color(0xFF9C7630),
+        border = Color(0xFF4A3818),
+        skirt = Color(0xFF140E05),
+        text = Cs.AmberBright
+    ),
+    ACTIVE(
+        topFill = Color(0xFF363842),
+        fill = Color(0xFF262830),
+        hi = Color(0xFF8A90A4),
+        border = Color(0xFF1E2027),
+        skirt = Color(0xFF0B0B0F),
+        text = Cs.White
+    )
 }
 
 fun Modifier.neumorphicSurface(
     role: KeyRole,
     pressed: Boolean = false,
-    radius: Dp = 14.dp,
+    radius: Dp = 12.dp,
     enabled: Boolean = true,
+    pip: Boolean = false,
     accentBarColor: Color? = null
 ): Modifier = drawBehind {
     val r = radius.toPx()
     val corner = CornerRadius(r, r)
     val isSunken = pressed || role == KeyRole.DOWN
     val effectiveRole = if (pressed && role == KeyRole.STD) KeyRole.DOWN else role
-    val fill = if (enabled) effectiveRole.fill else effectiveRole.fill.copy(alpha = 0.55f)
+    val skirtPx = if (isSunken) 0f else 3.dp.toPx()
+    val faceH = (size.height - skirtPx).coerceAtLeast(2f)
 
     if (!isSunken) {
-        // Outer top-left soft highlight & bottom-right ambient shadow
+        // Subtle outer soft elevation shadow + 3dp physical keycap lower skirt (v4 raised depth)
         drawRoundRect(
-            color = Color.White.copy(alpha = if (enabled) 0.04f else 0.015f),
-            topLeft = Offset((-1.5).dp.toPx(), (-1.5).dp.toPx()),
+            color = Color.Black.copy(alpha = if (enabled) 0.60f else 0.25f),
+            topLeft = Offset(1.dp.toPx(), 2.5.dp.toPx()),
             size = size,
             cornerRadius = corner
         )
         drawRoundRect(
-            color = Color.Black.copy(alpha = if (enabled) 0.55f else 0.25f),
-            topLeft = Offset(2.5.dp.toPx(), 3.5.dp.toPx()),
-            size = size,
+            color = if (enabled) effectiveRole.skirt else effectiveRole.skirt.copy(alpha = 0.55f),
+            topLeft = Offset(0f, 1.dp.toPx()),
+            size = Size(size.width, (size.height - 1.dp.toPx()).coerceAtLeast(1f)),
             cornerRadius = corner
         )
     }
 
-    drawRoundRect(color = fill, cornerRadius = corner)
+    val topCol = if (enabled) effectiveRole.topFill else effectiveRole.topFill.copy(alpha = 0.55f)
+    val botCol = if (enabled) effectiveRole.fill else effectiveRole.fill.copy(alpha = 0.55f)
+    drawRoundRect(
+        brush = Brush.verticalGradient(colors = listOf(topCol, botCol), startY = 0f, endY = faceH),
+        topLeft = Offset.Zero,
+        size = Size(size.width, faceH),
+        cornerRadius = corner
+    )
 
     if (isSunken) {
-        // Inner dark top-left & subtle bottom-right light rim
         val sw = 1.5.dp.toPx()
         drawRoundRect(
             color = Color.Black.copy(alpha = 0.65f),
@@ -206,40 +267,73 @@ fun Modifier.neumorphicSurface(
             style = Stroke(width = sw)
         )
         drawLine(
-            color = Color.White.copy(alpha = 0.035f),
+            color = Color.White.copy(alpha = 0.04f),
             start = Offset(r * 0.5f, size.height - 0.75.dp.toPx()),
             end = Offset((size.width - r * 0.5f).coerceAtLeast(r * 0.5f), size.height - 0.75.dp.toPx()),
             strokeWidth = 1.dp.toPx()
         )
     } else {
-        if (role == KeyRole.COMMIT || role == KeyRole.VOICE || role == KeyRole.REPAIR || role == KeyRole.ACTIVE) {
-            val inset = (r * 0.92f).coerceAtMost((size.width / 2f).coerceAtLeast(0f))
-            if (size.width - inset > inset) {
-                drawLine(
-                    color = if (enabled) effectiveRole.hi else effectiveRole.hi.copy(alpha = 0.35f),
-                    start = Offset(inset, 1.dp.toPx()),
-                    end = Offset(size.width - inset, 1.dp.toPx()),
-                    strokeWidth = 1.dp.toPx()
-                )
-            }
+        // Crisp top specular bevel highlight + machined perimeter stroke
+        val inset = (r * 0.75f).coerceAtMost((size.width / 2f).coerceAtLeast(0f))
+        if (size.width - inset > inset) {
+            drawLine(
+                color = if (enabled) effectiveRole.hi else effectiveRole.hi.copy(alpha = 0.30f),
+                start = Offset(inset, 1.dp.toPx()),
+                end = Offset(size.width - inset, 1.dp.toPx()),
+                strokeWidth = 1.dp.toPx()
+            )
         }
         drawRoundRect(
             color = effectiveRole.border,
+            topLeft = Offset.Zero,
+            size = Size(size.width, faceH),
             cornerRadius = corner,
             style = Stroke(width = 1.dp.toPx())
         )
+        if (pip && enabled) {
+            val ps = 3.dp.toPx()
+            val pIns = 5.5.dp.toPx()
+            drawRect(
+                color = Cs.Pip,
+                topLeft = Offset(size.width - pIns - ps, pIns),
+                size = Size(ps, ps)
+            )
+        }
     }
 
     if (accentBarColor != null) {
         val barW = 3.dp.toPx()
-        val vInset = (size.height * 0.24f).coerceAtLeast(6.dp.toPx())
+        val vInset = (faceH * 0.24f).coerceAtLeast(6.dp.toPx())
         drawRoundRect(
             color = accentBarColor,
             topLeft = Offset(4.dp.toPx(), vInset),
-            size = Size(barW, (size.height - 2f * vInset).coerceAtLeast(6f)),
+            size = Size(barW, (faceH - 2f * vInset).coerceAtLeast(6f)),
             cornerRadius = CornerRadius(barW / 2f, barW / 2f)
         )
     }
+}
+
+/** Small glowing hardware LED indicator dot (Nothing / TE tactile active state). */
+@Composable
+fun CsLedDot(
+    color: Color,
+    modifier: Modifier = Modifier,
+    size: Dp = 7.dp
+) {
+    Box(
+        modifier = modifier
+            .size(size)
+            .drawBehind {
+                val r = this.size.minDimension / 2f
+                drawCircle(color = color.copy(alpha = 0.35f), radius = r * 1.9f)
+                drawCircle(color = color, radius = r)
+                drawCircle(
+                    color = Color.White.copy(alpha = 0.85f),
+                    radius = r * 0.36f,
+                    center = Offset(center.x - r * 0.22f, center.y - r * 0.22f)
+                )
+            }
+    )
 }
 
 /** Sunken black panel (#000000, radius 18dp) for outlines, scripts, video monitors, and inputs. */
@@ -307,7 +401,7 @@ fun CsKey(
     Row(
         modifier = modifier
             .offset(y = if (pressed && enabled) 1.dp else 0.dp)
-            .neumorphicSurface(role = role, pressed = pressed && enabled, radius = radius, enabled = enabled)
+            .neumorphicSurface(role = role, pressed = pressed && enabled, radius = radius, enabled = enabled, pip = pip)
             .clip(RoundedCornerShape(radius))
             .clickable(
                 interactionSource = interaction,
@@ -398,7 +492,7 @@ fun CsIconKey(
     }
 }
 
-/** 44dp rounded pill (radius 22dp) with commit-style active fill (#EBEBEF on black). */
+/** 44dp raised hardware toggle keycap with glowing LED dot when active (zero harsh flat white slabs). */
 @Composable
 fun CsPill(
     label: String,
@@ -412,7 +506,8 @@ fun CsPill(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val role = if (selected) KeyRole.COMMIT else KeyRole.STD
+    val role = if (selected) KeyRole.ACTIVE else KeyRole.STD
+    val cornerRadius = 11.dp
     Row(
         modifier = modifier
             .height(height)
@@ -420,11 +515,11 @@ fun CsPill(
             .neumorphicSurface(
                 role = role,
                 pressed = pressed && enabled,
-                radius = height / 2,
+                radius = cornerRadius,
                 enabled = enabled,
-                accentBarColor = if (!selected) accentBarColor else null
+                pip = !selected
             )
-            .clip(RoundedCornerShape(height / 2))
+            .clip(RoundedCornerShape(cornerRadius))
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -432,25 +527,31 @@ fun CsPill(
                 role = Role.Button,
                 onClick = onClick
             )
-            .padding(
-                start = if (!selected && accentBarColor != null) 14.dp else 13.dp,
-                end = 14.dp
-            ),
+            .padding(horizontal = 13.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         val fg = if (!enabled) Cs.Dim else role.text
+        if (selected || accentBarColor != null) {
+            CsLedDot(
+                color = when {
+                    accentBarColor != null -> accentBarColor
+                    else -> Cs.Voice
+                },
+                size = 6.5.dp
+            )
+        }
         if (icon != null) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
                 tint = fg,
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier.size(17.dp)
             )
         }
         Text(
             text = label,
-            style = mono(13.sp, fg, if (selected) FontWeight.Medium else FontWeight.Normal),
+            style = mono(13.sp, fg, if (selected) FontWeight.SemiBold else FontWeight.Normal),
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis
@@ -458,7 +559,7 @@ fun CsPill(
     }
 }
 
-/** Sunken #101013 segmented track (radius 16dp, 5dp padding, 5dp gap). */
+/** Sunken #101013 segmented switch well (radius 14dp, 5dp padding, 6dp gap). */
 @Composable
 fun CsSegmentedRow(
     modifier: Modifier = Modifier,
@@ -467,15 +568,15 @@ fun CsSegmentedRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .sunkenPanel(radius = 16.dp, fill = Cs.SunkenTrack)
+            .sunkenPanel(radius = 14.dp, fill = Cs.SunkenTrack)
             .padding(5.dp),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
         content = content
     )
 }
 
-/** Individual segment inside [CsSegmentedRow]. Active segment is raised (#1C1C21); inactive is bare (#8E8E96). */
+/** Individual raised hardware segment inside [CsSegmentedRow]. Active shows elevated keycap + LED dot; inactive shows raised keycap + corner pip. */
 @Composable
 fun RowScope.CsSegment(
     selected: Boolean,
@@ -483,21 +584,25 @@ fun RowScope.CsSegment(
     modifier: Modifier = Modifier,
     height: Dp = 44.dp,
     enabled: Boolean = true,
+    ledColor: Color = Cs.Voice,
     content: @Composable RowScope.(Color) -> Unit
 ) {
     val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val role = if (selected) KeyRole.ACTIVE else KeyRole.STD
     Row(
         modifier = modifier
             .weight(1f)
             .height(height)
-            .then(
-                if (selected) {
-                    Modifier.neumorphicSurface(role = KeyRole.STD, radius = 12.dp, enabled = enabled)
-                } else {
-                    Modifier
-                }
+            .offset(y = if (pressed && enabled) 1.dp else 0.dp)
+            .neumorphicSurface(
+                role = role,
+                pressed = pressed && enabled,
+                radius = 10.dp,
+                enabled = enabled,
+                pip = !selected
             )
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(10.dp))
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -511,8 +616,11 @@ fun RowScope.CsSegment(
     ) {
         val tint = when {
             !enabled -> Cs.Dim
-            selected -> Cs.Ink
-            else -> Cs.Muted
+            selected -> Cs.White
+            else -> Cs.InkSub
+        }
+        if (selected && enabled) {
+            CsLedDot(color = ledColor, size = 6.dp)
         }
         content(tint)
     }
@@ -571,7 +679,10 @@ fun CsHoldKey(
     }
 }
 
-/** 92x64dp press-and-hold dock voice key (`mic` icon over 11sp mono label). */
+/**
+ * Horizontal `[Mic  HOLD]` soft-neumorphic extruded dock voice key (matching Ryan's uploaded reference):
+ * proportional mic icon on the left, short `HOLD` label on the right, inside an etched outer bezel frame.
+ */
 @Composable
 fun CsVoiceDockKey(
     label: String,
@@ -584,13 +695,13 @@ fun CsVoiceDockKey(
 ) {
     val press by rememberUpdatedState(onPress)
     val release by rememberUpdatedState(onRelease)
-    Column(
+    Row(
         modifier = modifier
-            .width(92.dp)
-            .height(64.dp)
+            .width(114.dp)
+            .height(66.dp)
             .offset(y = if (held) 1.dp else 0.dp)
-            .neumorphicSurface(role = KeyRole.VOICE, pressed = held, radius = 18.dp, enabled = enabled)
-            .clip(RoundedCornerShape(18.dp))
+            .neumorphicDockKey(role = KeyRole.VOICE, pressed = held, radius = 20.dp, enabled = enabled)
+            .clip(RoundedCornerShape(20.dp))
             .semantics(mergeDescendants = true) {
                 this.role = Role.Button
                 onClick(label = label) {
@@ -607,15 +718,15 @@ fun CsVoiceDockKey(
                     release()
                 }
             }
-            .padding(horizontal = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)
+            .padding(horizontal = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically
     ) {
         val fg = if (enabled) Cs.White else Cs.Dim
-        Icon(imageVector = icon, contentDescription = null, tint = fg, modifier = Modifier.size(24.dp))
+        Icon(imageVector = icon, contentDescription = null, tint = fg, modifier = Modifier.size(21.dp))
         Text(
             text = label,
-            style = mono(11.sp, fg),
+            style = mono(13.sp, fg, FontWeight.SemiBold),
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis
@@ -623,7 +734,7 @@ fun CsVoiceDockKey(
     }
 }
 
-/** 92x64dp secondary dock key (e.g. `pin`, `new idea`, `cancel`). */
+/** Secondary soft-neumorphic extruded dock key (e.g. `pin`, `new idea`, `cancel`, `Tweak w/ AI`). */
 @Composable
 fun CsDockSideKey(
     label: String,
@@ -631,48 +742,66 @@ fun CsDockSideKey(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     active: Boolean = false,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    horizontal: Boolean = false
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val role = if (active) KeyRole.DOWN else KeyRole.STD
-    Column(
-        modifier = modifier
-            .width(92.dp)
-            .height(64.dp)
-            .offset(y = if (pressed && enabled) 1.dp else 0.dp)
-            .neumorphicSurface(role = role, pressed = pressed && enabled, radius = 18.dp, enabled = enabled)
-            .clip(RoundedCornerShape(18.dp))
-            .clickable(
-                interactionSource = interaction,
-                indication = null,
-                enabled = enabled,
-                role = Role.Button,
-                onClick = onClick
-            )
-            .padding(horizontal = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)
-    ) {
-        val fg = when {
-            !enabled -> Cs.Dim
-            active -> Cs.White
-            else -> Cs.Ink
-        }
-        Icon(imageVector = icon, contentDescription = null, tint = fg, modifier = Modifier.size(22.dp))
-        Text(
-            text = label,
-            style = mono(11.sp, fg),
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis
+    val role = if (active) KeyRole.ACTIVE else KeyRole.STD
+    val fg = when {
+        !enabled -> Cs.Dim
+        active -> Cs.White
+        else -> Cs.Ink
+    }
+    val baseMod = modifier
+        .height(66.dp)
+        .offset(y = if (pressed && enabled) 1.dp else 0.dp)
+        .neumorphicDockKey(role = role, pressed = pressed && enabled, radius = 20.dp, enabled = enabled)
+        .clip(RoundedCornerShape(20.dp))
+        .clickable(
+            interactionSource = interaction,
+            indication = null,
+            enabled = enabled,
+            role = Role.Button,
+            onClick = onClick
         )
+
+    if (horizontal) {
+        Row(
+            modifier = baseMod.padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(imageVector = icon, contentDescription = null, tint = fg, modifier = Modifier.size(20.dp))
+            Text(
+                text = label,
+                style = mono(13.sp, fg, FontWeight.Medium),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    } else {
+        Column(
+            modifier = baseMod.width(100.dp).padding(horizontal = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)
+        ) {
+            Icon(imageVector = icon, contentDescription = null, tint = fg, modifier = Modifier.size(20.dp))
+            Text(
+                text = label,
+                style = mono(11.sp, fg, FontWeight.Medium),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 
 /**
- * Sunken 64dp progress box shown in place of the primary dock key while a real job runs.
- * Animates width linearly in 80ms (zero springs). Shows percentage only when a real fraction is known.
+ * Sunken 66dp progress box shown in place of the primary dock key while a real job runs.
+ * Displays the `libraries.dev/orbs` "solving" dotted sphere loader alongside the live status & real %.
  */
 @Composable
 fun CsBusyBox(
@@ -688,7 +817,7 @@ fun CsBusyBox(
     )
     Box(
         modifier = modifier
-            .height(64.dp)
+            .height(66.dp)
             .neumorphicSurface(role = KeyRole.DOWN, pressed = true, radius = 18.dp, enabled = true)
             .clip(RoundedCornerShape(18.dp))
             .testTag("cs_busy_box"),
@@ -705,10 +834,11 @@ fun CsBusyBox(
         Row(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 20.dp),
+                .padding(horizontal = 18.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            ThinkingOrbSolving(size = 24.dp, tint = Cs.White)
             Text(
                 text = label,
                 style = mono(14.sp, Cs.White, FontWeight.Medium),
@@ -728,8 +858,9 @@ fun CsBusyBox(
 }
 
 /**
- * Standard v5 bottom dock: at most two keys (optional 92x64 leading key + flex-1 64dp primary commit key),
- * replaced in place by [CsBusyBox] while a real job runs.
+ * Standard v5+ bottom dock using Ryan's soft-neumorphic extruded etched-frame style:
+ * dark satin-graphite primary key with bare trailing arrow/check (no harsh flat white slabs, no arrow circles),
+ * replaced in place by [CsBusyBox] (`ThinkingOrbSolving`) while a real job runs.
  */
 @Composable
 fun CsDock(
@@ -749,8 +880,8 @@ fun CsDock(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(start = 12.dp, top = 14.dp, end = 12.dp, bottom = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(start = 10.dp, top = 12.dp, end = 10.dp, bottom = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         leading?.invoke(this)
@@ -761,29 +892,52 @@ fun CsDock(
                 modifier = Modifier.weight(1f)
             )
         } else {
-            CsKey(
-                onClick = onPrimaryClick,
-                role = primaryRole,
-                enabled = primaryEnabled,
-                radius = 18.dp,
-                horizontalPadding = 20.dp,
-                contentAlignment = Arrangement.spacedBy(12.dp),
+            val interaction = remember { MutableInteractionSource() }
+            val pressed by interaction.collectIsPressedAsState()
+            val fg = if (primaryEnabled) primaryRole.text else Cs.Dim
+            val ledCol = when (primaryRole) {
+                KeyRole.REPAIR -> Cs.AmberBright
+                KeyRole.VOICE -> Cs.VoiceHi
+                else -> Cs.Mint
+            }
+            Row(
                 modifier = Modifier
                     .weight(1f)
-                    .height(64.dp)
-                    .testTag(primaryTag)
-            ) { tint ->
+                    .height(66.dp)
+                    .offset(y = if (pressed && primaryEnabled) 1.dp else 0.dp)
+                    .neumorphicDockKey(
+                        role = primaryRole,
+                        pressed = pressed && primaryEnabled,
+                        radius = 20.dp,
+                        enabled = primaryEnabled
+                    )
+                    .clip(RoundedCornerShape(20.dp))
+                    .clickable(
+                        interactionSource = interaction,
+                        indication = null,
+                        enabled = primaryEnabled,
+                        role = Role.Button,
+                        onClick = onPrimaryClick
+                    )
+                    .padding(horizontal = 20.dp)
+                    .testTag(primaryTag),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (primaryEnabled) {
+                    CsLedDot(color = ledCol, size = 7.dp)
+                }
                 if (primaryLeadingIcon != null) {
                     Icon(
                         imageVector = primaryLeadingIcon,
                         contentDescription = null,
-                        tint = tint,
-                        modifier = Modifier.size(24.dp)
+                        tint = fg,
+                        modifier = Modifier.size(22.dp)
                     )
                 }
                 Text(
                     text = primaryLabel,
-                    style = mono(15.sp, tint, FontWeight.Medium),
+                    style = mono(14.5.sp, fg, FontWeight.SemiBold),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
@@ -792,8 +946,8 @@ fun CsDock(
                     Icon(
                         imageVector = primaryTrailingIcon,
                         contentDescription = null,
-                        tint = tint,
-                        modifier = Modifier.size(24.dp)
+                        tint = fg,
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
@@ -872,7 +1026,7 @@ fun CsTopBar(
     }
 }
 
-/** Global 48dp #EBEBEF toast sitting 112dp above the bottom edge with an "ok" dismiss key. */
+/** Global 48dp raised toast sitting 112dp above the bottom edge with an "ok" dismiss key. */
 @Composable
 fun BoxScope.CsToastOverlay(
     message: String?,
@@ -886,8 +1040,9 @@ fun BoxScope.CsToastOverlay(
             .padding(start = 12.dp, end = 12.dp, bottom = 112.dp)
             .fillMaxWidth()
             .height(48.dp)
-            .neumorphicSurface(role = KeyRole.COMMIT, radius = 14.dp, enabled = true)
             .clip(RoundedCornerShape(14.dp))
+            .background(Cs.Ink)
+            .border(1.dp, Cs.White.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
             .padding(start = 16.dp, end = 6.dp)
             .testTag("cs_toast"),
         verticalAlignment = Alignment.CenterVertically,
@@ -1064,6 +1219,10 @@ fun CsStereoMeter(
     )
 }
 
+/**
+ * Restored v4 old-school analog radio/camera drag tick ruler with glowing red needle!
+ * Supports smooth horizontal drag scrubbing plus left/right tap stepping (`${tag}_dec` / `${tag}_inc`).
+ */
 @Composable
 fun CsTickRuler(
     label: String,
@@ -1076,14 +1235,65 @@ fun CsTickRuler(
 ) {
     var accumPx by remember { mutableFloatStateOf(0f) }
     val latestStep by rememberUpdatedState(onStep)
+    val clampedNorm = normalizedValue.coerceIn(0f, 1f)
 
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(56.dp)
-            .background(Cs.Surface)
-            .hairlineTop()
-            .hairlineBottom()
+            .height(60.dp)
+            .sunkenPanel(radius = 12.dp, fill = Cs.SunkenTrack)
+            .drawBehind {
+                val padX = 14.dp.toPx()
+                val tx0 = padX
+                val tx1 = (size.width - padX).coerceAtLeast(tx0 + 1f)
+                val baseY = size.height - 5.dp.toPx()
+                val totalTicks = 40
+                for (i in 0..totalTicks) {
+                    val x = tx0 + (tx1 - tx0) * (i.toFloat() / totalTicks.toFloat())
+                    val isCenter = i == totalTicks / 2
+                    val isMajor = i % 5 == 0
+                    val tickH = when {
+                        isCenter -> 15.dp.toPx()
+                        isMajor -> 11.dp.toPx()
+                        else -> 6.dp.toPx()
+                    }
+                    val tickCol = when {
+                        !enabled -> Cs.Dim.copy(alpha = 0.5f)
+                        isCenter -> Cs.Ink
+                        isMajor -> Cs.Muted
+                        else -> Cs.Hairline
+                    }
+                    drawLine(
+                        color = tickCol,
+                        start = Offset(x, baseY - tickH),
+                        end = Offset(x, baseY),
+                        strokeWidth = if (isCenter || isMajor) 1.5.dp.toPx() else 1.dp.toPx()
+                    )
+                }
+                // Glowing red analog needle + top pointer triangle at normalizedValue!
+                val nx = tx0 + (tx1 - tx0) * clampedNorm
+                val needleCol = if (enabled) Cs.Red else Cs.Dim
+                if (enabled) {
+                    drawRect(
+                        color = Cs.Red.copy(alpha = 0.28f),
+                        topLeft = Offset(nx - 4.5.dp.toPx(), baseY - 22.dp.toPx()),
+                        size = Size(9.dp.toPx(), 23.dp.toPx())
+                    )
+                }
+                drawLine(
+                    color = needleCol,
+                    start = Offset(nx, baseY - 21.dp.toPx()),
+                    end = Offset(nx, baseY + 1.dp.toPx()),
+                    strokeWidth = 2.5.dp.toPx()
+                )
+                val tri = Path().apply {
+                    moveTo(nx, baseY - 19.dp.toPx())
+                    lineTo(nx - 4.dp.toPx(), baseY - 25.dp.toPx())
+                    lineTo(nx + 4.dp.toPx(), baseY - 25.dp.toPx())
+                    close()
+                }
+                drawPath(path = tri, color = needleCol)
+            }
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 detectHorizontalDragGestures(
@@ -1122,14 +1332,14 @@ fun CsTickRuler(
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 14.dp, vertical = 7.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(label, style = SectionLabelStyle, maxLines = 1)
             Text(
                 valueText,
-                style = mono(13.sp, if (enabled) Cs.Ink else Cs.Dim, FontWeight.Medium),
+                style = mono(13.sp, if (enabled) Cs.White else Cs.Dim, FontWeight.SemiBold),
                 maxLines = 1,
                 modifier = Modifier.testTag("${tag}_value")
             )

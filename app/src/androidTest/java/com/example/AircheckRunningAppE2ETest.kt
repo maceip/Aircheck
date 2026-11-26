@@ -469,28 +469,39 @@ class AircheckRunningAppE2ETest {
         )
         composeRule.onNodeWithTag("cs_look_plate").assertIsDisplayed()
 
-        // Scroll back up to BLUR / BRIGHTNESS / LIGHT, step values, and capture clean unclipped screenshot
+        // Scroll back up to ACCENT / BLUR / BRIGHTNESS / LIGHT, step values, and capture clean unclipped screenshot
+        composeRule.onNodeWithTag("cs_accent_cobalt").performScrollTo().performClick()
         composeRule.onNodeWithTag("cs_scrub_blur_inc").performScrollTo().performClick()
         composeRule.onNodeWithTag("cs_scrub_blur_inc").performClick()
         composeRule.onNodeWithTag("cs_scrub_ev_inc").performScrollTo().performClick()
         composeRule.onNodeWithTag("cs_light_warm").performScrollTo().performClick()
-        composeRule.onNodeWithTag("cs_scrub_blur").performScrollTo()
+        composeRule.onNodeWithTag("cs_accent_crimson").performScrollTo()
         Thread.sleep(900L)
         composeRule.waitForIdle()
         captureScreenshot(screenshotDir, "09_video_look_background_v5.png")
 
-        // Switch to `title` (`cs_newsroom_tab_1`) -> edit title + AI refresh + tag pills
+        // Switch to `Style` (`cs_newsroom_tab_1`) -> toggle Top-Left News Logo Bug + edit bug text + edit title + AI refresh + tag pills
         composeRule.onNodeWithTag("cs_newsroom_tab_1").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
-            composeRule.onAllNodesWithTag("cs_title_input").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithTag("cs_bug_input").fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onNodeWithTag("cs_title_input").performTextReplacement("Monthly editing subscriptions are over")
+        composeRule.onNodeWithTag("cs_bug_toggle").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            persistedSession().renderOptions.showBrandBug
+        }
+        composeRule.onNodeWithTag("cs_bug_input").performTextReplacement("AIRCHECK LIVE")
+        Espresso.closeSoftKeyboard()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            persistedSession().renderOptions.cornerBugText == "AIRCHECK LIVE"
+        }
+
+        composeRule.onNodeWithTag("cs_title_input").performScrollTo().performTextReplacement("Monthly editing subscriptions are over")
         Espresso.closeSoftKeyboard()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             persistedSession().renderOptions.chyronHeadline == "Monthly editing subscriptions are over"
         }
 
-        composeRule.onNodeWithTag("cs_title_refresh").performClick()
+        composeRule.onNodeWithTag("cs_title_refresh").performScrollTo().performClick()
         composeRule.waitUntil(timeoutMillis = 90_000L) {
             !studioVm.uiState.value.isRefreshingHeadline &&
                 studioVm.uiState.value.toastMessage == "title refreshed"
@@ -508,7 +519,7 @@ class AircheckRunningAppE2ETest {
         }
         captureScreenshot(screenshotDir, "10_video_look_title_v5.png")
 
-        // Switch to `cards` (`cs_newsroom_tab_2`) -> verify clean attached quote card copy & toggle off/on
+        // Switch to `Cards` (`cs_newsroom_tab_2`) -> verify clean attached quote card copy, inline edit, & toggle off/on
         composeRule.onNodeWithTag("cs_newsroom_tab_2").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             composeRule.onAllNodesWithTag("cs_cards_summary").fetchSemanticsNodes().isNotEmpty()
@@ -519,6 +530,17 @@ class AircheckRunningAppE2ETest {
             "Card summary must not contain raw 'Text card reading:' prefix",
             composeRule.onAllNodesWithText("Text card reading", substring = true).fetchSemanticsNodes().isEmpty()
         )
+        // Edit quote card inline & verify Room persistence
+        composeRule.onNodeWithTag("cs_overlay_edit_${seededQuoteCard.id}").performScrollTo().performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodesWithTag("cs_card_headline_field_${seededQuoteCard.id}").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("cs_card_headline_field_${seededQuoteCard.id}").performTextReplacement("Own the silicon once")
+        Espresso.closeSoftKeyboard()
+        composeRule.onNodeWithTag("cs_card_save_${seededQuoteCard.id}").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            studioVm.uiState.value.savedOverlays.firstOrNull { it.id == seededQuoteCard.id }?.headline == "Own the silicon once"
+        }
         captureScreenshot(screenshotDir, "11_video_look_cards_v5.png")
 
         // Toggle saved card off -> "0 cards attached", then toggle back on -> "1 quote card attached"
@@ -530,6 +552,39 @@ class AircheckRunningAppE2ETest {
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             composeRule.onAllNodesWithText("1 quote card attached").fetchSemanticsNodes().isNotEmpty()
         }
+
+        // Switch to `B-Roll` (`cs_newsroom_tab_3`) -> toggle Full Cut & Split 50/50 framing
+        composeRule.onNodeWithTag("cs_newsroom_tab_3").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodesWithTag("cs_broll_framing_full").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("cs_broll_framing_full").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            persistedSession().renderOptions.brollFraming == CoreRenderOptions.BROLL_FRAMING_FULL
+        }
+        composeRule.onNodeWithTag("cs_broll_framing_split").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            persistedSession().renderOptions.brollFraming == CoreRenderOptions.BROLL_FRAMING_SPLIT
+        }
+        captureScreenshot(screenshotDir, "11b_video_look_broll_v5.png")
+
+        // Tap `Tweak AI` (`cs_tweak_ai_button`) -> exercise live POST /v1/ai-assist (mode=tweak_video_look)
+        composeRule.onNodeWithTag("cs_tweak_ai_button").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodesWithTag("cs_ai_tweak_sheet").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("cs_ai_tweak_input").performTextReplacement(
+            "Use cobalt blue accent, keep warm lighting, set blur to 10% and brightness +0.2 EV, and keep top-left logo AIRCHECK LIVE"
+        )
+        Espresso.closeSoftKeyboard()
+        captureScreenshot(screenshotDir, "11c_video_look_tweak_ai_sheet.png")
+        composeRule.onNodeWithTag("cs_ai_tweak_submit").performClick()
+        composeRule.waitUntil(timeoutMillis = 90_000L) {
+            !studioVm.uiState.value.isTweakingLook &&
+                composeRule.onAllNodesWithTag("cs_toast").fetchSemanticsNodes().isNotEmpty()
+        }
+        assertNull("Tweak AI must succeed without error", studioVm.uiState.value.errorMessage)
+        dismissToastIfPresent()
 
         // Tap "use this look" -> returns to 03 CUT with persisted default look + v5 toast
         composeRule.onNodeWithTag("cs_use_look").performClick()
@@ -546,6 +601,7 @@ class AircheckRunningAppE2ETest {
         assertEquals(10, persistedLook.blurPercent)
         assertEquals(0.2, persistedLook.brightnessEv, 1e-6)
         assertEquals(NewsroomLook.LIGHT_WARM, persistedLook.light)
+        assertEquals(NewsroomLook.ACCENT_COBALT, persistedLook.accentHex)
 
         dismissToastIfPresent()
 

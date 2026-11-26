@@ -40,8 +40,23 @@ COOL_TEMPERATURE_K = 7800
 GRAIN_STRENGTH = 10
 LOOK_LIGHT_VALUES = ("warm", "cool", "neutral")
 BREAKING_STYLE_VALUES = ("breaking", "developing", "exclusive", "alert_stat", "clean")
+BROLL_FRAMING_VALUES = ("pip", "full", "split")
+DEFAULT_ACCENT_HEX = "#D71921"
 ASPECT_SIZES: dict[str, tuple[int, int]] = {"9:16": (720, 1280), "16:9": (1280, 720)}
 ASPECT_SIZES_1080P: dict[str, tuple[int, int]] = {"9:16": (1080, 1920), "16:9": (1920, 1080)}
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def _hex_to_rgba(hex_str: str | None) -> tuple[int, int, int, int] | None:
+    raw = str(hex_str or "").strip()
+    if not _HEX_COLOR_RE.match(raw):
+        return None
+    return (int(raw[1:3], 16), int(raw[3:5], 16), int(raw[5:7], 16), 255)
+
+
+def _contrast_fg(rgba: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    luma = 0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2]
+    return (10, 11, 14, 255) if luma >= 155.0 else (255, 255, 255, 255)
 
 
 def _probe_video_dims(mp4_path: Path) -> tuple[int, int]:
@@ -84,6 +99,7 @@ class StudioLook:
     blur_percent: int = 0
     brightness_ev: float = 0.0
     light: str = "neutral"
+    accent_hex: str = DEFAULT_ACCENT_HEX
     grain: bool = False
     border: bool = False
 
@@ -110,11 +126,15 @@ class StudioLook:
         light = str(raw.get("light") or "neutral").strip().lower()
         if light not in LOOK_LIGHT_VALUES:
             raise ValueError(f"look.light must be one of {LOOK_LIGHT_VALUES}")
+        raw_accent = str(raw.get("accent_hex") or DEFAULT_ACCENT_HEX).strip().upper()
+        if not _HEX_COLOR_RE.match(raw_accent):
+            raise ValueError(f"look.accent_hex must be #RRGGBB, got {raw_accent!r}")
         return StudioLook(
             plate_id=plate_id,
             blur_percent=blur,
             brightness_ev=round(ev, 2),
             light=light,
+            accent_hex=raw_accent,
             grain=bool(raw.get("grain", False)),
             border=bool(raw.get("border", False)),
         )
@@ -129,7 +149,9 @@ class StudioRenderOptions:
     breaking_style: str = "breaking"
     chyron_headline: str = ""
     chyron_subline: str = ""
+    show_brand_bug: bool | None = None
     corner_bug_text: str = "LIVE"
+    broll_framing: str = "pip"
     look: StudioLook = field(default_factory=StudioLook)
 
     @staticmethod
@@ -144,6 +166,11 @@ class StudioRenderOptions:
         bstyle = str(raw.get("breaking_style") or "breaking").strip().lower()
         if bstyle not in BREAKING_STYLE_VALUES:
             bstyle = "breaking"
+        framing = str(raw.get("broll_framing") or "pip").strip().lower()
+        if framing not in BROLL_FRAMING_VALUES:
+            raise ValueError(f"render_options.broll_framing must be one of {BROLL_FRAMING_VALUES}")
+        raw_show_bug = raw.get("show_brand_bug")
+        show_bug: bool | None = bool(raw_show_bug) if raw_show_bug is not None else None
         return StudioRenderOptions(
             strip_silence=bool(raw.get("strip_silence", False)),
             punch_in=bool(raw.get("punch_in", False)),
@@ -152,7 +179,9 @@ class StudioRenderOptions:
             breaking_style=bstyle,
             chyron_headline=str(raw.get("chyron_headline") or "").strip()[:64],
             chyron_subline=str(raw.get("chyron_subline") or "").strip()[:80],
+            show_brand_bug=show_bug,
             corner_bug_text=str(raw.get("corner_bug_text") or "LIVE").strip()[:28] or "LIVE",
+            broll_framing=framing,
             look=StudioLook.from_payload(raw.get("look")),
         )
 
@@ -611,10 +640,24 @@ def compose_studio_cut(
     punch_windows: list[tuple[float, float]] = []
     talking_head_seen = 0
 
-    _, _, _, active_accent = _breaking_palette(options.breaking_style)
+    _, _, _, base_accent = _breaking_palette(options.breaking_style)
+    custom_accent = _hex_to_rgba(options.look.accent_hex)
+    has_custom_accent = custom_accent is not None and options.look.accent_hex.upper() != DEFAULT_ACCENT_HEX
+    active_accent = custom_accent if (has_custom_accent and options.breaking_style != "clean") else base_accent
+    framing = options.broll_framing if options.broll_framing in BROLL_FRAMING_VALUES else "pip"
+    use_presenter_pip = framing in ("pip", "split")
 
-    # Corner talking-head PiP dimensions (top-right broadcast inset during B-roll cutaways)
-    if width < height:
+    # Presenter PiP / Split dimensions during B-roll cutaways
+    if framing == "split":
+        if width < height:
+            pip_w, pip_h = width, height - (height // 2)
+            pip_h -= pip_h % 2
+            pip_x, pip_y = 0, height - pip_h
+        else:
+            pip_w, pip_h = width - (width // 2), height
+            pip_w -= pip_w % 2
+            pip_x, pip_y = width - pip_w, 0
+    elif width < height:
         pip_w = int(round(236 * scale))
         pip_h = int(round(316 * scale))
         pip_w -= pip_w % 2
@@ -638,7 +681,17 @@ def compose_studio_cut(
             png = work_dir / f"broll_plate_{idx}.png"
             img = Image.new("RGBA", (width, height), (10, 12, 18, 244))
             draw = ImageDraw.Draw(img)
-            if width < height:
+            if framing == "split":
+                if width < height:
+                    box = (int(width * 0.045), int(height * 0.10), int(width * 0.955), int(height * 0.46))
+                else:
+                    box = (int(width * 0.03), int(height * 0.14), int(width * 0.47), int(height * 0.72))
+            elif framing == "full":
+                if width < height:
+                    box = (int(width * 0.045), int(height * 0.16), int(width * 0.955), int(height * 0.72))
+                else:
+                    box = (int(width * 0.045), int(height * 0.14), int(width * 0.955), int(height * 0.72))
+            elif width < height:
                 box = (int(width * 0.045), int(height * 0.31), int(width * 0.955), int(height * 0.69))
             else:
                 box = (int(width * 0.045), int(height * 0.14), int(width * 0.67), int(height * 0.68))
@@ -653,14 +706,20 @@ def compose_studio_cut(
                     font=f_title,
                     fill=(244, 246, 250, 255),
                 )
-            # Crisp broadcast frame around top-right live talking-head PiP window
-            draw.rounded_rectangle(
-                [(pip_x - 3, pip_y - 3), (pip_x + pip_w + 3, pip_y + pip_h + 3)],
-                radius=int(10 * scale),
-                fill=(0, 0, 0, 0),
-                outline=active_accent,
-                width=3,
-            )
+            if framing == "pip":
+                # Crisp broadcast frame around top-right live talking-head PiP window
+                draw.rounded_rectangle(
+                    [(pip_x - 3, pip_y - 3), (pip_x + pip_w + 3, pip_y + pip_h + 3)],
+                    radius=int(10 * scale),
+                    fill=(0, 0, 0, 0),
+                    outline=active_accent,
+                    width=3,
+                )
+            elif framing == "split":
+                if width < height:
+                    draw.rectangle([(0, pip_y - 3), (width, pip_y)], fill=active_accent)
+                else:
+                    draw.rectangle([(pip_x - 3, 0), (pip_x, height)], fill=active_accent)
             img.save(png)
             timed_pngs.append((png, start_s, end_s))
             broll_windows.append((start_s, end_s))
@@ -697,22 +756,31 @@ def compose_studio_cut(
                 timed_pngs.append((png, start_s, end_s))
                 caption_count += 1
 
-    # Top-left LIVE tally bug when breaking style is active and broadcast packaging/overlays are attached
-    if options.breaking_style != "clean" and (valid_overlays or options.chyron_headline):
+    # Top-left LIVE / News Logo Bug
+    should_draw_bug = (
+        options.show_brand_bug is True
+        or (options.show_brand_bug is None and options.breaking_style != "clean" and bool(valid_overlays or options.chyron_headline))
+    )
+    if should_draw_bug:
         live_png = work_dir / "live_bug.png"
         img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         bug_x = int(width * 0.045)
         bug_y = int(height * 0.042)
         bug_h = int(38 * scale)
-        live_w = int(106 * scale)
-        draw.rounded_rectangle([(bug_x, bug_y), (bug_x + live_w, bug_y + bug_h)], radius=int(6 * scale), fill=(215, 25, 33, 248))
-        dot_r = int(5 * scale)
-        dot_cy = bug_y + bug_h // 2
-        draw.ellipse([(bug_x + int(14 * scale) - dot_r, dot_cy - dot_r), (bug_x + int(14 * scale) + dot_r, dot_cy + dot_r)], fill=(255, 255, 255, 255))
-        draw.text((bug_x + int(26 * scale), bug_y + int(8 * scale)), "LIVE", font=f_tag, fill=(255, 255, 255, 255))
         desk_label = options.corner_bug_text.upper() if options.corner_bug_text.upper() != "LIVE" else "AIRCHECK DESK"
-        desk_x = bug_x + live_w + int(8 * scale)
+        if options.breaking_style != "clean":
+            live_w = int(106 * scale)
+            bug_bg = active_accent if has_custom_accent else (215, 25, 33, 248)
+            bug_fg = _contrast_fg(bug_bg)
+            draw.rounded_rectangle([(bug_x, bug_y), (bug_x + live_w, bug_y + bug_h)], radius=int(6 * scale), fill=bug_bg)
+            dot_r = int(5 * scale)
+            dot_cy = bug_y + bug_h // 2
+            draw.ellipse([(bug_x + int(14 * scale) - dot_r, dot_cy - dot_r), (bug_x + int(14 * scale) + dot_r, dot_cy + dot_r)], fill=bug_fg)
+            draw.text((bug_x + int(26 * scale), bug_y + int(8 * scale)), "LIVE", font=f_tag, fill=bug_fg)
+            desk_x = bug_x + live_w + int(8 * scale)
+        else:
+            desk_x = bug_x
         desk_w = int((len(desk_label) * 12.5 + 28) * scale)
         draw.rounded_rectangle(
             [(desk_x, bug_y), (desk_x + desk_w, bug_y + bug_h)],
@@ -733,6 +801,8 @@ def compose_studio_cut(
         dur_sec = max(2, min(20, int(ovl.get("duration_sec") or 5)))
         ovl_style = str(ovl.get("breaking_style") or options.breaking_style or "breaking")
         _, _, _, ovl_accent = _breaking_palette(ovl_style)
+        if has_custom_accent and custom_accent is not None and ovl_style != "clean":
+            ovl_accent = custom_accent
         slot_span = total_s / max(1, len(quote_overlays))
         start_s = min(idx * slot_span + 0.35, max(0.0, total_s - 0.5))
         end_s = min(total_s, min((idx + 1) * slot_span, start_s + float(dur_sec)))
@@ -782,6 +852,11 @@ def compose_studio_cut(
         dur_sec = max(2, min(30, int(ovl.get("duration_sec") or 5)))
         ovl_style = str(ovl.get("breaking_style") or options.breaking_style or "breaking")
         kicker_lbl, kicker_bg, kicker_fg, ovl_accent = _breaking_palette(ovl_style)
+        if has_custom_accent and custom_accent is not None and ovl_style != "clean":
+            ovl_accent = custom_accent
+            if kicker_bg is not None:
+                kicker_bg = custom_accent
+                kicker_fg = _contrast_fg(custom_accent)
         slot_span = total_s / max(1, len(lower_overlays))
         start_s = idx * slot_span
         end_s = min(total_s, max(start_s + float(dur_sec), min((idx + 1) * slot_span, start_s + float(dur_sec) + 2.0)))
@@ -858,7 +933,7 @@ def compose_studio_cut(
         frame_w, frame_h = width, height
 
     base_fit = f"scale={frame_w}:{frame_h}:force_original_aspect_ratio=increase,crop={frame_w}:{frame_h},fps=30"
-    if broll_windows:
+    if broll_windows and use_presenter_pip:
         if punch_windows:
             zw = int(round(frame_w * PUNCH_IN_SCALE))
             zh = int(round(frame_h * PUNCH_IN_SCALE))
@@ -912,7 +987,7 @@ def compose_studio_cut(
             f"[v{i}][{in_idx}:v]overlay=0:0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[v{i + 1}]"
         )
     graded = f"v{len(timed_pngs)}"
-    if broll_windows:
+    if broll_windows and use_presenter_pip:
         parts.append(
             f"[{graded}][vpip]overlay={pip_x}:{pip_y}:shortest=1:enable='{_between(broll_windows)}'[v_with_pip]"
         )

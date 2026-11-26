@@ -11,7 +11,7 @@ import type { Storage as StorageClient } from "@google-cloud/storage";
 import { bundle } from "@remotion/bundler";
 import { renderMedia, selectComposition } from "@remotion/renderer";
 import { VERSION as REMOTION_VERSION } from "remotion/version";
-import { AlignedWord, BeatSpec, BreakingStyle, OverlayItemSpec, PackagingSpec, compileTimeline } from "./timeline";
+import { AlignedWord, BeatSpec, BreakingStyle, BrollFraming, OverlayItemSpec, PackagingSpec, compileTimeline } from "./timeline";
 
 const execFileAsync = promisify(execFile);
 
@@ -316,6 +316,8 @@ const VALID_BREAKING_STYLES = new Set<BreakingStyle>([
   "alert_stat",
   "clean",
 ]);
+const VALID_BROLL_FRAMINGS = new Set<BrollFraming>(["pip", "full", "split"]);
+const HEX_ACCENT_RE = /^#[0-9A-Fa-f]{6}$/;
 
 function validatePackaging(rawPackaging: unknown): PackagingSpec {
   if (rawPackaging === undefined) {
@@ -325,6 +327,7 @@ function validatePackaging(rawPackaging: unknown): PackagingSpec {
       cornerBugText: "LIVE",
       showBrandBug: true,
       breakingStyle: "breaking",
+      brollFraming: "pip",
     };
   }
   if (!rawPackaging || typeof rawPackaging !== "object" || Array.isArray(rawPackaging)) {
@@ -348,6 +351,20 @@ function validatePackaging(rawPackaging: unknown): PackagingSpec {
       throw new HttpError(400, "inputProps.packaging.breakingStyle is invalid");
     }
     breakingStyle = p.breakingStyle as BreakingStyle;
+  }
+  let accentHex: string | undefined;
+  if (p.accentHex !== undefined) {
+    if (typeof p.accentHex !== "string" || !HEX_ACCENT_RE.test(p.accentHex.trim())) {
+      throw new HttpError(400, "inputProps.packaging.accentHex must be #RRGGBB");
+    }
+    accentHex = p.accentHex.trim().toUpperCase();
+  }
+  let brollFraming: BrollFraming = "pip";
+  if (p.brollFraming !== undefined) {
+    if (typeof p.brollFraming !== "string" || !VALID_BROLL_FRAMINGS.has(p.brollFraming as BrollFraming)) {
+      throw new HttpError(400, 'inputProps.packaging.brollFraming must be "pip", "full", or "split"');
+    }
+    brollFraming = p.brollFraming as BrollFraming;
   }
   let overlays: OverlayItemSpec[] | undefined;
   if (p.overlays !== undefined) {
@@ -384,6 +401,8 @@ function validatePackaging(rawPackaging: unknown): PackagingSpec {
     cornerBugText: (p.cornerBugText as string | undefined) ?? "LIVE",
     showBrandBug: (p.showBrandBug as boolean | undefined) ?? true,
     breakingStyle,
+    accentHex,
+    brollFraming,
     overlays,
     templateId: p.templateId as "Newsroom916" | "Explainer169" | undefined,
   };

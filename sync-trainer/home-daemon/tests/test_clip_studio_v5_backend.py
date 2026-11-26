@@ -738,6 +738,84 @@ class TestClipStudioV5Backend(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
 
+    def test_ai_assist_tweak_video_look_validates_and_returns_look_fields(self) -> None:
+        from ota_server import _run_ai_assist
+
+        class _FakeLlmRes:
+            def __init__(self, text: str) -> None:
+                self.text = text
+                self.provider = "test_provider"
+                self.model = "test_model"
+                self.llm_meta = {"provider": "test_provider", "model": "test_model"}
+
+        class _FakeRouter:
+            def __init__(self, response_text: str) -> None:
+                self.response_text = response_text
+                self.last_prompt = ""
+
+            def complete(self, stage: str, system_prompt: str, user_prompt: str, **_kwargs: Any) -> _FakeLlmRes:
+                self.last_prompt = user_prompt
+                return _FakeLlmRes(self.response_text)
+
+        router = _FakeRouter(
+            json.dumps(
+                {
+                    "accent_hex": "#3a86f2",
+                    "light": "cool",
+                    "blur_percent": 35,
+                    "brightness_ev": 0.4,
+                    "breaking_style": "developing",
+                    "show_brand_bug": True,
+                    "corner_bug_text": "TECH DESK",
+                    "broll_framing": "split",
+                    "chyron_headline": "GRID ALERT",
+                    "summary": "cobalt accent, cool light, split B-roll",
+                }
+            )
+        )
+        res = _run_ai_assist(
+            {
+                "mode": "tweak_video_look",
+                "text": "Make it cobalt blue, cool lighting, split-screen B-roll, and show TECH DESK logo",
+                "context": "Grid capacity story",
+                "current_look": {"accent_hex": "#D71921", "light": "neutral"},
+            },
+            llm_router=router,
+        )
+        self.assertEqual(res["mode"], "tweak_video_look")
+        self.assertEqual(res["accent_hex"], "#3A86F2")
+        self.assertEqual(res["light"], "cool")
+        self.assertEqual(res["blur_percent"], 35)
+        self.assertEqual(res["brightness_ev"], 0.4)
+        self.assertEqual(res["breaking_style"], "developing")
+        self.assertIs(res["show_brand_bug"], True)
+        self.assertEqual(res["corner_bug_text"], "TECH DESK")
+        self.assertEqual(res["broll_framing"], "split")
+        self.assertEqual(res["chyron_headline"], "GRID ALERT")
+        self.assertIn("cobalt", res["summary"])
+
+    def test_studio_render_options_accepts_accent_hex_brand_bug_and_broll_framing(self) -> None:
+        import studio_cut
+
+        opts = studio_cut.StudioRenderOptions.from_payload(
+            {
+                "aspect": "9:16",
+                "show_brand_bug": True,
+                "corner_bug_text": "DESK 7",
+                "broll_framing": "full",
+                "look": {"accent_hex": "#44d498", "blur_percent": 20, "brightness_ev": -0.2, "light": "warm"},
+            }
+        )
+        self.assertIs(opts.show_brand_bug, True)
+        self.assertEqual(opts.corner_bug_text, "DESK 7")
+        self.assertEqual(opts.broll_framing, "full")
+        self.assertEqual(opts.look.accent_hex, "#44D498")
+
+        with self.assertRaises(ValueError):
+            studio_cut.StudioLook.from_payload({"accent_hex": "blue"})
+        with self.assertRaises(ValueError):
+            studio_cut.StudioRenderOptions.from_payload({"broll_framing": "picture_only"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,16 +33,15 @@ import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.sharp.ArrowForward
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.sharp.Add
 import androidx.compose.material.icons.sharp.Anchor
-import androidx.compose.material.icons.sharp.AutoAwesome
 import androidx.compose.material.icons.sharp.Check
 import androidx.compose.material.icons.sharp.Close
 import androidx.compose.material.icons.sharp.Edit
 import androidx.compose.material.icons.sharp.ExpandLess
 import androidx.compose.material.icons.sharp.ExpandMore
 import androidx.compose.material.icons.sharp.Forum
-import androidx.compose.material.icons.sharp.HourglassEmpty
 import androidx.compose.material.icons.sharp.Keyboard
 import androidx.compose.material.icons.sharp.Layers
 import androidx.compose.material.icons.sharp.Mic
@@ -217,14 +216,10 @@ fun SparkScreen(
                 message = state.toastMessage,
                 onDismiss = vm::dismissToast
             )
-            if (state.isAnyRecording) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .border(2.dp, Cs.Red)
-                        .testTag("cs_recording_border")
-                )
-            }
+            VoiceGlowDitherOverlay(
+                active = state.isAnyRecording,
+                level = state.liveRmsLevel
+            )
         }
     }
 }
@@ -390,7 +385,7 @@ private fun SeedRecordHeroKey(
     val release by rememberUpdatedState(onRelease)
 
     if (isBusy) {
-        Box(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(76.dp)
@@ -398,8 +393,10 @@ private fun SeedRecordHeroKey(
                 .clip(RoundedCornerShape(20.dp))
                 .padding(horizontal = 20.dp)
                 .testTag("cs_seed_hold_record"),
-            contentAlignment = Alignment.CenterStart
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            ThinkingOrbSolving(size = 28.dp, tint = Cs.White)
             Text(
                 text = busyLabel ?: "outlining your idea…",
                 style = mono(15.sp, Cs.White, FontWeight.Bold),
@@ -416,10 +413,10 @@ private fun SeedRecordHeroKey(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(76.dp)
+            .height(80.dp)
             .offset(y = if (isRecording) 1.dp else 0.dp)
-            .neumorphicSurface(role = KeyRole.VOICE, pressed = isRecording, radius = 20.dp, enabled = enabled)
-            .clip(RoundedCornerShape(20.dp))
+            .neumorphicDockKey(role = KeyRole.VOICE, pressed = isRecording, radius = 22.dp, enabled = enabled)
+            .clip(RoundedCornerShape(22.dp))
             .semantics(mergeDescendants = true) {
                 this.role = Role.Button
                 onClick(label = mainLabel) {
@@ -446,7 +443,7 @@ private fun SeedRecordHeroKey(
             imageVector = Icons.Sharp.Mic,
             contentDescription = null,
             tint = fg,
-            modifier = Modifier.size(34.dp)
+            modifier = Modifier.size(28.dp)
         )
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
@@ -701,23 +698,28 @@ private fun SparkOutlineContent(
             )
         }
 
-        // Sunken #000 4-beat Outline Panel
+        // Segmented 4-beat Outline Panel — each beat has the libraries.dev/beam border beam effect
+        // and keeps the clean v5 row layout (no heavy label cards) with flat unfilled sparkle icons.
         Column(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp)
-                .sunkenPanel(radius = 18.dp)
-                .testTag("cs_outline_panel")
+                .testTag("cs_outline_panel"),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (doc.arcBeats.isEmpty()) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
+                        .sunkenPanel(radius = 18.dp)
                         .padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterVertically),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    if (state.isBusy || state.isExtractingAngles) {
+                        ThinkingOrbSolving(size = 48.dp, tint = Cs.Ink)
+                    }
                     Text(
                         text = if (state.isBusy || state.isExtractingAngles) {
                             state.busyLabel ?: "Outlining your idea into 4 beats…"
@@ -740,10 +742,11 @@ private fun SparkOutlineContent(
                 }
             } else {
                 doc.arcBeats.forEachIndexed { i, beat ->
+                    val isRerolling = state.rerollingBeatIndex == i
                     OutlineBeatRow(
                         index = i,
                         beat = beat,
-                        isRerolling = state.rerollingBeatIndex == i,
+                        isRerolling = isRerolling,
                         shotPreviews = state.shotPreviews,
                         inFlightShotIds = state.inFlightShotIds,
                         isBusy = state.isBusy,
@@ -753,17 +756,27 @@ private fun SparkOutlineContent(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()
-                            .then(if (i > 0) Modifier.hairlineTop(Cs.RowDivider) else Modifier)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Cs.SunkenPanel)
+                            .borderBeam(
+                                active = true,
+                                radius = 16.dp,
+                                strokeWidth = if (isRerolling) 1.75.dp else 1.15.dp,
+                                strength = if (isRerolling) 0.96f else 0.62f,
+                                durationMs = if (isRerolling) 1500 else 3200,
+                                phaseOffsetDeg = i * 90f,
+                                palette = if (isRerolling) BorderBeamPalette.COLORFUL else BorderBeamPalette.COLORFUL
+                            )
                     )
                 }
             }
         }
 
-        // Slim 2-Key Dock
+        // Soft-Neumorphic Extruded 2-Key Dock: horizontal [Mic HOLD] + dark-slate [write the script ->]
         CsDock(
             leading = {
                 CsVoiceDockKey(
-                    label = if (state.isRecordingSteer) "listening" else "hold: add",
+                    label = if (state.isRecordingSteer) "STOP" else "HOLD",
                     icon = Icons.Sharp.Mic,
                     held = state.isRecordingSteer,
                     enabled = !state.isRecordingSeed && !state.isRecordingSplice,
@@ -883,20 +896,24 @@ private fun OutlineBeatRow(
             }
         }
 
+        // Flat, unfilled (outlined) sparkle icon — NO border, NO elevation! Shows solving orb while re-rolling.
         Box(
             modifier = Modifier
                 .size(44.dp)
-                .clip(RoundedCornerShape(12.dp))
                 .clickable(enabled = !isBusy && !isRerolling, role = Role.Button, onClick = onReroll)
                 .testTag("cs_reroll_beat_$index"),
             contentAlignment = Alignment.Center
         ) {
-            Icon(
-                imageVector = Icons.Sharp.AutoAwesome,
-                contentDescription = "Rewrite beat ${index + 1}",
-                tint = if (!isBusy && !isRerolling) Cs.Muted else Cs.Dim,
-                modifier = Modifier.size(22.dp)
-            )
+            if (isRerolling) {
+                ThinkingOrbSolving(size = 22.dp, tint = Cs.White)
+            } else {
+                Icon(
+                    imageVector = Icons.Outlined.AutoAwesome,
+                    contentDescription = "Rewrite beat ${index + 1}",
+                    tint = if (!isBusy) Cs.InkSub else Cs.Dim,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
         }
     }
 }
@@ -930,12 +947,7 @@ private fun ShotThumbnailKey(
                 )
             }
             isLoading -> {
-                Icon(
-                    imageVector = Icons.Sharp.HourglassEmpty,
-                    contentDescription = "Loading shot preview",
-                    tint = Cs.Dim,
-                    modifier = Modifier.size(14.dp)
-                )
+                ThinkingOrbSolving(size = 18.dp, tint = Cs.InkSub)
             }
             else -> {
                 OfflineShotFallbackGlyph(type = shot.type)
@@ -1490,15 +1502,23 @@ private fun FollowupBottomSheet(
                             .testTag("cs_followup_beats")
                     ) {
                         if (state.followupBeats.isEmpty()) {
-                            Text(
-                                text = if (state.isDraftingFollowup) {
-                                    "Drafting 4-beat follow-up…"
-                                } else {
-                                    "Select a follow-up angle above to draft beats."
-                                },
-                                style = sans(15.sp, Cs.Muted, 21.sp),
-                                modifier = Modifier.padding(16.dp)
-                            )
+                            Row(
+                                modifier = Modifier.padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                if (state.isDraftingFollowup) {
+                                    ThinkingOrbSolving(size = 24.dp, tint = Cs.Ink)
+                                }
+                                Text(
+                                    text = if (state.isDraftingFollowup) {
+                                        "Drafting 4-beat follow-up…"
+                                    } else {
+                                        "Select a follow-up angle above to draft beats."
+                                    },
+                                    style = sans(15.sp, Cs.Muted, 21.sp)
+                                )
+                            }
                         } else {
                             state.followupBeats.forEachIndexed { idx, fb ->
                                 Row(
