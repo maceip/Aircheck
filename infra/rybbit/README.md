@@ -100,3 +100,27 @@ Errors arrive as `event_name = 'rig_error'` (properties carry `message`).
 - `docker-compose.watchtower.yml` — auto-update overlay (also copied to `/opt/rybbit`).
 - `backup.sh` — bounded backup script (also at `/opt/rybbit-deploy/backup.sh`).
 - `disk-guard.sh` — disk safety net (also at `/opt/rybbit-deploy/disk-guard.sh`).
+
+## On-device model hosting (Aircheck Gemma fallback)
+
+The same droplet issues short-lived download URLs for the app's on-device model weights.
+
+| Piece | Where |
+|---|---|
+| Weights | DO Spaces bucket `aircheck-models` (nyc3, **private** — unsigned GET returns 403) |
+| Issuer | `model-issuer` container (`infra/rybbit/model-issuer/`), deployed at `/opt/rybbit-deploy/model-issuer`, `restart: unless-stopped`, no host port |
+| Route | Caddy `handle /models/*` -> `model-issuer:8090` (added to `/opt/rybbit/Caddyfile` before the catch-all; backup at `Caddyfile.bak-pre-models`) |
+| Endpoints | `GET /models/manifest?model=gemma-4-E2B-it` (size + SHA-256), `GET /models/url?model=...` (presigned URL, 1 h), `GET /models/health` |
+| Abuse limits | private bucket, 1 h presigned URLs, 30 issuer requests per IP per hour (HTTP 429 after) |
+| Credentials | `/opt/rybbit-deploy/model-issuer/.env` holds a **read-only** Spaces key scoped to the bucket (`aircheck-models-issuer-ro`). The full-access upload key (`aircheck-models-admin`) stays on the Mac in `~/.aircheck-spaces.json` and is never on the droplet. |
+
+Redeploy after a reprovision (cloud-init does not carry the Spaces secret):
+
+```bash
+scp infra/rybbit/model-issuer/{issuer.py,Dockerfile,manifest.json,docker-compose.models.yml} root@104.236.6.170:/opt/rybbit-deploy/model-issuer/
+# write SPACES_ACCESS_KEY / SPACES_SECRET_KEY into /opt/rybbit-deploy/model-issuer/.env (chmod 600), then:
+ssh root@104.236.6.170 'cd /opt/rybbit-deploy/model-issuer && docker compose -f docker-compose.models.yml up -d --build'
+# add the `handle /models/*` block to /opt/rybbit/Caddyfile and: docker exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+Adding a model: upload the file to the bucket, add its `file_name`/`size`/`sha256` to `manifest.json`, rebuild the container. The app verifies size and SHA-256 before it will load a file.
