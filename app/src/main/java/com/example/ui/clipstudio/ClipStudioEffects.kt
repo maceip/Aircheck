@@ -14,6 +14,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -28,11 +31,15 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
@@ -218,6 +225,74 @@ private fun sampleStops(stops: Array<Pair<Float, Color>>, pos: Float): Color {
         }
     }
     return stops.last().second
+}
+
+/**
+ * Flat, unfilled (outlined) sparkle icon (`Icons.Outlined.AutoAwesome`) with NO border, NO box,
+ * and NO elevation — masked with a smooth traveling iridescent rainbow metallic shimmer directly
+ * onto the icon strokes themselves (`CompositingStrategy.Offscreen` + `BlendMode.SrcIn`).
+ */
+@Composable
+fun ShimmerSparkleIcon(
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    size: Dp = 22.dp,
+    phaseOffsetDeg: Float = 0f,
+    durationMs: Int = 2600
+) {
+    if (!enabled) {
+        Icon(
+            imageVector = Icons.Outlined.AutoAwesome,
+            contentDescription = contentDescription,
+            tint = Cs.Dim,
+            modifier = modifier.size(size)
+        )
+        return
+    }
+    val transition = rememberInfiniteTransition(label = "sparkle_rainbow_shimmer")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = durationMs, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "sparkle_shimmer_phase"
+    )
+    val colors = remember {
+        listOf(
+            Color(0xFF4CC9FF),
+            Color(0xFF4CE89A),
+            Color(0xFFFFCF4A),
+            Color(0xFFFF5C8A),
+            Color(0xFFFFFFFF),
+            Color(0xFFC56CFF),
+            Color(0xFF4CC9FF)
+        )
+    }
+    val offsetFraction = ((phase + phaseOffsetDeg / 360f) % 1f + 1f) % 1f
+
+    Icon(
+        imageVector = Icons.Outlined.AutoAwesome,
+        contentDescription = contentDescription,
+        tint = Color.White,
+        modifier = modifier
+            .size(size)
+            .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+            .drawWithContent {
+                drawContent()
+                val span = max(this.size.width, this.size.height) * 2.2f
+                val shift = offsetFraction * span
+                val brush = Brush.linearGradient(
+                    colors = colors,
+                    start = Offset(-span + shift, -span * 0.45f + shift * 0.65f),
+                    end = Offset(shift, span * 0.55f + shift * 0.65f),
+                    tileMode = TileMode.Repeated
+                )
+                drawRect(brush = brush, blendMode = BlendMode.SrcIn)
+            }
+    )
 }
 
 // =============================================================================

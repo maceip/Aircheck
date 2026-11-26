@@ -698,8 +698,8 @@ private fun SparkOutlineContent(
             )
         }
 
-        // Segmented 4-beat Outline Panel — each beat has the libraries.dev/beam border beam effect
-        // and keeps the clean v5 row layout (no heavy label cards) with flat unfilled sparkle icons.
+        // Segmented 4-beat Outline Panel — clean individual beat sections (no rainbow section borders);
+        // rainbow metallic shimmer lives directly on the flat unfilled sparkle icon.
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -758,14 +758,10 @@ private fun SparkOutlineContent(
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
                             .background(Cs.SunkenPanel)
-                            .borderBeam(
-                                active = true,
-                                radius = 16.dp,
-                                strokeWidth = if (isRerolling) 1.75.dp else 1.15.dp,
-                                strength = if (isRerolling) 0.96f else 0.62f,
-                                durationMs = if (isRerolling) 1500 else 3200,
-                                phaseOffsetDeg = i * 90f,
-                                palette = if (isRerolling) BorderBeamPalette.COLORFUL else BorderBeamPalette.COLORFUL
+                            .border(
+                                width = 1.dp,
+                                color = if (isRerolling) Color(0xFF42444E) else Color(0xFF26262E),
+                                shape = RoundedCornerShape(16.dp)
                             )
                     )
                 }
@@ -896,7 +892,8 @@ private fun OutlineBeatRow(
             }
         }
 
-        // Flat, unfilled (outlined) sparkle icon — NO border, NO elevation! Shows solving orb while re-rolling.
+        // Flat, unfilled (outlined) sparkle icon with rainbow shimmer directly on the icon strokes
+        // — NO border, NO box, NO elevation. Shows solving orb while re-rolling.
         Box(
             modifier = Modifier
                 .size(44.dp)
@@ -907,11 +904,11 @@ private fun OutlineBeatRow(
             if (isRerolling) {
                 ThinkingOrbSolving(size = 22.dp, tint = Cs.White)
             } else {
-                Icon(
-                    imageVector = Icons.Outlined.AutoAwesome,
+                ShimmerSparkleIcon(
                     contentDescription = "Rewrite beat ${index + 1}",
-                    tint = if (!isBusy) Cs.InkSub else Cs.Dim,
-                    modifier = Modifier.size(22.dp)
+                    enabled = !isBusy,
+                    size = 24.dp,
+                    phaseOffsetDeg = index * 75f
                 )
             }
         }
