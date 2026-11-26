@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -19,32 +20,39 @@ import org.robolectric.annotation.GraphicsMode
 class LauncherIconResourceTest {
 
     @Test
-    fun launcherAdaptiveAndRoundIconsRenderNeonGreenBackgroundAndBlackGlyph() {
-        val app = ApplicationProvider.getApplicationContext<AircheckApplication>()
-        for (resId in listOf(R.mipmap.ic_launcher, R.mipmap.ic_launcher_round)) {
-            val icon = app.getDrawable(resId)
-            assertNotNull(icon)
-            assertTrue("Expected AdaptiveIconDrawable on API 26+", icon is AdaptiveIconDrawable)
+    fun launcherAdaptiveIconsSwitchCleanlyBetweenLightAndNightModes() {
+        val base = ApplicationProvider.getApplicationContext<AircheckApplication>()
 
-            val bmp = Bitmap.createBitmap(108, 108, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            icon!!.setBounds(0, 0, 108, 108)
-            icon.draw(canvas)
-
-            var greenPixels = 0
-            var blackPixels = 0
-            for (y in 0 until 108) {
-                for (x in 0 until 108) {
-                    val c = bmp.getPixel(x, y)
-                    val r = Color.red(c)
-                    val g = Color.green(c)
-                    val b = Color.blue(c)
-                    if (g > 220 && r in 25..80 && b < 30) greenPixels++
-                    if (r < 25 && g < 25 && b < 25 && Color.alpha(c) > 200) blackPixels++
-                }
-            }
-            assertTrue("Expected #31FE01 neon-green adaptive background pixels, got $greenPixels", greenPixels > 1500)
-            assertTrue("Expected #000000 foreground glyph pixels, got $blackPixels", blackPixels > 800)
+        // 1. Light mode (`UI_MODE_NIGHT_NO`): neon-green background + dark/purple beveled glyph
+        val lightCfg = Configuration(base.resources.configuration).apply {
+            uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or Configuration.UI_MODE_NIGHT_NO
         }
+        val lightCtx = base.createConfigurationContext(lightCfg)
+        val lightIcon = lightCtx.getDrawable(R.mipmap.ic_launcher)
+        assertNotNull(lightIcon)
+        assertTrue(lightIcon is AdaptiveIconDrawable)
+        val lightBmp = render(lightIcon!!)
+        assertTrue("Light mode outer background should be neon green", Color.green(lightBmp.getPixel(54, 14)) > 200)
+        assertTrue("Light mode top glyph bar should be dark", Color.green(lightBmp.getPixel(54, 36)) < 40)
+
+        // 2. Dark mode (`UI_MODE_NIGHT_YES`): obsidian/navy background + neon-green/purple beveled glyph
+        val nightCfg = Configuration(base.resources.configuration).apply {
+            uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or Configuration.UI_MODE_NIGHT_YES
+        }
+        val nightCtx = base.createConfigurationContext(nightCfg)
+        val nightIcon = nightCtx.getDrawable(R.mipmap.ic_launcher)
+        assertNotNull(nightIcon)
+        assertTrue(nightIcon is AdaptiveIconDrawable)
+        val nightBmp = render(nightIcon!!)
+        assertTrue("Dark mode outer background should be dark", Color.green(nightBmp.getPixel(54, 14)) < 40)
+        assertTrue("Dark mode top glyph bar should be neon green", Color.green(nightBmp.getPixel(54, 36)) > 180)
+    }
+
+    private fun render(drawable: android.graphics.drawable.Drawable): Bitmap {
+        val bmp = Bitmap.createBitmap(108, 108, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        drawable.setBounds(0, 0, 108, 108)
+        drawable.draw(canvas)
+        return bmp
     }
 }

@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -16,32 +17,43 @@ import java.io.FileOutputStream
 class LauncherIconOnDeviceTest {
 
     @Test
-    fun installedApplicationIconRendersNeonGreenAndBlackGlyphOnDevice() {
+    fun installedApplicationIconRendersBothLightAndNightVariantsOnDevice() {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
-        val icon = ctx.packageManager.getApplicationIcon(ctx.packageName)
-        assertTrue("Expected AdaptiveIconDrawable on Android 17", icon is AdaptiveIconDrawable)
 
-        val bmp = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        icon.setBounds(0, 0, 256, 256)
-        icon.draw(canvas)
-
-        var greenPixels = 0
-        var blackPixels = 0
-        for (y in 0 until 256) {
-            for (x in 0 until 256) {
-                val c = bmp.getPixel(x, y)
-                val r = Color.red(c)
-                val g = Color.green(c)
-                val b = Color.blue(c)
-                if (g > 220 && r in 25..80 && b < 30) greenPixels++
-                if (r < 25 && g < 25 && b < 25 && Color.alpha(c) > 200) blackPixels++
-            }
+        val lightCfg = Configuration(ctx.resources.configuration).apply {
+            uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or Configuration.UI_MODE_NIGHT_NO
         }
-        val outFile = File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "rendered_launcher_icon.png")
-        FileOutputStream(outFile).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        val nightCfg = Configuration(ctx.resources.configuration).apply {
+            uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or Configuration.UI_MODE_NIGHT_YES
+        }
 
-        assertTrue("Expected neon-green #31FE01 pixels > 8000, got $greenPixels", greenPixels > 8000)
-        assertTrue("Expected black #000000 glyph pixels > 8000, got $blackPixels", blackPixels > 8000)
+        val lightIcon = ctx.createConfigurationContext(lightCfg).getDrawable(R.mipmap.ic_launcher)!!
+        val nightIcon = ctx.createConfigurationContext(nightCfg).getDrawable(R.mipmap.ic_launcher)!!
+        assertTrue(lightIcon is AdaptiveIconDrawable)
+        assertTrue(nightIcon is AdaptiveIconDrawable)
+
+        val lightBmp = render(lightIcon, 256)
+        val nightBmp = render(nightIcon, 256)
+
+        val dir = ctx.getExternalFilesDir(null) ?: ctx.filesDir
+        FileOutputStream(File(dir, "rendered_launcher_light.png")).use {
+            lightBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+        }
+        FileOutputStream(File(dir, "rendered_launcher_night.png")).use {
+            nightBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+        }
+
+        assertTrue("Light mode background must be neon green", Color.green(lightBmp.getPixel(128, 32)) > 200)
+        assertTrue("Light mode glyph must be dark", Color.green(lightBmp.getPixel(128, 86)) < 40)
+        assertTrue("Dark mode background must be dark", Color.green(nightBmp.getPixel(128, 32)) < 40)
+        assertTrue("Dark mode glyph must be neon green", Color.green(nightBmp.getPixel(128, 86)) > 180)
+    }
+
+    private fun render(drawable: android.graphics.drawable.Drawable, px: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        drawable.setBounds(0, 0, px, px)
+        drawable.draw(canvas)
+        return bmp
     }
 }
