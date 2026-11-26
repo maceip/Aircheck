@@ -160,7 +160,9 @@ interface MacRigRenderGateway {
         maxDurationSec: Int = 10,
         words: List<AlignedWord> = emptyList(),
         alignUrl: String? = null,
-        useRemotion: Boolean? = null
+        useRemotion: Boolean? = null,
+        brollPlan: List<CoreStoryClause> = emptyList(),
+        brollAspect: String = "9:16"
     ): EnqueuedRenderResult
 
     suspend fun pollMacRigJob(rigBaseUrl: String, jobId: String): MacRigJobSnapshot
@@ -170,6 +172,9 @@ interface MacRigRenderGateway {
     suspend fun downloadAudioWavToCas(audioUrl: String): CasStoredAsset
 
     suspend fun fetchAlignedWords(alignUrl: String): List<AlignedWord> = emptyList()
+
+    /** `GET /v1/logs`: tail of the rig's durable, auto-rotating generation log (rig + shipped phone events). */
+    suspend fun fetchRigLogs(rigBaseUrl: String, lines: Int = 200): List<String> = emptyList()
 
     suspend fun synthesizeCoreStoryTts(
         rigBaseUrl: String,

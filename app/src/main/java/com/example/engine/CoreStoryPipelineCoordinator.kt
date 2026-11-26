@@ -409,7 +409,9 @@ class CoreStoryPipelineCoordinator(
                         ratio = "9:16",
                         maxDurationSec = targetMaxSec,
                         words = session.alignedWords,
-                        alignUrl = session.alignUrl
+                        alignUrl = session.alignUrl,
+                        brollPlan = activeClauses,
+                        brollAspect = session.renderOptions.aspect
                     ).jobId
                     localRepo.saveCorePipelineSession(session.copy(pendingHeadJobId = headJobId))
                 }

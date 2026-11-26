@@ -1,0 +1,27 @@
+# Auto-update overlay for the Rybbit stack.
+#
+# Watchtower polls the registries once a day and rolling-restarts ONLY the app-layer
+# containers (backend, client, caddy) when a newer image is published. The databases
+# (clickhouse/postgres/redis) stay on their pinned versions so an unattended update can
+# never trigger a surprise major-version migration. Combined with the base compose's
+# `restart: unless-stopped`, this is the "updates on its own while the droplet is paid" layer.
+#
+# Usage (from /opt/rybbit):
+#   docker compose -f docker-compose.yml -f docker-compose.watchtower.yml --profile with-webserver up -d
+services:
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Watchtower 1.7.1 defaults to Docker API 1.25; modern engines require >= 1.40.
+      - DOCKER_API_VERSION=1.44
+    # Trailing positional args restrict Watchtower to these containers only.
+    command: --interval 86400 --cleanup --rolling-restart backend client caddy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

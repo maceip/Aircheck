@@ -123,7 +123,7 @@ class CoreStageRunner(
         val base = session()
         val look: NewsroomLook? = lookIdOverride?.let { localRepo.getNewsroomLook(it) } ?: localRepo.getDefaultNewsroomLook()
         val signature = base.cutSignature(look)
-        onProgress(0.2f, "Rendering studio cut on rig…")
+        onProgress(0.05f, "Preparing studio cut…")
         val result = coordinator.chopTalkingHeadIntoBrollStage4(
             session = base,
             rigBaseUrl = rigUrl(),

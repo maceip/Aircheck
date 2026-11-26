@@ -94,6 +94,7 @@ data class StudioUiState(
     val isCoreStageBusy: Boolean = false,
     val coreStageProgress: Float = 0f,
     val coreStageStatusLabel: String? = null,
+    val coreStageOp: String? = null,
     val isRecordingCoreVoiceover: Boolean = false,
     val newsroomLooks: List<NewsroomLook> = emptyList(),
     val isGeneratingBackdrop: Boolean = false,
@@ -128,6 +129,30 @@ data class StudioUiState(
 /** An X post chosen with "show post" in 02 SCRIPT, burned into the cut as a quote card. */
 data class PostCardSource(val handle: String, val tweetId: String, val snippet: String)
 
+/** Derives the tiny 4-LED status cluster (RIG · VOX · HEAD · CUT) from live pipeline state. */
+fun pipelineLedStateFor(state: StudioUiState): com.example.ui.clipstudio.PipelineLedState {
+    val session = state.corePipelineSession
+    val busy = state.isCoreStageBusy
+    val op = state.coreStageOp
+    fun stage(done: Boolean, vararg ops: String): com.example.ui.clipstudio.LedState = when {
+        busy && op in ops -> com.example.ui.clipstudio.LedState.WORKING
+        done -> com.example.ui.clipstudio.LedState.READY
+        else -> com.example.ui.clipstudio.LedState.IDLE
+    }
+    val rig = when (state.rigHealth.status) {
+        RigConnectionStatus.ONLINE -> com.example.ui.clipstudio.LedState.READY
+        RigConnectionStatus.CHECKING -> com.example.ui.clipstudio.LedState.WORKING
+        RigConnectionStatus.ERROR -> com.example.ui.clipstudio.LedState.ERROR
+        RigConnectionStatus.IDLE -> com.example.ui.clipstudio.LedState.IDLE
+    }
+    return com.example.ui.clipstudio.PipelineLedState(
+        rig = rig,
+        voice = stage(!session.ttsVoiceSha.isNullOrBlank(), CoreStageWorker.OP_TTS, CoreStageWorker.OP_RESYNC),
+        head = stage(!session.talkingHeadSha.isNullOrBlank(), CoreStageWorker.OP_HEAD, CoreStageWorker.OP_RESYNC),
+        cut = stage(!session.finalVideoSha.isNullOrBlank(), CoreStageWorker.OP_CUT)
+    )
+}
+
 class StudioViewModel internal constructor(
     application: Application,
     localRepoOverride: AircheckLocalRepository? = null,
@@ -152,6 +177,7 @@ class StudioViewModel internal constructor(
     private val localGraphDatabase: LocalGraphDatabase = localGraphDatabaseOverride ?: container.localGraphDatabase
     private val otaBundleSyncManager = container.otaBundleSyncManager
     val voiceModelCareManager: VoiceModelCareManager = container.voiceModelCareManager
+    private val pipelineLogger = container.pipelineLogger
     private val corePipelineCoordinator: CoreStoryPipelineCoordinator =
         if (localRepoOverride != null || casStoreOverride != null || macRigGatewayOverride != null || profileStoreOverride != null) {
             CoreStoryPipelineCoordinator(
@@ -1000,10 +1026,19 @@ class StudioViewModel internal constructor(
                 isCoreStageBusy = true,
                 coreStageProgress = 0f,
                 coreStageStatusLabel = CoreStageWorker.labelFor(op) + "…",
+                coreStageOp = op,
                 errorMessage = null
             )
         }
+        pipelineLogger.info("stage", "start $op")
         CoreStageWorker.enqueue(getApplication(), op, extras)
+    }
+
+    /** Tails the durable generation log for the Activity panel: rig log first, on-phone fallback. */
+    suspend fun loadActivityLog(): List<String> {
+        val rigUrl = _uiState.value.rigHealth.resolvedUrl
+        val rigLines = macRigGateway.fetchRigLogs(rigUrl, 200)
+        return rigLines.ifEmpty { pipelineLogger.recentLocal(80) }
     }
 
     /** Mirrors background pipeline jobs (WorkManager) into UI state; works across VM/process restarts. */
@@ -1021,6 +1056,11 @@ class StudioViewModel internal constructor(
                 handled += info.id
                 val err = info.outputData.getString(CoreStageWorker.KEY_ERROR)
                 val notice = info.outputData.getString(CoreStageWorker.KEY_NOTICE)
+                if (info.state == WorkInfo.State.FAILED) {
+                    pipelineLogger.error("stage", "failed: ${err ?: "unknown error"}")
+                } else if (info.state == WorkInfo.State.SUCCEEDED) {
+                    pipelineLogger.info("stage", "done: ${notice ?: "ok"}")
+                }
                 _uiState.update {
                     when {
                         info.state == WorkInfo.State.FAILED -> it.copy(errorMessage = err ?: "Pipeline stage failed.")
@@ -1041,6 +1081,7 @@ class StudioViewModel internal constructor(
                             coreStageStatusLabel = running?.let { r ->
                                 r.progress.getString(CoreStageWorker.KEY_LABEL) ?: "Working in background…"
                             },
+                            coreStageOp = op,
                             isDetectingSilence = running != null && op == CoreStageWorker.OP_SILENCE
                         )
                     }

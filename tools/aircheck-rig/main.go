@@ -38,6 +38,25 @@ const (
 	androidMainActivity = "com.aistudio.aircheck.vqxkrm/com.example.MainActivity"
 )
 
+// rigEnvFile reads optional KEY=VALUE lines from the gitignored .aircheck-rig/env file so secrets
+// (e.g. RYBBIT_API_KEY) reach supervised processes without being committed or put on the command
+// line. Blank lines and #comments are ignored; a missing file is fine.
+func rigEnvFile(repoRoot string) []string {
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".aircheck-rig", "env"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
 var tryCloudflareRe = regexp.MustCompile(`https://[a-zA-Z0-9-]+\.trycloudflare\.com`)
 
 type RigState struct {
@@ -513,7 +532,7 @@ func runSupervisor(cfg *Config) error {
 			"--default-avatar", cfg.AvatarPath,
 		)
 		c.Dir = cfg.RepoRoot
-		c.Env = append(os.Environ(),
+		c.Env = append(append(os.Environ(), rigEnvFile(cfg.RepoRoot)...),
 			fmt.Sprintf("REMOTION_WORKER_URL=http://127.0.0.1:%d", defaultRemotionPort),
 			fmt.Sprintf("AIRCHECK_VIDEO_ENDPOINT=http://127.0.0.1:%d", defaultVideoPort),
 			fmt.Sprintf("AIRCHECK_VOICE_ENDPOINT=http://127.0.0.1:%d", defaultVoicePort),

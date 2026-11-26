@@ -47,19 +47,41 @@ class DirectMacRigGateway(
             .build()
     }
 
+    // Cache the resolved rig URL + health briefly so every stage/AI call doesn't re-probe all
+    // candidates (each probe costs up to ~6.5s). Mirrors DraftApiClient's cachedBaseUrl pattern.
+    @Volatile private var cachedHealth: MacRigHealthResult? = null
+    @Volatile private var cachedHealthKey: String? = null
+    @Volatile private var cachedHealthAtMs: Long = 0L
+
+    fun invalidateRigHealthCache() {
+        cachedHealth = null
+        cachedHealthKey = null
+    }
+
     override suspend fun resolveAndCheckHealth(configuredUrl: String): MacRigHealthResult =
         withContext(Dispatchers.IO) {
+            val key = configuredUrl.trim()
+            val now = android.os.SystemClock.elapsedRealtime()
+            val cached = cachedHealth
+            if (cached != null && cachedHealthKey == key && now - cachedHealthAtMs < RIG_HEALTH_CACHE_TTL_MS) {
+                return@withContext cached
+            }
             val candidates = buildCandidateUrls(configuredUrl)
             val errors = mutableListOf<String>()
             for (candidate in candidates) {
                 val res = runCatching { checkSingleRigHealth(candidate, probeClient) }
                 if (res.isSuccess) {
-                    return@withContext res.getOrThrow()
+                    val health = res.getOrThrow()
+                    cachedHealth = health
+                    cachedHealthKey = key
+                    cachedHealthAtMs = now
+                    return@withContext health
                 } else {
                     val reason = res.exceptionOrNull()?.localizedMessage ?: "unreachable"
                     errors += "$candidate ($reason)"
                 }
             }
+            cachedHealth = null
             throw IllegalStateException(
                 "Studio server unreachable. Checked: ${errors.joinToString("; ")}. " +
                     "Verify Wi-Fi or USB connection to your Mac."
@@ -161,7 +183,9 @@ class DirectMacRigGateway(
         maxDurationSec: Int,
         words: List<AlignedWord>,
         alignUrl: String?,
-        useRemotion: Boolean?
+        useRemotion: Boolean?,
+        brollPlan: List<CoreStoryClause>,
+        brollAspect: String
     ): EnqueuedRenderResult = withContext(Dispatchers.IO) {
         val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
         val spokenText = project.activeBeats.joinToString(" ") { it.spokenText.trim() }.trim()
@@ -233,6 +257,24 @@ class DirectMacRigGateway(
         }
         if (useRemotion != null) {
             payload.put("use_remotion", useRemotion)
+        }
+        // B-roll overlap: hand the rig the cutaway plan so it can warm the still cache during the
+        // talking-head render. Separate key from head alignment data; gated by prefetch_broll.
+        if (brollPlan.isNotEmpty()) {
+            val planArr = JSONArray()
+            brollPlan.forEachIndexed { idx, c ->
+                planArr.put(
+                    JSONObject()
+                        .put("id", c.id)
+                        .put("index", if (c.index >= 0) c.index else idx)
+                        .put("spoken_text", c.spokenText)
+                        .put("segment_mode", c.segmentMode.name)
+                        .put("broll_caption", c.brollCaption.ifBlank { c.spokenText })
+                )
+            }
+            payload.put("broll_plan", planArr)
+            payload.put("broll_aspect", brollAspect)
+            payload.put("prefetch_broll", true)
         }
 
         val req = Request.Builder()
@@ -323,6 +365,19 @@ class DirectMacRigGateway(
 
     override suspend fun downloadAudioWavToCas(audioUrl: String): CasStoredAsset =
         downloadRemoteAssetToCas(audioUrl, "wav")
+
+    override suspend fun fetchRigLogs(rigBaseUrl: String, lines: Int): List<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+            val req = Request.Builder().url("$baseUrl/v1/logs?lines=$lines").get().build()
+            okHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext emptyList()
+                val arr = JSONObject(resp.body?.string().orEmpty()).optJSONArray("lines")
+                    ?: return@withContext emptyList()
+                (0 until arr.length()).map { arr.optString(it) }
+            }
+        }.getOrDefault(emptyList())
+    }
 
     override suspend fun fetchAlignedWords(alignUrl: String): List<AlignedWord> = withContext(Dispatchers.IO) {
         val cleanUrl = alignUrl.trim()
@@ -683,11 +738,10 @@ class DirectMacRigGateway(
                     }
                 }
                 val detail = job.optNullableString("stage_detail") ?: "$label running"
+                task?.onProgress?.invoke(detail)
                 val rawFrac = job.optDouble("progress_fraction", Double.NaN)
                 if (!rawFrac.isNaN() && rawFrac > 0.0) {
                     task?.onProgressFraction?.invoke(rawFrac.toFloat().coerceIn(0f, 1f), detail)
-                } else {
-                    task?.onProgress?.invoke(detail)
                 }
                 kotlinx.coroutines.delay(RIG_TASK_POLL_MS)
             }
@@ -1114,3 +1168,4 @@ class DirectMacRigGateway(
 }
 
 private const val RIG_TASK_POLL_MS: Long = 2_000L
+private const val RIG_HEALTH_CACHE_TTL_MS: Long = 30_000L

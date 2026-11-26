@@ -993,6 +993,68 @@ fun CsDock(
     }
 }
 
+// =============================================================================
+// Tiny 4-LED pipeline status cluster (RIG · VOX · HEAD · CUT)
+// =============================================================================
+
+enum class LedState { IDLE, WORKING, READY, ERROR }
+
+data class PipelineLedState(
+    val rig: LedState = LedState.IDLE,
+    val voice: LedState = LedState.IDLE,
+    val head: LedState = LedState.IDLE,
+    val cut: LedState = LedState.IDLE,
+)
+
+private fun ledColor(state: LedState): Color = when (state) {
+    LedState.READY -> Cs.Mint
+    LedState.WORKING -> Cs.AmberBright
+    LedState.ERROR -> Cs.Red
+    LedState.IDLE -> Cs.Dim
+}
+
+/** Four 6dp hardware LED pips with micro-labels: green=ready, amber=working, red=error, dim=idle. */
+@Composable
+fun PipelineStatusLeds(state: PipelineLedState, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier.testTag("cs_pipeline_leds"),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LedPip("RIG", state.rig)
+        LedPip("VOX", state.voice)
+        LedPip("HEAD", state.head)
+        LedPip("CUT", state.cut)
+    }
+}
+
+@Composable
+private fun LedPip(label: String, state: LedState) {
+    val color = ledColor(state)
+    val active = state != LedState.IDLE
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(color)
+                .then(
+                    if (active) Modifier.border(1.dp, color.copy(alpha = 0.30f), RoundedCornerShape(4.dp))
+                    else Modifier
+                )
+        )
+        Text(
+            text = label,
+            style = mono(7.sp, if (active) Cs.Muted else Cs.Dim),
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
+
 /**
  * Consistent 56dp v5 top bar across 01 SPARK, 02 SCRIPT, and 03 CUT:
  * active stage is a 44dp sunken segment in Ndot 13sp; other stages are bare 40dp targets in Geist Mono 500 13sp.
@@ -1002,6 +1064,7 @@ fun CsTopBar(
     activeStage: Int,
     onNavigate: (Int) -> Unit,
     modifier: Modifier = Modifier,
+    leds: PipelineLedState? = null,
     trailing: @Composable RowScope.() -> Unit = {}
 ) {
     val stageNames = listOf("SPARK", "SCRIPT", "CUT")
@@ -1054,6 +1117,9 @@ fun CsTopBar(
                     )
                 }
             }
+        }
+        if (leds != null) {
+            PipelineStatusLeds(state = leds, modifier = Modifier.padding(end = 4.dp))
         }
         Row(
             modifier = Modifier.weight(1f),

@@ -496,7 +496,26 @@ def generate_talking_head(
         }
         if replace_audio_with_input:
             orig_audio_mp4 = output_mp4.with_name(f"{output_mp4.stem}_exact_input_voice.mp4")
-            shutil.copy2(output_mp4, orig_audio_mp4)
+            # Mux the canonical master voice WAV onto HeyGen's video stream (copy video, no re-encode)
+            # so the deliverable carries the exact input voice, not HeyGen's re-encoded audio track.
+            _run_subprocess(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i", str(output_mp4),
+                    "-i", str(master_wav),
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-ar", "44100",
+                    "-movflags", "+faststart",
+                    str(orig_audio_mp4),
+                ],
+                timeout=FFMPEG_TIMEOUT_SEC,
+                label="ffmpeg mux exact input voice",
+            )
             qa_target = orig_audio_mp4
             result_lambda["exact_input_voice_mp4"] = str(orig_audio_mp4)
 

@@ -9,8 +9,14 @@ import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.allowHardware
 import coil3.request.bitmapConfig
 import com.example.agent.AircheckAgentOrchestrator
+import com.example.agent.FallbackOnDeviceLlmBackend
+import com.example.agent.LiteRtDraftingEngine
+import com.example.agent.OnDeviceLlmBackend
 import com.example.agent.OnDevicePromptEngine
+import com.example.agent.liteRtAvailability
 import com.example.ai.LlmStageRouter
+import com.example.engine.ModelDownloadManager
+import com.google.mlkit.genai.prompt.Generation
 import com.example.appfunctions.AppFunctionAvailabilitySync
 import com.example.data.gateway.DirectMacRigGateway
 import com.example.data.gateway.MacRigHealthResult
@@ -72,6 +78,9 @@ class AircheckContainer(context: Context) {
     val playerController: AircheckPlayerController by lazy { AircheckPlayerController(appContext, okHttpClient) }
     val clipExporter: ClipExporter by lazy { ClipExporter(appContext, casStore, okHttpClient) }
     val macRigGateway: MacRigRenderGateway by lazy { DirectMacRigGateway(casStore, okHttpClient) }
+    val pipelineLogger: com.example.engine.PipelineLogger by lazy {
+        com.example.engine.PipelineLogger(appContext, okHttpClient, appScope)
+    }
 
     // VoiceStudio Local Synthesis, Wait-Free Oboe EDL & Mac Rig OTA Sync
     val otaBundleSyncManager: OtaBundleSyncManager by lazy {
@@ -147,11 +156,34 @@ class AircheckContainer(context: Context) {
     val onDevicePromptEngine: OnDevicePromptEngine by lazy {
         OnDevicePromptEngine()
     }
+
+    // On-device drafting fallback: AICore Gemini Nano (TPU/NPU) primary, bundled LiteRT Gemma when
+    // AICore is absent. Weights download from Spaces via the resumable ModelDownloadManager.
+    val modelDownloadManager: ModelDownloadManager by lazy {
+        ModelDownloadManager(appContext, okHttpClient)
+    }
+    val liteRtDraftingEngine: LiteRtDraftingEngine by lazy {
+        LiteRtDraftingEngine(appContext)
+    }
+    private val liteRtBackedPromptEngine: OnDevicePromptEngine by lazy {
+        OnDevicePromptEngine(
+            modelProvider = { Generation.getClient() },
+            completionOverride = { prompt -> liteRtDraftingEngine.generate(prompt) },
+            availabilityOverride = { liteRtAvailability(liteRtDraftingEngine.isReady) },
+        )
+    }
+    val onDeviceLlmBackend: OnDeviceLlmBackend by lazy {
+        FallbackOnDeviceLlmBackend(
+            primary = onDevicePromptEngine,
+            fallback = liteRtBackedPromptEngine,
+            fallbackReady = { liteRtDraftingEngine.isReady },
+        )
+    }
     val llmStageRouter: LlmStageRouter by lazy {
         LlmStageRouter(
             profileStore = profileStore,
             draftApiClientProvider = ::draftApiClientFor,
-            onDeviceEngine = onDevicePromptEngine,
+            onDeviceEngine = onDeviceLlmBackend,
             okHttpClient = okHttpClient
         )
     }
@@ -213,12 +245,17 @@ class AircheckApplication : Application(), SingletonImageLoader.Factory {
         container.bindVoiceStudioRuntime()
         container.appScope.launch {
             container.profilingCoordinator.registerDefaultTriggers()
-            probeStartupRigHealthAndSync(
+            val health = probeStartupRigHealthAndSync(
                 context = this@AircheckApplication,
                 profileStore = container.profileStore,
                 otaBundleSyncManager = container.otaBundleSyncManager,
                 macRigGateway = container.macRigGateway,
                 onHealthResolved = container::updateStartupRigHealth
+            )
+            health?.resolvedUrl?.let { container.pipelineLogger.rigBaseUrl = it }
+            container.pipelineLogger.info(
+                "rig",
+                if (health != null) "startup rig online at ${health.resolvedUrl}" else "startup rig offline"
             )
         }
     }

@@ -945,6 +945,15 @@ def test_opposite_sign_start_time_drift_is_rejected_by_both_verifiers(
         ota_server._probe_av_sync_metrics(mp4_path)
 
 
+def _decode_audio_mono(path: Path) -> np.ndarray:
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-ac", "1", "-ar", "44100", "-f", "f32le", "pipe:1"],
+        capture_output=True,
+        check=True,
+    )
+    return np.frombuffer(proc.stdout, dtype=np.float32)
+
+
 def test_generate_talking_head_heygen_1080p_single_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """HeyGen is the only talking-head engine: upload voice, create Avatar 6 video, poll, download."""
     log = tmp_path / "heygen_calls.jsonl"
@@ -986,6 +995,93 @@ def test_generate_talking_head_heygen_1080p_single_pass(tmp_path: Path, monkeypa
     assert res["heygen"]["heygen_video_id"] == "vid456"
     assert res["resolution"] == "1080P"
     assert out_mp4.is_file()
+
+    # The deliverable must carry the exact master voice WAV muxed onto HeyGen's video, not HeyGen's
+    # own re-encoded audio (the fake HeyGen clip ships a 200 Hz sine; the master is a 205 Hz take).
+    exact_mp4 = Path(res["exact_input_voice_mp4"])
+    assert exact_mp4.is_file() and exact_mp4.stat().st_size > 0
+    master_audio = _decode_audio_mono(wav)
+    exact_audio = _decode_audio_mono(exact_mp4)
+    n = min(master_audio.size, exact_audio.size)
+    assert n > 0
+    corr = float(np.corrcoef(master_audio[:n], exact_audio[:n])[0, 1])
+    assert corr > 0.95, f"exact_input_voice audio does not match master voice (corr={corr:.3f})"
+
+
+def test_build_lambda_voice_synthesizer_fn_falls_back_when_endpoint_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The rig supervisor always exports AIRCHECK_VOICE_ENDPOINT; when that endpoint is unreachable
+    # (away from home / tunnel down) TTS must fall back to the local warm engine (None), not raise.
+    monkeypatch.setenv("AIRCHECK_VOICE_ENDPOINT", "http://127.0.0.1:1")
+    assert ota_server._build_lambda_voice_synthesizer_fn("http://127.0.0.1:1") is None
+
+
+def test_head_render_prefetches_broll_into_cache_when_flag_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wav_path = tmp_path / "presynth.wav"
+    sf.write(str(wav_path), _make_speech_wave_with_pauses(2.5), 44100, subtype="PCM_16")
+    wav_b64 = base64.b64encode(wav_path.read_bytes()).decode("ascii")
+
+    real_run = ota_server.subprocess.run
+
+    def _mock_head(cmd: list[str], *args: Any, **kwargs: Any) -> Any:
+        if "generate_talking_head.py" in " ".join(str(x) for x in cmd):
+            seg_mp4 = Path(cmd[cmd.index("--output") + 1])
+            exact_mp4 = seg_mp4.with_name(f"{seg_mp4.stem}_exact_input_voice.mp4")
+            _make_real_mp4(seg_mp4, 2.5, include_audio=True)
+            _make_real_mp4(exact_mp4, 2.5, include_audio=True)
+            return subprocess.CompletedProcess(
+                cmd, 0,
+                json.dumps({"output_mp4": str(seg_mp4), "exact_input_voice_mp4": str(exact_mp4), "duration_sec": 2.5}),
+                "",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(ota_server.subprocess, "run", _mock_head)
+
+    plate_calls: list[tuple[str, str]] = []
+
+    def _fake_plate(prompt: str, aspect: str, work: Path) -> None:
+        from PIL import Image
+
+        plate_calls.append((prompt, aspect))
+        Image.new("RGB", (90, 160), (10, 20, 30)).save(work / "plate_0.png")
+
+    renders_dir = tmp_path / "renders"
+    srv, host, port, t = _start_test_server(tmp_path, renders_dir=renders_dir, plate_runner=_fake_plate)
+    try:
+        body = {
+            "voice_source": "MIC_VOICEOVER",
+            "audio_wav_base64": wav_b64,
+            "spoken_text": "Anchor opens then cuts to b-roll.",
+            "resolution": "1080P",
+            "ratio": "9:16",
+            "max_duration": 15,
+            "prefetch_broll": True,
+            "broll_aspect": "9:16",
+            "broll_plan": [
+                {"id": "c1", "spoken_text": "Anchor opens.", "segment_mode": "TALKING_HEAD"},
+                {"id": "c2", "spoken_text": "Now cut away.", "segment_mode": "BROLL_CUTAWAY", "broll_caption": "Grid telemetry spike"},
+            ],
+        }
+        code, accepted = _http_json(host, port, "POST", "/v1/render-video", body)
+        assert code == 202
+        job_id = accepted["job_id"]
+        deadline = time.monotonic() + 15.0
+        snap: dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            _, snap = _http_json(host, port, "GET", f"/v1/jobs/{job_id}")
+            if snap["status"] in ("READY", "FAILED"):
+                break
+            time.sleep(0.03)
+        assert snap["status"] == "READY", snap
+        # Only the cutaway clause is prefetched, at the requested aspect, and a still lands in cache.
+        assert len(plate_calls) == 1
+        assert plate_calls[0][0].startswith("Grid telemetry spike")
+        assert plate_calls[0][1] == "9:16"
+        assert len(list(renders_dir.glob("broll_*.png"))) >= 1
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        t.join(timeout=5.0)
 
 
 def test_build_lambda_voice_synthesizer_fn_decodes_48k_wav_to_44k_pcm(tmp_path: Path) -> None:

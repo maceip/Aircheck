@@ -186,12 +186,13 @@ private data class NanoOverlayBriefPayload(
  */
 class OnDevicePromptEngine internal constructor(
     private val modelProvider: () -> GenerativeModel,
-    private val completionOverride: (suspend (prompt: String) -> String)?
+    private val completionOverride: (suspend (prompt: String) -> String)?,
+    private val availabilityOverride: (suspend () -> OnDevicePromptAvailability)? = null,
 ) : OnDeviceLlmBackend {
 
     constructor(
         modelProvider: () -> GenerativeModel = { Generation.getClient() }
-    ) : this(modelProvider = modelProvider, completionOverride = null)
+    ) : this(modelProvider = modelProvider, completionOverride = null, availabilityOverride = null)
 
     @Volatile
     private var cachedModel: GenerativeModel? = null
@@ -210,6 +211,7 @@ class OnDevicePromptEngine internal constructor(
     }
 
     override suspend fun checkAvailability(): OnDevicePromptAvailability {
+        availabilityOverride?.let { return it() }
         return try {
             val gm = model()
             val status = gm.checkStatus()
