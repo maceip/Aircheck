@@ -68,7 +68,8 @@ class CoreStoryPipelineCoordinator(
     private val profileStore: AircheckProfileStore? = null,
     private val otaBundleSyncManager: OtaBundleSyncManager? = null,
     private val voiceStudioCoordinator: VoiceStudioSyncCoordinator? = null,
-    private val localCtcAligner: (suspend (File, String) -> List<AlignedWord>)? = null
+    private val localCtcAligner: (suspend (File, String) -> List<AlignedWord>)? = null,
+    private val onDeviceVoice: OnDeviceVoice? = null
 ) {
 
     suspend fun seedSessionFromStory(
@@ -202,8 +203,18 @@ class CoreStoryPipelineCoordinator(
             }
 
             val effectiveProjectId = session.scriptId.ifBlank { session.id }
-            val updated = if (localMicWavFile != null && localMicWavFile.exists() && localMicWavFile.length() > 44L) {
-                val stored = casStore.putFile(localMicWavFile, "wav")
+            // Voice priority: a recorded mic take, then Ryan's run9 voice on this phone, then the Mac studio.
+            val onDeviceWav: File? = if (localMicWavFile == null && onDeviceVoice?.isInstalled() == true) {
+                onDeviceVoice.synthesize(activeClauses.joinToString(" ") { it.spokenText }) { msg ->
+                    task?.onProgress?.invoke(msg)
+                }
+            } else {
+                null
+            }
+            val localWav = localMicWavFile ?: onDeviceWav
+            val updated = if (localWav != null && localWav.exists() && localWav.length() > 44L) {
+                val stored = casStore.putFile(localWav, "wav")
+                if (onDeviceWav != null) onDeviceWav.delete()
                 val wavInfo = parseWavDurationAndPeaks(stored.file)
                 val fullText = activeClauses.joinToString(" ") { it.spokenText }
                 val micAlignedWords = runLocalCtcAlignment(stored.file, fullText)
@@ -228,7 +239,7 @@ class CoreStoryPipelineCoordinator(
                     alignUrl = null,
                     ttsMetrics = null,
                     headMetrics = null,
-                    ttsSource = TTS_SOURCE_MIC,
+                    ttsSource = if (onDeviceWav != null) TTS_SOURCE_ON_DEVICE_RUN9 else TTS_SOURCE_MIC,
                     silenceGaps = emptyList(),
                     silenceGapsJobId = null,
                     finalClipId = null,
@@ -239,9 +250,8 @@ class CoreStoryPipelineCoordinator(
                     updatedAtMillis = System.currentTimeMillis()
                 )
             } else {
-                // One voice route: the Mac studio. The old on-phone v002 (llama.cpp CPU) voice was too
-                // slow to finish a clip and is no longer routed to; when the Mac is unreachable the user
-                // gets a plain "Mac offline" message instead of a raw stack error.
+                // Run9 voice isn't installed on this phone: voice the script on the Mac studio. When the
+                // Mac is unreachable the user gets a plain "Mac offline" message, not a raw stack error.
                 val health = runCatching { macRigGateway.resolveAndCheckHealth(rigBaseUrl) }.getOrNull()
                     ?: return@withContext Result.failure(MacStudioOfflineException())
                 val ttsRes = macRigGateway.synthesizeCoreStoryTts(
@@ -896,6 +906,7 @@ class CoreStoryPipelineCoordinator(
         const val TTS_SOURCE_LOCAL_V002: String = "local_v002"
         const val TTS_SOURCE_REMOTE_RIG: String = "remote_rig"
         const val TTS_SOURCE_MIC: String = "mic"
+        const val TTS_SOURCE_ON_DEVICE_RUN9: String = "on_device_run9"
         private val SUB_CLAUSE_SUFFIX_REGEX = Regex("_p\\d+$")
         fun splitStoryIntoClauses(
             rawText: String,

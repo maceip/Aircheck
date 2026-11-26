@@ -26,6 +26,7 @@ import com.example.engine.AircheckPlayerController
 import com.example.engine.AircheckProfilingCoordinator
 import com.example.engine.ClipExporter
 import com.example.engine.CoreStoryPipelineCoordinator
+import com.example.engine.OnDeviceVoice
 import com.example.engine.VoiceModelCareManager
 import com.example.graph.GraphAppSearchIndexer
 import com.example.graph.GraphRadarEngine
@@ -184,9 +185,12 @@ class AircheckContainer(context: Context) {
                 } else {
                     emptyList()
                 }
-            }
+            },
+            onDeviceVoice = onDeviceVoice
         )
     }
+
+    val onDeviceVoice: OnDeviceVoice by lazy { OnDeviceVoice(appContext) }
 
     fun bindVoiceStudioRuntime() {
         VoiceStudioRuntimeRegistry.otaBundleSyncManager = otaBundleSyncManager
