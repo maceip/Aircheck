@@ -25,23 +25,25 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.Executors
 
 /**
- * Bundled Gemma (gemma-4-E2B-it) drafting engine via LiteRT-LM, used as the on-device fallback when
- * AICore Gemini Nano (the TPU/NPU-accelerated primary) is unavailable on a device.
+ * Downloaded Gemma (gemma-4-E2B-it) drafting engine via LiteRT-LM, used as the on-device fallback when
+ * the AICore system model (the TPU-accelerated primary) is unavailable on a device or a pass fails.
  *
  * Lifecycle follows the LiteRT-LM mandates: weights load off the main thread on a single-thread
  * executor that solely owns the [Engine]/[Conversation]; both are closed exactly once. CPU backend
  * is used so the fallback runs on every device regardless of GPU/OpenCL support.
  */
 class LiteRtDraftingEngine(private val context: Context) : AutoCloseable {
+    // One single-thread executor owns the Engine and every Conversation (LiteRT-LM mandate).
     private val executor = Executors.newSingleThreadExecutor()
-    private val scope = CoroutineScope(SupervisorJob() + executor.asCoroutineDispatcher())
+    private val dispatcher = executor.asCoroutineDispatcher()
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val mutex = Mutex()
     private var engine: Engine? = null
-    private var conversation: Conversation? = null
     private var loadedPath: String? = null
 
     @Volatile
@@ -49,49 +51,67 @@ class LiteRtDraftingEngine(private val context: Context) : AutoCloseable {
         private set
 
     /** Load (or reuse) the model weights. Returns true once the engine is ready to generate. */
-    suspend fun initialize(modelFile: File): Boolean = mutex.withLock {
-        if (isReady && loadedPath == modelFile.absolutePath) return@withLock true
+    suspend fun initialize(modelFile: File): Boolean = withContext(dispatcher) {
+        mutex.withLock { initializeLocked(modelFile) }
+    }
+
+    private fun initializeLocked(modelFile: File): Boolean {
+        if (isReady && loadedPath == modelFile.absolutePath) return true
         releaseLocked()
-        try {
+        var created: Engine? = null
+        return try {
             val config = EngineConfig(
                 modelPath = modelFile.absolutePath,
                 backend = Backend.CPU(),
                 cacheDir = context.cacheDir.path,
             )
-            engine = Engine(config).also { it.initialize() }
-            conversation = checkNotNull(engine).createConversation(
-                ConversationConfig(
-                    systemInstruction = Contents.of(
-                        "You are a broadcast news drafting assistant. Always respond with a single " +
-                            "valid JSON object matching the requested schema, and nothing else."
-                    )
-                )
-            )
+            created = Engine(config)
+            created.initialize()
+            // Store the engine only after initialize() returned: closing a failed engine throws.
+            engine = created
             loadedPath = modelFile.absolutePath
             isReady = true
             true
         } catch (_: Throwable) {
-            releaseLocked()
+            engine = null
+            loadedPath = null
+            isReady = false
             false
         }
     }
 
-    /** Generate a completion for [prompt] on the owning executor. */
-    suspend fun generate(prompt: String): String = mutex.withLock {
-        val conv = conversation ?: throw IllegalStateException("LiteRT drafting engine not initialized")
-        val out = StringBuilder()
-        conv.sendMessageAsync(prompt).collect { chunk -> out.append(chunk.toString()) }
-        out.toString()
+    /**
+     * Generate a completion for [prompt]. Loads [modelFile] on first use. Every drafting pass is
+     * independent, so each call gets a fresh [Conversation] (no history carried between passes).
+     */
+    suspend fun generate(modelFile: File, prompt: String): String = withContext(dispatcher) {
+        mutex.withLock {
+            if (!initializeLocked(modelFile)) {
+                throw IllegalStateException("On-device Gemma model failed to load.")
+            }
+            val conv: Conversation = checkNotNull(engine).createConversation(
+                ConversationConfig(systemInstruction = Contents.of(SYSTEM_INSTRUCTION))
+            )
+            try {
+                val out = StringBuilder()
+                conv.sendMessageAsync(prompt).collect { chunk -> out.append(chunk.toString()) }
+                out.toString()
+            } finally {
+                runCatching { conv.close() }
+            }
+        }
     }
 
     private fun releaseLocked() {
-        runCatching { conversation?.close() }
-        conversation = null
-        runCatching { engine?.close() }
+        val e = engine
         engine = null
         loadedPath = null
         isReady = false
+        if (e != null) runCatching { e.close() }
     }
+
+    /** Unload the weights (e.g. before the model file is deleted). */
+    suspend fun release() = withContext(dispatcher) { mutex.withLock { releaseLocked() } }
 
     override fun close() {
         scope.launch { mutex.withLock { releaseLocked() } }
@@ -99,6 +119,12 @@ class LiteRtDraftingEngine(private val context: Context) : AutoCloseable {
                 scope.cancel()
                 executor.shutdown()
             }
+    }
+
+    private companion object {
+        const val SYSTEM_INSTRUCTION =
+            "You are a broadcast news drafting assistant. Always respond with a single " +
+                "valid JSON object matching the requested schema, and nothing else."
     }
 }
 

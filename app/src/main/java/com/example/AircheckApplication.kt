@@ -168,15 +168,18 @@ class AircheckContainer(context: Context) {
     private val liteRtBackedPromptEngine: OnDevicePromptEngine by lazy {
         OnDevicePromptEngine(
             modelProvider = { Generation.getClient() },
-            completionOverride = { prompt -> liteRtDraftingEngine.generate(prompt) },
-            availabilityOverride = { liteRtAvailability(liteRtDraftingEngine.isReady) },
+            // Weights load lazily on the first fallback pass, only once the verified file exists.
+            completionOverride = { prompt ->
+                liteRtDraftingEngine.generate(modelDownloadManager.modelFile(), prompt)
+            },
+            availabilityOverride = { liteRtAvailability(modelDownloadManager.isReady()) },
         )
     }
     val onDeviceLlmBackend: OnDeviceLlmBackend by lazy {
         FallbackOnDeviceLlmBackend(
             primary = onDevicePromptEngine,
             fallback = liteRtBackedPromptEngine,
-            fallbackReady = { liteRtDraftingEngine.isReady },
+            fallbackReady = { modelDownloadManager.isReady() },
         )
     }
     val llmStageRouter: LlmStageRouter by lazy {
