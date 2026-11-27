@@ -112,7 +112,7 @@ fun PipelineStatusDisplay(state: PipelineLedState, modifier: Modifier = Modifier
                             .clip(CircleShape)
                             .background(pipelineColor(s))
                     )
-                    Text(label, style = AcType.Caption.copy(fontSize = 7.sp, letterSpacing = 0.sp, color = AcTokens.OpGrey), maxLines = 1, softWrap = false)
+                    Text(label, style = AcType.Caption.copy(letterSpacing = 0.sp, color = AcTokens.OpGrey), maxLines = 1, softWrap = false)
                 }
             }
         }

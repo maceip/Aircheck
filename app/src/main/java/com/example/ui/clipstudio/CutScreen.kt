@@ -759,7 +759,7 @@ private fun VideoMonitorPanel(
         Text(
             text = buildAnnotatedString {
                 append(mmss(positionMs))
-                withStyle(SpanStyle(color = AcTokens.OpGrey, fontSize = 13.sp)) { append(" / ${mmss(durationMs)}") }
+                withStyle(AcType.numeral(15.sp).copy(color = AcTokens.OpGrey).toSpanStyle()) { append(" / ${mmss(durationMs)}") }
             },
             style = AcType.numeral(20.sp),
             maxLines = 1,

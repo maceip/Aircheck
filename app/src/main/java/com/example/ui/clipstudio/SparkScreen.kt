@@ -486,7 +486,7 @@ private fun ContinueLastVideoBlock(
             )
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 SectionCaption("Or continue your last video")
-                Text(video.title, style = AcType.Body.copy(fontSize = 15.sp, lineHeight = 20.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(video.title, style = AcType.Body, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val statusSub = when {
                     state.isDraftingFollowup -> "drafting follow-up…"
                     state.followupBeats.isNotEmpty() -> "follow-up script drafted"
@@ -531,7 +531,7 @@ private fun VideoThumbBox(
         } else if (durationMs > 0L) {
             Text(
                 text = mmss(durationMs),
-                style = AcType.Caption.copy(color = AcTokens.Ui, fontSize = 9.sp),
+                style = AcType.Caption.copy(color = AcTokens.Ui),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 4.dp)

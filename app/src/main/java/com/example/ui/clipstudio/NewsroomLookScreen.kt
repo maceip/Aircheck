@@ -1238,6 +1238,7 @@ private fun InlineOverlayEditorCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun StudioLookTab(
     state: StudioUiState,
@@ -1471,10 +1472,8 @@ private fun StudioLookTab(
             }
         }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             looks.forEach { item ->

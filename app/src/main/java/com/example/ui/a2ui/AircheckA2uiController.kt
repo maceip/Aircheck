@@ -22,7 +22,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Text
 import androidx.compose.material3.a2ui.catalog.A2uiAudioPlayerRenderer
 import androidx.compose.material3.a2ui.catalog.A2uiImageRenderer
@@ -129,23 +130,27 @@ fun createStockAircheckA2uiCatalog(context: Context): A2uiCatalog {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(text = description.orEmpty().ifBlank { "Audio preview" })
-            OutlinedButton(
-                onClick = {
-                    runCatching {
-                        if (isPlaying) {
-                            mediaPlayer.pause()
-                            isPlaying = false
-                        } else {
-                            mediaPlayer.reset()
-                            mediaPlayer.setDataSource(appContext, Uri.parse(url))
-                            mediaPlayer.prepare()
-                            mediaPlayer.start()
-                            isPlaying = true
-                        }
-                    }.onFailure(onError)
-                }
-            ) {
-                Text(text = if (isPlaying) "Pause" else "Play")
+            com.example.ui.design.AcMediaWell(padding = 5.dp) {
+                com.example.ui.design.AcMediaKey(
+                    icon = if (isPlaying) androidx.compose.material.icons.Icons.Filled.Pause else androidx.compose.material.icons.Icons.Filled.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    active = isPlaying,
+                    size = 48.dp,
+                    onClick = {
+                        runCatching {
+                            if (isPlaying) {
+                                mediaPlayer.pause()
+                                isPlaying = false
+                            } else {
+                                mediaPlayer.reset()
+                                mediaPlayer.setDataSource(appContext, Uri.parse(url))
+                                mediaPlayer.prepare()
+                                mediaPlayer.start()
+                                isPlaying = true
+                            }
+                        }.onFailure(onError)
+                    }
+                )
             }
         }
     }
