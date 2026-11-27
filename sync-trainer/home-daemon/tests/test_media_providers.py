@@ -290,7 +290,33 @@ def test_local_tts_uses_existing_strict_verifier_without_legacy_probe(monkeypatc
         assert kwargs["warm_engine"] is None
         return {"metrics": {"all_gates_passed": True}}
     monkeypatch.setattr(rbs, "render_broadcast_studio", render)
-    assert manager._run_broadcast_tts_stage(project_id="test", spoken_text="Test sentence.", caller_clauses=None, studio_dir=tmp_path / "studio", assets={})["metrics"]["all_gates_passed"]
+    local_res = manager._run_broadcast_tts_stage(project_id="test", spoken_text="Test sentence.", caller_clauses=None, studio_dir=tmp_path / "studio", assets={})
+    assert local_res["metrics"]["all_gates_passed"]
+    assert local_res["voice_engine"] == "chatterbox_local"
+    manager.shutdown()
+
+
+def test_auto_voice_reports_the_engine_that_actually_spoke(monkeypatch, tmp_path):
+    import ota_server
+    import render_broadcast_studio as rbs
+
+    manager = ota_server.RenderJobManager(tmp_path / "renders", tmp_path / "bundles", python_bin=sys.executable)
+    monkeypatch.setattr(manager, "_get_warm_tts_engine", lambda: object())
+    monkeypatch.setattr(rbs, "render_broadcast_studio", lambda **kwargs: {"metrics": {"all_gates_passed": True}})
+
+    def run_auto():
+        return manager._run_broadcast_tts_stage(project_id="test", spoken_text="Test sentence here for the gate.", caller_clauses=None, studio_dir=tmp_path / "studio", assets={}, voice_backend="auto")
+
+    # GPU endpoint down: "auto" uses the local S2-Pro engine and says so.
+    monkeypatch.setattr(ota_server, "_build_lambda_voice_synthesizer_fn", lambda *a, **k: None)
+    assert run_auto()["voice_engine"] == "s2pro_v002_local"
+
+    # GPU endpoint up but only advertising F5: the label is the backend really used, not the one asked for.
+    def gpu_synth(clause, count):
+        return []
+    gpu_synth.aircheck_voice_engine = "lambda_f5"
+    monkeypatch.setattr(ota_server, "_build_lambda_voice_synthesizer_fn", lambda *a, **k: gpu_synth)
+    assert run_auto()["voice_engine"] == "lambda_f5"
     manager.shutdown()
 
 

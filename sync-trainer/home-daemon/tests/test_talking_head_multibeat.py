@@ -1119,6 +1119,7 @@ def test_build_lambda_voice_synthesizer_fn_decodes_48k_wav_to_44k_pcm(tmp_path: 
     try:
         synth_fn = ota_server._build_lambda_voice_synthesizer_fn(f"http://127.0.0.1:{port}")
         assert synth_fn is not None
+        assert synth_fn.aircheck_voice_engine in ("lambda_chatterbox", "lambda_f5")
         takes = synth_fn(SimpleNamespace(index=0, raw_text="Good evening from the studio."), 1)
         assert len(takes) == 1
         assert takes[0].pcm44k.dtype == np.float32

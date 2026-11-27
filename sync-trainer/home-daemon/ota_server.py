@@ -976,6 +976,7 @@ def _build_lambda_voice_synthesizer_fn(
             )
         return out
 
+    _synth.aircheck_voice_engine = f"lambda_{eff_backend}"  # type: ignore[attr-defined]
     return _synth
 
 
@@ -2122,6 +2123,17 @@ class RenderJobManager:
                         else None
                     )
             selected_synth = local_synth or external_synth_fn
+            # Name the engine that will actually speak, so a job never reports a backend it did not use.
+            if local_synth is not None:
+                voice_engine = "chatterbox_local"
+            elif norm_backend == "heygen_voice":
+                voice_engine = "heygen_voice"
+            elif external_synth_fn is not None:
+                voice_engine = str(getattr(external_synth_fn, "aircheck_voice_engine", f"lambda_{norm_backend}"))
+            else:
+                voice_engine = "s2pro_v002_local"
+                if norm_backend == "auto":
+                    _report_async_progress(0.22, "GPU voice endpoint unreachable; voicing with local S2-Pro v002…")
 
             eff_caller_clauses = caller_clauses
             orig_clauses_for_unmerge: list[dict[str, str]] | None = None
@@ -2173,6 +2185,7 @@ class RenderJobManager:
                 kwargs["room_tone_path"] = assets["room_tone"]
 
             studio_res = rbs.render_broadcast_studio(**kwargs)
+            studio_res["voice_engine"] = voice_engine
             if local_synth is not None and local_synth.provenance is not None:
                 studio_res.setdefault("metrics", {})["tts_provider"] = local_synth.provenance
             if orig_clauses_for_unmerge is not None:
@@ -2565,6 +2578,7 @@ class RenderJobManager:
         words: list[dict[str, Any]] = []
         timed_clauses: list[dict[str, Any]] = []
         source_wav: Path
+        voice_engine_used: str | None = None
 
         if self._tts_runner is not None:
             staged_wav = work_dir / f"{tts_id}.wav"
@@ -2600,6 +2614,7 @@ class RenderJobManager:
                 voice_backend=raw_voice_backend,
                 heygen_voice_id=heygen_voice_id,
             )
+            voice_engine_used = str(studio_report.get("voice_engine") or "") or None
             master_wav_raw = studio_report.get("master_wav_path")
             if not master_wav_raw:
                 raise RuntimeError("Broadcast studio TTS completed without master_wav_path")
@@ -2654,6 +2669,7 @@ class RenderJobManager:
             "words": words,
             "align_url": f"/v1/renders/{align_filename}",
             "metrics": metrics,
+            **({"voice_engine": voice_engine_used} if voice_engine_used else {}),
         }
 
     def chop_talking_head_into_broll(self, payload: dict[str, Any]) -> dict[str, Any]:
