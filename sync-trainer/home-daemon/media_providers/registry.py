@@ -16,6 +16,8 @@ VALID_VOICE_BACKENDS: tuple[str, ...] = (
 )
 VALID_VIDEO_BACKENDS: tuple[str, ...] = (
     "heygen",
+    "avatarforcing_mlx",
+    "longcat_avatar_mlx",
     "musetalk",
 )
 
@@ -29,6 +31,8 @@ _CONFIG_TTS_ALIASES: dict[str, str] = {
 _CONFIG_VIDEO_ALIASES: dict[str, str] = {
     "legacy": "heygen",
     "heygen": "heygen",
+    "avatarforcing_mlx": "avatarforcing_mlx",
+    "longcat_avatar_mlx": "longcat_avatar_mlx",
     "musetalk": "musetalk",
 }
 
@@ -100,6 +104,8 @@ def build_provider_catalog(
     default_heygen_engine: str,
     default_heygen_resolution: str,
     default_heygen_voice_id: str,
+    avatarforcing_status: Mapping[str, Any] | None = None,
+    longcat_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the single unified `GET /v1/media/providers` payload (zero leaked filesystem paths)."""
     lambda_set = {str(b).lower() for b in lambda_backends}
@@ -164,6 +170,8 @@ def build_provider_catalog(
         },
     ]
 
+    af_status = avatarforcing_status or {}
+    lc_status = longcat_status or {}
     video_backends: list[dict[str, Any]] = [
         {
             "id": "heygen",
@@ -174,6 +182,26 @@ def build_provider_catalog(
                 f"{len(heygen_looks)} live look(s)"
                 if heygen_available
                 else str(heygen_options.get("error") or "HeyGen CLI unavailable")
+            ),
+        },
+        {
+            "id": "avatarforcing_mlx",
+            "label": "AvatarForcing MLX",
+            "available": bool(af_status.get("available")),
+            "execution": "local_mlx",
+            "detail": str(
+                af_status.get("detail")
+                or "Local AvatarForcing MLX runtime not installed on rig"
+            ),
+        },
+        {
+            "id": "longcat_avatar_mlx",
+            "label": "LongCat 1.6 MLX",
+            "available": bool(lc_status.get("available")),
+            "execution": "local_mlx",
+            "detail": str(
+                lc_status.get("detail")
+                or "LongCat 1.6 MLX weights not downloaded on rig"
             ),
         },
         {

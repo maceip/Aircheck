@@ -432,8 +432,10 @@ class CoreStoryPipelineCoordinator(
             val selectedHeygenRes = profileSettings?.heygenResolution?.takeIf { it.isNotBlank() }
             val selectedHeygenMotion = profileSettings?.heygenMotionPrompt?.takeIf { it.isNotBlank() }
 
+            val isHeygenBackend = selectedVideoBackend.isNullOrBlank() ||
+                selectedVideoBackend.equals("heygen", ignoreCase = true)
             val effectivePhotoSha = if (
-                selectedVideoBackend != "musetalk" && !selectedHeygenLookId.isNullOrBlank()
+                isHeygenBackend && !selectedHeygenLookId.isNullOrBlank()
             ) {
                 null
             } else {

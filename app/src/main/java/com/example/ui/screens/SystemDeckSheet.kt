@@ -566,7 +566,7 @@ private fun VoiceAndHeygenCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("VOICE & HEYGEN VIDEO", style = SectionLabelStyle)
+            Text("VOICE & AVATAR VIDEO", style = SectionLabelStyle)
             CsKey(
                 onClick = { onLoadOptions(true) },
                 enabled = !uiState.isLoadingStudioOptions,
@@ -653,8 +653,11 @@ private fun VoiceAndHeygenCard(
                 }
             }
 
-            // 2. Video Provider (HeyGen Avatar / local MuseTalk CUDA worker)
+            // 2. Video Provider (HeyGen Avatar / Mac Studio MLX Avatars / MuseTalk)
             val activeVideoBackend = settings.rigVideoBackend.ifBlank { options.defaultVideoBackend }
+            val activeVideoOption = options.videoBackends.firstOrNull {
+                it.id.equals(activeVideoBackend, ignoreCase = true)
+            }
             if (options.videoBackends.isNotEmpty()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -663,33 +666,90 @@ private fun VoiceAndHeygenCard(
                 ) {
                     Text("Video provider", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
                     Text(
-                        text = options.videoBackends.firstOrNull { it.id == activeVideoBackend }?.label
-                            ?: activeVideoBackend,
+                        text = activeVideoOption?.label ?: activeVideoBackend,
                         style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
                         modifier = Modifier.testTag("video_backend_active_label")
                     )
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    options.videoBackends.forEach { vOpt ->
-                        val selected = activeVideoBackend.equals(vOpt.id, ignoreCase = true)
-                        TactileOptionTile(
-                            label = vOpt.label,
-                            selected = selected,
-                            available = vOpt.available,
-                            onClick = {
-                                if (!vOpt.available) {
-                                    onUnavailableClick("${vOpt.label} unavailable: ${vOpt.detail.ifBlank { "not configured on rig" }}")
-                                } else {
-                                    onSelectVideoBackend(vOpt.id)
-                                }
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("video_backend_${vOpt.id}")
+                options.videoBackends.chunked(2).forEach { pair ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        pair.forEach { vOpt ->
+                            val selected = activeVideoBackend.equals(vOpt.id, ignoreCase = true)
+                            TactileOptionTile(
+                                label = vOpt.label,
+                                selected = selected,
+                                available = vOpt.available,
+                                onClick = {
+                                    if (!vOpt.available) {
+                                        onUnavailableClick("${vOpt.label} unavailable: ${vOpt.detail.ifBlank { "not configured on rig" }}")
+                                    } else {
+                                        onSelectVideoBackend(vOpt.id)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("video_backend_${vOpt.id}")
+                            )
+                        }
+                        if (pair.size == 1) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+                if (!activeVideoBackend.equals("heygen", ignoreCase = true)) {
+                    val detail = activeVideoOption?.detail.orEmpty()
+                    if (detail.isNotBlank()) {
+                        Text(
+                            text = detail,
+                            style = mono(11.sp, Cs.InkSub),
+                            modifier = Modifier.testTag("video_backend_active_detail")
                         )
+                    }
+                    if (activeVideoBackend.equals("longcat_avatar_mlx", ignoreCase = true)) {
+                        Text("Scene prompt (optional)", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            BasicTextField(
+                                value = motionDraft,
+                                onValueChange = { motionDraft = it },
+                                singleLine = true,
+                                textStyle = sans(13.5.sp, Cs.White, 18.sp),
+                                cursorBrush = SolidColor(Cs.White),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(46.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Cs.Body)
+                                    .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 12.dp, vertical = 13.dp)
+                                    .testTag("longcat_scene_prompt_input"),
+                                decorationBox = { inner ->
+                                    Box(contentAlignment = Alignment.CenterStart) {
+                                        if (motionDraft.isEmpty()) {
+                                            Text("e.g. presenter in warm studio lighting", style = sans(13.sp, Cs.Dim, 18.sp))
+                                        }
+                                        inner()
+                                    }
+                                }
+                            )
+                            CsKeyLabel(
+                                label = "Save",
+                                onClick = { onSaveMotionPrompt(motionDraft) },
+                                role = KeyRole.ACTIVE,
+                                radius = 12.dp,
+                                size = 12.5.sp,
+                                weight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .height(46.dp)
+                                    .testTag("longcat_scene_prompt_save")
+                            )
+                        }
                     }
                 }
             }

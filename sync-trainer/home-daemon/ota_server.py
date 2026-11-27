@@ -86,6 +86,10 @@ from drafting_passes import (
     MAX_DRAFT_TEXT_BODY_BYTES,
     DraftPassEngine,
 )
+from media_providers.mlx_avatars import (
+    probe_avatarforcing,
+    probe_longcat_avatar,
+)
 from media_providers.registry import (
     VALID_VIDEO_BACKENDS,
     VALID_VOICE_BACKENDS,
@@ -2050,6 +2054,8 @@ class RenderJobManager:
             default_heygen_engine=HEYGEN_ENGINE,
             default_heygen_resolution="1080p",
             default_heygen_voice_id=HEYGEN_VOICE_ID,
+            avatarforcing_status=probe_avatarforcing(),
+            longcat_status=probe_longcat_avatar(),
         )
 
     def _run_broadcast_tts_stage(
@@ -2339,14 +2345,18 @@ class RenderJobManager:
         eff_video_backend = str(spec.get("video_backend") or self.media_config.video_backend or "heygen").strip().lower()
         eff_hg_engine = str(spec.get("heygen_engine") or HEYGEN_ENGINE)
         eff_hg_res = str(spec.get("heygen_resolution") or resolution)
+        if eff_video_backend == "musetalk":
+            stage_video_detail = f"Rendering {resolution} talking-head video (MuseTalk)"
+        elif eff_video_backend == "avatarforcing_mlx":
+            stage_video_detail = f"Rendering {resolution} talking-head video (AvatarForcing MLX)"
+        elif eff_video_backend == "longcat_avatar_mlx":
+            stage_video_detail = f"Rendering {resolution} talking-head video (LongCat 1.6 MLX)"
+        else:
+            stage_video_detail = f"Rendering {eff_hg_res} talking-head video (HeyGen {eff_hg_engine})"
         report_progress(
             status="LIPSYNC",
             progress_fraction=0.60,
-            stage_detail=(
-                f"Rendering {resolution} talking-head video (MuseTalk)"
-                if eff_video_backend == "musetalk"
-                else f"Rendering {eff_hg_res} talking-head video (HeyGen {eff_hg_engine})"
-            ),
+            stage_detail=stage_video_detail,
             metrics=metrics,
         )
 
@@ -2396,6 +2406,9 @@ class RenderJobManager:
                 head_cmd.extend(["--heygen-expressiveness", str(spec["heygen_expressiveness"])])
             if spec.get("heygen_motion_prompt"):
                 head_cmd.extend(["--heygen-motion-prompt", str(spec["heygen_motion_prompt"])])
+        elif eff_video_backend == "longcat_avatar_mlx":
+            if spec.get("heygen_motion_prompt"):
+                head_cmd.extend(["--heygen-motion-prompt", str(spec["heygen_motion_prompt"])])
 
         # B-roll overlap: warm the still cache concurrently with the (long) HeyGen render so the later
         # chop hits cache instead of regenerating. Gated by prefetch_broll (set only by the app) so
@@ -2433,6 +2446,10 @@ class RenderJobManager:
             if type(configured_timeout) is not int or not 1 <= configured_timeout <= 7200:
                 raise ValueError("MuseTalk timeout_seconds must be 1..7200")
             head_timeout_sec = max(head_timeout_sec, configured_timeout * 2 + 120)
+        elif eff_video_backend == "longcat_avatar_mlx":
+            head_timeout_sec = max(head_timeout_sec, 7200)
+        elif eff_video_backend == "avatarforcing_mlx":
+            head_timeout_sec = max(head_timeout_sec, 900)
         try:
             head_proc = subprocess.run(
                 head_cmd,

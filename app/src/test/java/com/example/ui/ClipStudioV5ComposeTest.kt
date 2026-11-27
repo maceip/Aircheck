@@ -926,4 +926,140 @@ class ClipStudioV5ComposeTest {
         assertTrue(renderBody.contains("\"heygen_resolution\":\"1080p\""))
         assertTrue(renderBody.contains("\"heygen_motion_prompt\":\"calm broadcast anchor delivery\""))
     }
+
+    @Test
+    fun systemDeckSelectsMlxAvatarBackendsAndTransmitsVideoBackendToMacRig() = composeRule.run {
+        val app = ApplicationProvider.getApplicationContext<AircheckApplication>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val capturedRenderBodies = CopyOnWriteArrayList<String>()
+        server.createContext("/health") { ex ->
+            val resp = """{"status":"ok","render_bridge":true}""".toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/media/providers") { ex ->
+            val resp = """
+                {
+                  "schema_version": 2,
+                  "tts_backend": "auto",
+                  "video_backend": "heygen",
+                  "voice_backends": [
+                    {"id":"auto","label":"Auto (Best Available)","available":true,"detail":"Auto"}
+                  ],
+                  "video_backends": [
+                    {"id":"heygen","label":"HeyGen Avatar","available":true,"detail":"2 live look(s)"},
+                    {"id":"avatarforcing_mlx","label":"AvatarForcing MLX","available":true,"detail":"Mac Studio MLX · fp32 flow / fp16 decode · realtime (CC BY-NC)"},
+                    {"id":"longcat_avatar_mlx","label":"LongCat 1.6 MLX","available":true,"detail":"Mac Studio MLX · v1.6-bf16 8-step CFG-free (MIT)"},
+                    {"id":"musetalk","label":"MuseTalk v1.5","available":false,"detail":"Requires CUDA"}
+                  ],
+                  "heygen": {"available": true, "looks": [], "engines": []},
+                  "defaults": {"voice_backend":"auto","video_backend":"heygen"}
+                }
+            """.trimIndent().toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/render-video") { ex ->
+            capturedRenderBodies.add(ex.requestBody.bufferedReader().readText())
+            val resp = """{"job_id":"job_mlx_${capturedRenderBodies.size}"}""".toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(202, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.start()
+        httpServer = server
+        val rigUrl = "http://127.0.0.1:${server.address.port}"
+        runBlocking { app.container.profileStore.setTailscaleRigUrl(rigUrl) }
+
+        var studioVmRef: StudioViewModel? = null
+        setContent {
+            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
+            val studioState by studioVm.uiState.collectAsStateWithLifecycle()
+            AircheckTheme {
+                SystemDeckSheet(
+                    uiState = studioState,
+                    onSelectChannel = studioVm::setBrandChannel,
+                    onClearCasCache = {},
+                    onClose = {},
+                    onSaveTailscaleRigUrl = studioVm::saveTailscaleRigUrl,
+                    onTestRigConnection = studioVm::testMacRigConnection,
+                    onLoadStudioOptions = studioVm::loadStudioRigOptions,
+                    onSelectVoiceBackend = studioVm::setRigVoiceBackend,
+                    onSelectVideoBackend = studioVm::setRigVideoBackend,
+                    onSelectHeygenLook = studioVm::setHeygenLookId,
+                    onSelectHeygenEngine = studioVm::setHeygenEngine,
+                    onSelectHeygenResolution = studioVm::setHeygenResolution,
+                    onSaveHeygenMotionPrompt = studioVm::setHeygenMotionPrompt
+                )
+            }
+        }
+        val studioVm = checkNotNull(studioVmRef)
+
+        onNodeWithTag("system_deck_lazy_list").performScrollToNode(hasTestTag("voice_heygen_card"))
+        waitUntil(timeoutMillis = 8_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.studioRigOptions?.videoBackends?.size == 4
+        }
+
+        // Select AvatarForcing MLX and verify real backend persistence + live detail
+        onNodeWithTag("video_backend_avatarforcing_mlx").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.settings.rigVideoBackend == "avatarforcing_mlx"
+        }
+        onNodeWithTag("video_backend_active_detail").assertIsDisplayed()
+
+        runBlocking {
+            val savedAf = app.container.profileStore.current()
+            assertEquals("avatarforcing_mlx", savedAf.rigVideoBackend)
+            app.container.macRigGateway.enqueueMacRigRender(
+                rigBaseUrl = rigUrl,
+                project = ScriptProject(
+                    id = "proj_af",
+                    title = "Test",
+                    voiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
+                    beats = listOf(ScriptBeat(id = "b0", index = 0, spokenText = "Hello MLX."))
+                ),
+                photoSha = null,
+                videoBackend = savedAf.rigVideoBackend
+            )
+        }
+
+        // Select LongCat 1.6 MLX, set a scene prompt, and verify persisted settings + payload
+        onNodeWithTag("video_backend_longcat_avatar_mlx").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.settings.rigVideoBackend == "longcat_avatar_mlx"
+        }
+        onNodeWithTag("longcat_scene_prompt_input").performTextReplacement("warm broadcast desk lighting")
+        onNodeWithTag("longcat_scene_prompt_save").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.settings.heygenMotionPrompt == "warm broadcast desk lighting"
+        }
+
+        runBlocking {
+            val savedLc = app.container.profileStore.current()
+            assertEquals("longcat_avatar_mlx", savedLc.rigVideoBackend)
+            app.container.macRigGateway.enqueueMacRigRender(
+                rigBaseUrl = rigUrl,
+                project = ScriptProject(
+                    id = "proj_lc",
+                    title = "Test",
+                    voiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
+                    beats = listOf(ScriptBeat(id = "b0", index = 0, spokenText = "Hello LongCat."))
+                ),
+                photoSha = null,
+                videoBackend = savedLc.rigVideoBackend,
+                heygenMotionPrompt = savedLc.heygenMotionPrompt
+            )
+        }
+
+        assertEquals(2, capturedRenderBodies.size)
+        assertTrue(capturedRenderBodies[0].contains("\"video_backend\":\"avatarforcing_mlx\""))
+        assertTrue(capturedRenderBodies[1].contains("\"video_backend\":\"longcat_avatar_mlx\""))
+        assertTrue(capturedRenderBodies[1].contains("\"heygen_motion_prompt\":\"warm broadcast desk lighting\""))
+    }
 }

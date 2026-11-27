@@ -428,3 +428,108 @@ def test_musetalk_failed_qa_does_not_publish(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="duration mismatch"):
         musetalk.render({"cache_dir": str(tmp_path / "cache")}, master_wav=audio, avatar=source, output=output, width=720, height=1280, duration_ms=2000)
     assert not output.exists()
+
+
+def test_mlx_avatar_probes_detect_complete_and_partial_installs_without_leaking_paths(monkeypatch, tmp_path):
+    from media_providers import mlx_avatars
+
+    avatars_root = tmp_path / "secret_mlx_root"
+    af_cli = avatars_root / "avatarforcing-mlx" / ".venv" / "bin" / "avatarforcing-mlx"
+    af_cli.parent.mkdir(parents=True)
+    af_cli.write_text("#!/bin/sh\n")
+    af_cache = tmp_path / "secret_af_cache"
+    (af_cache / "wav2vec2-base-960h").mkdir(parents=True)
+    (af_cache / "flow_transformer_mlx.safetensors").write_bytes(b"flow")
+    (af_cache / "motion_autoencoder.pth").write_bytes(b"ae")
+    (af_cache / "wav2vec2-base-960h" / "config.json").write_text("{}")
+
+    lc_py = avatars_root / "longcat-avatar-mlx" / ".venv" / "bin" / "python"
+    lc_py.parent.mkdir(parents=True)
+    lc_py.write_text("#!/bin/sh\n")
+    lc_weights = avatars_root / "longcat-avatar-mlx" / "weights" / "LongCat-Video-Avatar-1.6-bf16"
+    (lc_weights / "dit").mkdir(parents=True)
+    (lc_weights / "dit" / "config.json").write_text("{}")
+    (lc_weights / "dit" / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"a": "shard1.safetensors", "b": "shard2.safetensors"}})
+    )
+    (lc_weights / "dit" / "shard1.safetensors").write_bytes(b"s1")
+
+    monkeypatch.setenv("AIRCHECK_MLX_AVATARS_ROOT", str(avatars_root))
+    monkeypatch.setenv("AVATARFORCING_MLX_HOME", str(af_cache))
+    monkeypatch.delenv("AIRCHECK_LONGCAT_WEIGHTS_DIR", raising=False)
+
+    af = mlx_avatars.probe_avatarforcing()
+    assert af["available"] is True
+    assert str(avatars_root) not in af["detail"]
+    assert str(af_cache) not in af["detail"]
+
+    lc_partial = mlx_avatars.probe_longcat_avatar()
+    assert lc_partial["available"] is False
+    assert "downloading" in lc_partial["detail"]
+    assert str(avatars_root) not in lc_partial["detail"]
+
+    # Complete all required LongCat files + shards and verify it flips available
+    (lc_weights / "dit" / "shard2.safetensors").write_bytes(b"s2")
+    for rel in [
+        "vae/config.json",
+        "vae/diffusion_pytorch_model.safetensors",
+        "audio_encoder/config.json",
+        "audio_encoder/model.safetensors",
+        "lora/dmd_lora.safetensors",
+        "lora/opsd_lora.safetensors",
+        "text_encoder/config.json",
+        "pipeline_config.json",
+    ]:
+        p = lc_weights / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"ok")
+    (lc_weights / "text_encoder" / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"t": "t1.safetensors"}})
+    )
+    (lc_weights / "text_encoder" / "t1.safetensors").write_bytes(b"t1")
+
+    lc_ready = mlx_avatars.probe_longcat_avatar()
+    assert lc_ready["available"] is True
+    assert lc_ready["variant"] == "v1.6-bf16"
+    assert str(avatars_root) not in lc_ready["detail"]
+
+
+def test_mlx_avatar_backends_dispatch_without_hosted_fallback(monkeypatch, tmp_path):
+    import generate_talking_head as gth
+    from media_providers import mlx_avatars
+
+    voice, avatar = tmp_path / "voice.wav", tmp_path / "avatar.png"
+    voice.write_bytes(b"test")
+    avatar.write_bytes(b"test")
+    monkeypatch.setattr(gth, "_prepare_canonical_master_wav", lambda *a, **k: (a[1], 4000))
+    monkeypatch.setattr(gth, "_invoke_heygen_avatar", Mock(side_effect=AssertionError("no hosted fallback")))
+
+    af_mock = Mock(return_value={"engine": "avatarforcing_mlx:fp32_fp16", "output_mp4": str(tmp_path / "af.mp4")})
+    monkeypatch.setattr(mlx_avatars, "render_avatarforcing", af_mock)
+    res_af = gth.generate_talking_head(
+        voice, avatar, tmp_path / "af.mp4", video_backend="avatarforcing_mlx", resolution="1080P", ratio="9:16"
+    )
+    assert res_af["engine"] == "avatarforcing_mlx:fp32_fp16"
+    assert af_mock.call_args.kwargs["width"] == 1080
+    assert af_mock.call_args.kwargs["height"] == 1920
+
+    lc_mock = Mock(return_value={"engine": "longcat_avatar_mlx:v1.6-bf16", "output_mp4": str(tmp_path / "lc.mp4")})
+    monkeypatch.setattr(mlx_avatars, "render_longcat_avatar", lc_mock)
+    res_lc = gth.generate_talking_head(
+        voice, avatar, tmp_path / "lc.mp4",
+        video_backend="longcat_avatar_mlx", resolution="1080P", ratio="9:16",
+        heygen_motion_prompt="warm studio desk",
+    )
+    assert res_lc["engine"] == "longcat_avatar_mlx:v1.6-bf16"
+    assert lc_mock.call_args.kwargs["motion_prompt"] == "warm studio desk"
+    assert lc_mock.call_args.kwargs["ratio"] == "9:16"
+
+
+def test_compute_longcat_segments_matches_25fps_schedule():
+    from media_providers.mlx_avatars import compute_longcat_segments
+
+    assert compute_longcat_segments(3000) == 1
+    assert compute_longcat_segments(3720) == 1
+    assert compute_longcat_segments(6920) == 2
+    assert compute_longcat_segments(16000) == 5
+

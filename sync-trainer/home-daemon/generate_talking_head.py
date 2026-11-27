@@ -615,6 +615,30 @@ def generate_talking_head(
                 media_config.musetalk or {}, master_wav=master_wav, avatar=avatar_path,
                 output=output_mp4, width=target_w, height=target_h, duration_ms=total_ms,
             )
+        if eff_video_backend == "avatarforcing_mlx":
+            from media_providers.mlx_avatars import render_avatarforcing
+
+            return render_avatarforcing(
+                master_wav=master_wav,
+                avatar=avatar_path,
+                output=output_mp4,
+                width=target_w,
+                height=target_h,
+                duration_ms=total_ms,
+            )
+        if eff_video_backend == "longcat_avatar_mlx":
+            from media_providers.mlx_avatars import render_longcat_avatar
+
+            return render_longcat_avatar(
+                master_wav=master_wav,
+                avatar=avatar_path,
+                output=output_mp4,
+                width=target_w,
+                height=target_h,
+                ratio=norm_ratio,
+                duration_ms=total_ms,
+                motion_prompt=heygen_motion_prompt,
+            )
         if not full_transcript and whisper_model.is_file():
             wav16 = tmp_dir / "full_16k.wav"
             _run_subprocess(
@@ -723,7 +747,12 @@ def main() -> int:
     parser.add_argument("--ratio", default="9:16", choices=["9:16", "16:9", "1:1"])
     parser.add_argument("--max-duration", type=int, default=10, help="Max clip duration in seconds (2..120, default 10)")
     parser.add_argument("--media-config", type=Path, default=None, help="Opt-in local provider configuration")
-    parser.add_argument("--video-backend", default=None, choices=["heygen", "musetalk"], help="Video provider backend (heygen or musetalk)")
+    parser.add_argument(
+        "--video-backend",
+        default=None,
+        choices=["heygen", "avatarforcing_mlx", "longcat_avatar_mlx", "musetalk"],
+        help="Video provider backend (heygen, avatarforcing_mlx, longcat_avatar_mlx, or musetalk)",
+    )
     parser.add_argument("--custom-photo", action="store_true", help="Animate the supplied --avatar image instead of the default HeyGen look")
     parser.add_argument("--heygen-look-id", default=None, help="Override HeyGen avatar look ID")
     parser.add_argument("--heygen-engine", default=None, choices=list(VALID_HEYGEN_ENGINES), help="Override HeyGen engine")
