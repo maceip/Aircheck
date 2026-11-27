@@ -26,14 +26,12 @@ import androidx.compose.ui.unit.sp
 import com.example.engine.ModelDownloadManager.DownloadState
 import com.example.engine.ModelDownloadManager.Phase
 import com.example.engine.formatModelBytes
-import com.example.ui.clipstudio.Cs
-import com.example.ui.clipstudio.CsKey
-import com.example.ui.clipstudio.CsLedDot
-import com.example.ui.clipstudio.KeyRole
-import com.example.ui.clipstudio.SectionLabelStyle
-import com.example.ui.clipstudio.mono
-import com.example.ui.clipstudio.sans
-import com.example.ui.clipstudio.sunkenPanel
+import com.example.ui.design.AcCard
+import com.example.ui.design.AcDisplay
+import com.example.ui.design.AcKey
+import com.example.ui.design.AcKeySize
+import com.example.ui.design.AcTokens
+import com.example.ui.design.AcType
 
 /** What AICore reports for the system drafting model. [checked] is false until the probe returns. */
 data class AicoreModelStatus(val checked: Boolean, val baseModelName: String?)
@@ -59,15 +57,13 @@ fun OnDeviceModelsCard(
 ) {
     // Phone drafting needs a model that can actually run here: the AICore model or verified Gemma.
     val phoneCanDraft = aicore.baseModelName != null || download.phase == Phase.READY
-    Column(
+    AcCard(
         modifier = modifier
             .fillMaxWidth()
-            .sunkenPanel(radius = 18.dp)
-            .padding(14.dp)
             .testTag("on_device_models_card"),
+        tag = "On-device drafting models",
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text("ON-DEVICE DRAFTING MODELS", style = SectionLabelStyle)
 
         // Where Spark drafting runs. Persisted in settings; read by the LLM stage router.
         Row(
@@ -75,10 +71,10 @@ fun OnDeviceModelsCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Write scripts on", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
+            Text("Write scripts on", style = AcType.BodySmall.copy(color = AcTokens.Ink))
             Text(
                 text = if (draftOnPhone) "This phone" else "Mac Studio",
-                style = mono(12.sp, Cs.Mint, FontWeight.Medium),
+                style = AcType.Label,
                 modifier = Modifier.testTag("draft_location_label")
             )
         }
@@ -103,7 +99,7 @@ fun OnDeviceModelsCard(
         if (!phoneCanDraft && aicore.checked) {
             Text(
                 text = "No on-device model can run yet — download the Gemma fallback to draft on this phone.",
-                style = sans(12.5.sp, Cs.Muted, 17.sp),
+                style = AcType.BodySmall,
                 modifier = Modifier.testTag("draft_location_hint")
             )
         }
@@ -114,10 +110,10 @@ fun OnDeviceModelsCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Voice scripts on", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
+                Text("Voice scripts on", style = AcType.BodySmall.copy(color = AcTokens.Ink))
                 Text(
                     text = if (voiceOnPhone) "This phone" else "Mac Studio",
-                    style = mono(12.sp, Cs.Mint, FontWeight.Medium),
+                    style = AcType.Label,
                     modifier = Modifier.testTag("voice_location_label")
                 )
             }
@@ -147,14 +143,14 @@ fun OnDeviceModelsCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("System model (AICore)", style = sans(13.5.sp, Cs.InkSub, 18.sp))
+            Text("System model (AICore)", style = AcType.BodySmall)
             Text(
                 text = when {
                     !aicore.checked -> "Checking…"
                     aicore.baseModelName != null -> aicore.baseModelName
                     else -> "Not available"
                 },
-                style = mono(12.sp, if (aicore.baseModelName != null) Cs.Mint else Cs.Muted),
+                style = AcType.Label.copy(color = if (aicore.baseModelName != null) AcTokens.Ink else AcTokens.Ink2),
                 modifier = Modifier.testTag("aicore_model_label")
             )
         }
@@ -165,7 +161,7 @@ fun OnDeviceModelsCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Gemma 4 E2B fallback", style = sans(13.5.sp, Cs.InkSub, 18.sp))
+            Text("Gemma 4 E2B fallback", style = AcType.BodySmall)
             Text(
                 text = when (download.phase) {
                     Phase.NOT_DOWNLOADED -> "Not downloaded"
@@ -175,13 +171,11 @@ fun OnDeviceModelsCard(
                     Phase.READY -> "Ready"
                     Phase.FAILED -> "Failed"
                 },
-                style = mono(
-                    12.sp,
-                    when (download.phase) {
-                        Phase.READY -> Cs.Mint
-                        Phase.FAILED -> Cs.Red
-                        Phase.DOWNLOADING, Phase.VERIFYING -> Cs.Amber
-                        else -> Cs.Muted
+                style = AcType.Label.copy(
+                    color = when (download.phase) {
+                        Phase.READY -> AcTokens.Ink
+                        Phase.FAILED -> AcTokens.Red
+                        else -> AcTokens.Ink2
                     }
                 ),
                 modifier = Modifier.testTag("gemma_phase_label")
@@ -189,25 +183,25 @@ fun OnDeviceModelsCard(
         }
         Text(
             text = "Used when the system model is unavailable or a drafting pass fails. Downloads resume where they left off.",
-            style = sans(12.5.sp, Cs.Muted, 17.sp)
+            style = AcType.BodySmall
         )
 
         if (download.totalBytes > 0L && download.phase != Phase.READY) {
             val fraction = (download.downloadedBytes.toFloat() / download.totalBytes).coerceIn(0f, 1f)
-            Box(
+            AcDisplay(
+                radius = 6.dp,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(6.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(Cs.Body)
+                    .height(12.dp)
                     .testTag("gemma_progress_bar")
                     .semantics { progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f) }
             ) {
                 Box(
                     modifier = Modifier
+                        .padding(horizontal = 4.dp, vertical = 5.dp)
                         .fillMaxWidth(fraction)
                         .fillMaxHeight()
-                        .background(Cs.Mint)
+                        .background(AcTokens.OpGreen)
                 )
             }
         }
@@ -220,14 +214,14 @@ fun OnDeviceModelsCard(
                             " · ${(download.downloadedBytes * 100 / download.totalBytes)}%"
                     else -> formatModelBytes(download.downloadedBytes)
                 },
-                style = mono(11.5.sp, Cs.Muted),
+                style = AcType.Caption,
                 modifier = Modifier.testTag("gemma_bytes_label")
             )
         }
         download.error?.let { err ->
             Text(
                 text = err,
-                style = sans(12.5.sp, if (download.phase == Phase.FAILED) Cs.Red else Cs.Muted, 17.sp),
+                style = AcType.BodySmall.copy(color = if (download.phase == Phase.FAILED) AcTokens.Red else AcTokens.Ink2),
                 modifier = Modifier.testTag("gemma_error_label")
             )
         }
@@ -263,26 +257,12 @@ private fun ModelButton(
     enabled: Boolean = true,
     selected: Boolean = false,
 ) {
-    CsKey(
+    AcKey(
+        label = label,
         onClick = onClick,
         enabled = enabled,
-        role = if (selected) KeyRole.ACTIVE else KeyRole.STD,
-        radius = 12.dp,
-        horizontalPadding = 10.dp,
-        contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-        textColor = if (selected) Cs.White else null,
-        modifier = modifier
-            .height(44.dp)
-            .testTag(tag)
-    ) { tint ->
-        if (selected) {
-            CsLedDot(color = Cs.Mint, size = 6.dp)
-        }
-        Text(
-            text = label,
-            style = mono(12.sp, if (selected) Cs.White else tint, if (selected) FontWeight.SemiBold else FontWeight.Medium),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
+        selected = selected,
+        size = AcKeySize.Small,
+        modifier = modifier.testTag(tag)
+    )
 }

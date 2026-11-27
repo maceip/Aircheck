@@ -1,7 +1,6 @@
 package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,11 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.a2ui.A2uiSurface
 import androidx.compose.runtime.Composable
@@ -41,16 +36,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.BreakingNewsStyle
 import com.example.ui.StudioUiState
 import com.example.ui.a2ui.AircheckA2uiController
-import com.example.ui.clipstudio.CsBreakingChip
-import com.example.ui.components.StudioCard
-import com.example.ui.theme.LiveTallyGreen
-import com.example.ui.theme.LocalAircheckTokens
-import com.example.ui.theme.OledVoid
-import com.example.ui.theme.OnAirCrimson
-import com.example.ui.theme.StudioCrisp
-import com.example.ui.theme.TelemetryCyan
-import com.example.ui.theme.TelemetryMuted
-import com.example.ui.theme.TelemetryTimecodeStyle
+import com.example.ui.clipstudio.SectionCaption
+import com.example.ui.design.AcCard
+import com.example.ui.design.AcKey
+import com.example.ui.design.AcKeySize
+import com.example.ui.design.AcTokens
+import com.example.ui.design.AcType
+import androidx.compose.material.icons.outlined.AutoAwesome
 
 /**
  * Separate optional page for authoring AI-generated stock Jetpack A2UI
@@ -70,61 +62,42 @@ fun NewsroomStudioScreen(
 ) {
     BackHandler(onBack = onBack)
 
-    val tokens = LocalAircheckTokens.current
     val surfaces by a2uiController.activeSurfaces.collectAsStateWithLifecycle()
     val primarySurface = surfaces.firstOrNull()
 
     val modeLabel = if (uiState.isRemotionUnused) "Setup Needed" else "Overlay Builder"
-    val modeColor = if (uiState.isRemotionUnused) TelemetryCyan else LiveTallyGreen
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(OledVoid)
+            .background(AcTokens.Chassis)
             .windowInsetsPadding(WindowInsets.systemBars),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp)
-                .padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .height(60.dp)
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            IconButton(
+            AcKey(
+                icon = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Back",
                 onClick = onBack,
-                modifier = Modifier
-                    .size(48.dp)
-                    .testTag("newsroom_studio_back_button")
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint = StudioCrisp
-                )
-            }
-            Spacer(modifier = Modifier.width(4.dp))
+                size = AcKeySize.Small,
+                modifier = Modifier.testTag("newsroom_studio_back_button")
+            )
             Text(
                 text = "Newsroom Overlays",
-                style = MaterialTheme.typography.titleMedium,
-                color = StudioCrisp,
+                style = AcType.Title,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
-            Text(
-                text = modeLabel,
-                style = TelemetryTimecodeStyle,
-                color = modeColor,
-                modifier = Modifier.testTag("newsroom_remotion_mode_label")
-            )
+            SectionCaption(modeLabel, modifier = Modifier.testTag("newsroom_remotion_mode_label"))
         }
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(tokens.hairline)
-        )
 
         LazyColumn(
             modifier = Modifier
@@ -132,57 +105,43 @@ fun NewsroomStudioScreen(
                 .fillMaxWidth()
                 .widthIn(max = 640.dp)
                 .testTag("newsroom_studio_list"),
-            contentPadding = PaddingValues(16.dp),
+            contentPadding = PaddingValues(14.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item(key = "breaking_style_chips_card") {
                 val activeStyle = uiState.corePipelineSession.renderOptions.breakingStyle
-                StudioCard(modifier = Modifier.fillMaxWidth()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            text = "Breaking News Style Chips",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = StudioCrisp
-                        )
-                        BreakingNewsStyle.entries.chunked(2).forEach { pair ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                pair.forEach { style ->
-                                    CsBreakingChip(
-                                        style = style,
-                                        selected = activeStyle == style,
-                                        onSelect = { onSelectBreakingStyle(style) },
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("newsroom_bstyle_${style.wire}")
-                                    )
-                                }
-                                if (pair.size == 1) {
-                                    Spacer(modifier = Modifier.weight(1f))
-                                }
+                AcCard(tag = "Breaking news style", modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    BreakingNewsStyle.entries.chunked(2).forEach { pair ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            pair.forEach { style ->
+                                AcKey(
+                                    label = style.chipLabel.uppercase(),
+                                    selected = activeStyle == style,
+                                    onClick = { onSelectBreakingStyle(style) },
+                                    size = AcKeySize.Small,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("newsroom_bstyle_${style.wire}")
+                                )
                             }
-                        }
-                        OutlinedButton(
-                            onClick = onGenerateOverlaySet,
-                            enabled = !uiState.isGeneratingOverlaySet,
-                            border = BorderStroke(1.dp, tokens.channelAccent),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(44.dp)
-                                .testTag("newsroom_generate_set_button")
-                        ) {
-                            Text(
-                                if (uiState.isGeneratingOverlaySet) {
-                                    "Generating Overlay Set…"
-                                } else {
-                                    "Generate 3-Overlay Set (${activeStyle.chipLabel})"
-                                }
-                            )
+                            if (pair.size == 1) Spacer(modifier = Modifier.weight(1f))
                         }
                     }
+                    AcKey(
+                        label = if (uiState.isGeneratingOverlaySet) {
+                            "Generating Overlay Set…"
+                        } else {
+                            "Generate 3-Overlay Set (${activeStyle.chipLabel})"
+                        },
+                        icon = Icons.Outlined.AutoAwesome,
+                        onClick = onGenerateOverlaySet,
+                        enabled = !uiState.isGeneratingOverlaySet,
+                        selected = uiState.isGeneratingOverlaySet,
+                        size = AcKeySize.Small,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("newsroom_generate_set_button")
+                    )
                 }
             }
 
@@ -194,29 +153,14 @@ fun NewsroomStudioScreen(
                             .fillMaxWidth()
                             .testTag("newsroom_a2ui_surface"),
                         errorContent = { err ->
-                            StudioCard(modifier = Modifier.fillMaxWidth()) {
-                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Text(
-                                        text = "Overlay surface error",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = OnAirCrimson
-                                    )
-                                    Text(
-                                        text = "${err.code}: ${err.message.orEmpty()}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = TelemetryMuted
-                                    )
-                                }
+                            AcCard(tag = "Overlay surface error", modifier = Modifier.fillMaxWidth()) {
+                                Text("${err.code}: ${err.message.orEmpty()}", style = AcType.BodySmall.copy(color = AcTokens.Red))
                             }
                         }
                     )
                 } else {
-                    StudioCard(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "Preparing Jetpack A2UI surface…",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = TelemetryMuted
-                        )
+                    AcCard(modifier = Modifier.fillMaxWidth()) {
+                        Text("Preparing Jetpack A2UI surface…", style = AcType.BodySmall)
                     }
                 }
             }
@@ -224,20 +168,8 @@ fun NewsroomStudioScreen(
             val errMsg = uiState.errorMessage
             if (!errMsg.isNullOrBlank()) {
                 item(key = "newsroom_error_card") {
-                    StudioCard(modifier = Modifier.fillMaxWidth()) {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                text = "Studio status",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = OnAirCrimson
-                            )
-                            Text(
-                                text = errMsg,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = StudioCrisp,
-                                modifier = Modifier.testTag("newsroom_error_text")
-                            )
-                        }
+                    AcCard(tag = "Studio status", modifier = Modifier.fillMaxWidth()) {
+                        Text(errMsg, style = AcType.BodySmall.copy(color = AcTokens.Red), modifier = Modifier.testTag("newsroom_error_text"))
                     }
                 }
             }
@@ -248,75 +180,44 @@ fun NewsroomStudioScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Saved News Brief Overlays",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = StudioCrisp
-                    )
-                    Text(
-                        text = "${uiState.savedOverlays.size} saved",
-                        style = TelemetryTimecodeStyle,
-                        color = tokens.channelAccent,
-                        modifier = Modifier.testTag("saved_overlays_count_label")
-                    )
+                    SectionCaption("Saved news brief overlays")
+                    SectionCaption("${uiState.savedOverlays.size} saved", modifier = Modifier.testTag("saved_overlays_count_label"))
                 }
             }
 
             if (uiState.savedOverlays.isEmpty()) {
                 item(key = "saved_overlays_empty") {
-                    StudioCard(modifier = Modifier.fillMaxWidth()) {
+                    AcCard(modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            text = "No saved overlays yet. Standard Core Pipeline clips need zero overlays; save one above only when creating a News Brief.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TelemetryMuted
+                            "No saved overlays yet. Standard Core Pipeline clips need zero overlays; save one above only when creating a News Brief.",
+                            style = AcType.BodySmall
                         )
                     }
                 }
             } else {
-                items(
-                    items = uiState.savedOverlays,
-                    key = { it.id }
-                ) { overlay ->
-                    StudioCard(
+                items(items = uiState.savedOverlays, key = { it.id }) { overlay ->
+                    AcCard(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("saved_overlay_card_${overlay.id}")
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    text = overlay.headline,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = StudioCrisp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(overlay.headline, style = AcType.Body, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 if (overlay.subline.isNotBlank()) {
-                                    Text(
-                                        text = overlay.subline,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = TelemetryMuted,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    Text(overlay.subline, style = AcType.BodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
-                            Spacer(modifier = Modifier.width(10.dp))
-                            OutlinedButton(
+                            AcKey(
+                                label = "Remove",
                                 onClick = { onDeleteSavedOverlay(overlay.id) },
-                                border = BorderStroke(1.dp, tokens.hairline),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                                size = AcKeySize.Small,
                                 modifier = Modifier.testTag("delete_saved_overlay_${overlay.id}")
-                            ) {
-                                Text("Remove")
-                            }
+                            )
                         }
                     }
                 }

@@ -34,7 +34,7 @@ import com.example.ui.screens.ClipReviewScreen
 import com.example.ui.screens.NewsroomStudioScreen
 import com.example.ui.screens.SystemDeckSheet
 import com.example.ui.theme.AircheckTheme
-import com.example.ui.theme.OledVoid
+import com.example.ui.design.AcTokens
 
 class MainActivity : ComponentActivity() {
 
@@ -167,7 +167,7 @@ fun AircheckApp(
         }
     }
 
-    AircheckTheme(channel = studioState.settings.brandChannel) {
+    AircheckTheme {
         // Never allow system Back to exit Aircheck while inside Settings, Overlays, or Clip Review.
         BackHandler(enabled = showNewsroomStudioModal) { showNewsroomStudioModal = false }
         BackHandler(enabled = !showNewsroomStudioModal && showSettingsModal) { showSettingsModal = false }
@@ -178,7 +178,7 @@ fun AircheckApp(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(OledVoid)
+                .background(AcTokens.Chassis)
         ) {
             when {
                 showNewsroomStudioModal -> {

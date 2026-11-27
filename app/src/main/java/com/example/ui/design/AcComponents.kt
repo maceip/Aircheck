@@ -163,8 +163,19 @@ fun AcKey(
         selected -> AcTokens.Ui
         else -> AcTokens.Ink
     }
+    // Tag, click and semantics live on the outer 48dp touch target so a key's testTag is the
+    // clickable node even when the key sits inside another clickable container.
     Box(
-        modifier = modifier.minimumInteractiveComponentSize(),
+        modifier = modifier
+            .minimumInteractiveComponentSize()
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = role,
+                onClick = onClick
+            )
+            .semantics { this.selected = selected },
         contentAlignment = Alignment.Center
     ) {
         Row(
@@ -175,14 +186,6 @@ fun AcKey(
                 .clip(shape)
                 .background(if (selected) AcTokens.Red else AcTokens.Ui)
                 .then(if (pressed) Modifier.acInset(shape, red = selected) else Modifier)
-                .clickable(
-                    interactionSource = interaction,
-                    indication = null,
-                    enabled = enabled,
-                    role = role,
-                    onClick = onClick
-                )
-                .semantics { this.selected = selected }
                 .padding(horizontal = if (circle) 0.dp else (contentPadding ?: size.padding))
                 .alpha(if (enabled) 1f else 0.5f),
             horizontalArrangement = if (circle) Arrangement.Center else horizontalArrangement,
@@ -283,6 +286,13 @@ fun AcPrimaryKey(
     Box(
         modifier = modifier
             .height(58.dp + skirt)
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick
+            )
             .padding(bottom = skirt)
             .alpha(if (enabled) 1f else 0.45f)
     ) {
@@ -315,13 +325,6 @@ fun AcPrimaryKey(
                     } else {
                         Modifier.innerShadow(shape, Shadow(radius = 0.dp, color = Color.White.copy(alpha = 0.35f), offset = DpOffset(0.dp, 1.dp)))
                     }
-                )
-                .clickable(
-                    interactionSource = interaction,
-                    indication = null,
-                    enabled = enabled,
-                    role = Role.Button,
-                    onClick = onClick
                 )
                 .padding(horizontal = 26.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),

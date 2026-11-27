@@ -58,26 +58,20 @@ import com.example.R
 import com.example.data.BrandChannel
 import com.example.ui.RigConnectionStatus
 import com.example.ui.StudioUiState
-import com.example.ui.clipstudio.Cs
-import com.example.ui.clipstudio.CsIconKey
-import com.example.ui.clipstudio.CsKey
-import com.example.ui.clipstudio.CsKeyLabel
-import com.example.ui.clipstudio.CsLedDot
-import com.example.ui.clipstudio.CsToastOverlay
-import com.example.ui.clipstudio.KeyRole
-import com.example.ui.clipstudio.SectionLabelStyle
-import com.example.ui.clipstudio.mono
-import com.example.ui.clipstudio.ndot
-import com.example.ui.clipstudio.neumorphicSurface
-import com.example.ui.clipstudio.sans
-import com.example.ui.clipstudio.sunkenPanel
-import com.example.ui.components.AircheckBrandMark
-import com.example.ui.theme.AcidVoltLime
-import com.example.ui.theme.BroadcastCobalt
+import com.example.ui.clipstudio.SectionCaption
+import com.example.ui.clipstudio.StudioStatusLine
+import com.example.ui.clipstudio.StudioToast
+import com.example.ui.design.AcCard
+import com.example.ui.design.AcField
+import com.example.ui.design.AcKey
+import com.example.ui.design.AcKeySize
+import com.example.ui.design.AcTokens
+import com.example.ui.design.AcType
+import androidx.compose.foundation.shape.CircleShape
 
 /**
  * Tactile Studio Settings sheet aligned to the Clip Studio hardware design system:
- * sculpted neumorphic keys, sunken matte black panels, glowing LED status dots, live
+ * design v2 keys and cards grouped as Video / On this phone / Mac Studio / Overlays / Storage, live
  * HeyGen look & voice/video provider controls with immediate feedback, and zero flat Material cards.
  */
 @Composable
@@ -119,7 +113,7 @@ fun SystemDeckSheet(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Cs.Body)
+            .background(AcTokens.Chassis)
             .windowInsetsPadding(WindowInsets.systemBars)
     ) {
         Column(
@@ -134,21 +128,18 @@ fun SystemDeckSheet(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                AircheckBrandMark(size = 24.dp)
                 Text(
-                    text = "STUDIO SETTINGS",
-                    style = ndot(15.sp, Cs.White),
+                    text = "Studio settings",
+                    style = AcType.Title,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                CsIconKey(
+                AcKey(
                     icon = Icons.Filled.Close,
                     contentDescription = stringResource(R.string.cd_close_sheet),
                     onClick = onClose,
-                    size = 42.dp,
-                    radius = 12.dp,
-                    iconSize = 20.dp,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("close_system_deck_button")
                 )
             }
@@ -163,52 +154,6 @@ fun SystemDeckSheet(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 // Direct jump to revamped Newsroom Overlays Editor
-                item(key = "newsroom_studio_entry") {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .neumorphicSurface(
-                                role = KeyRole.STD,
-                                pressed = false,
-                                radius = 16.dp,
-                                enabled = true,
-                                accentBarColor = Cs.Red
-                            )
-                            .clip(RoundedCornerShape(16.dp))
-                            .clickable(role = Role.Button, onClick = onOpenNewsroomStudio)
-                            .padding(start = 16.dp, top = 14.dp, end = 12.dp, bottom = 14.dp)
-                            .testTag("open_newsroom_studio_button"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Sharp.Layers,
-                            contentDescription = null,
-                            tint = Cs.Ink,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            Text(
-                                text = "Newsroom Overlays Editor",
-                                style = sans(15.sp, Cs.White, 20.sp, FontWeight.Medium)
-                            )
-                            Text(
-                                text = "Edit broadcast labels, chyrons, cards & live studio look",
-                                style = sans(12.5.sp, Cs.Muted, 17.sp)
-                            )
-                        }
-                        Icon(
-                            imageVector = Icons.Sharp.ChevronRight,
-                            contentDescription = null,
-                            tint = Cs.Muted,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-
                 // Voice engine & HeyGen avatar/engine/quality controls (live from Mac Studio rig)
                 if (onLoadStudioOptions != null &&
                     onSelectVoiceBackend != null &&
@@ -218,6 +163,7 @@ fun SystemDeckSheet(
                     onSaveHeygenMotionPrompt != null
                 ) {
                     item(key = "voice_heygen_card") {
+                        SettingsGroupCaption("Video")
                         VoiceAndHeygenCard(
                             uiState = uiState,
                             onLoadOptions = onLoadStudioOptions,
@@ -234,16 +180,18 @@ fun SystemDeckSheet(
 
                 // On-device drafting models (AICore system model + downloadable Gemma fallback)
                 if (onDeviceModels != null) {
-                    item(key = "on_device_models_card") { onDeviceModels() }
+                    item(key = "on_device_models_card") {
+                        SettingsGroupCaption("On this phone")
+                        onDeviceModels()
+                    }
                 }
 
                 // Studio Server Connection
                 item(key = "studio_server_card") {
-                    Column(
+                    SettingsGroupCaption("Mac Studio")
+                    AcCard(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .sunkenPanel(radius = 18.dp)
-                            .padding(14.dp),
+                            .fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Row(
@@ -251,19 +199,15 @@ fun SystemDeckSheet(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("MAC STUDIO SERVER", style = SectionLabelStyle)
+                            Text("MAC STUDIO SERVER", style = AcType.Caption)
                             Text(
                                 text = rigStatusLabel,
-                                style = mono(
-                                    11.5.sp,
-                                    when (rigHealth.status) {
-                                        RigConnectionStatus.ONLINE -> Cs.Mint
-                                        RigConnectionStatus.CHECKING -> Cs.Amber
-                                        RigConnectionStatus.ERROR -> Cs.Red
-                                        RigConnectionStatus.IDLE -> Cs.Muted
-                                    },
-                                    FontWeight.Medium
-                                ),
+                                style = AcType.Caption.copy(color = when (rigHealth.status) {
+                                        RigConnectionStatus.ONLINE -> AcTokens.Red
+                                        RigConnectionStatus.CHECKING -> AcTokens.Red
+                                        RigConnectionStatus.ERROR -> AcTokens.Red
+                                        RigConnectionStatus.IDLE -> AcTokens.Ink2
+                                    }),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.testTag("rig_connection_status_label")
@@ -275,51 +219,31 @@ fun SystemDeckSheet(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            BasicTextField(
+                            AcField(
                                 value = rigUrlDraft,
                                 onValueChange = { rigUrlDraft = it },
                                 singleLine = true,
-                                textStyle = mono(13.sp, Cs.White),
-                                cursorBrush = SolidColor(Cs.White),
+                                placeholder = "http://10.0.0.242:8443",
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(46.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Cs.Body)
-                                    .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
-                                    .padding(horizontal = 12.dp, vertical = 13.dp)
-                                    .testTag("tailscale_rig_url_input"),
-                                decorationBox = { inner ->
-                                    Box(contentAlignment = Alignment.CenterStart) {
-                                        if (rigUrlDraft.isEmpty()) {
-                                            Text("http://10.0.0.242:8443", style = mono(13.sp, Cs.Dim))
-                                        }
-                                        inner()
-                                    }
-                                }
+                                    .testTag("tailscale_rig_url_input")
                             )
-                            CsKeyLabel(
+                            AcKey(
                                 label = "Save",
                                 onClick = { onSaveTailscaleRigUrl(rigUrlDraft) },
-                                role = KeyRole.ACTIVE,
-                                radius = 12.dp,
-                                size = 12.5.sp,
-                                weight = FontWeight.SemiBold,
+                                size = AcKeySize.Small,
                                 modifier = Modifier
-                                    .height(46.dp)
                                     .testTag("save_tailscale_url_button")
                             )
                         }
 
-                        CsKey(
+                        AcKey(
                             onClick = { onTestRigConnection(rigUrlDraft) },
                             enabled = rigHealth.status != RigConnectionStatus.CHECKING,
-                            role = KeyRole.STD,
-                            radius = 12.dp,
-                            contentAlignment = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            size = AcKeySize.Small,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(44.dp)
                                 .testTag("test_rig_connection_button")
                         ) { tint ->
                             Icon(
@@ -334,7 +258,7 @@ fun SystemDeckSheet(
                                 } else {
                                     "Test connection"
                                 },
-                                style = mono(12.5.sp, tint, FontWeight.Medium)
+                                style = AcType.Label.copy(color = tint)
                             )
                         }
 
@@ -342,7 +266,7 @@ fun SystemDeckSheet(
                         if (rigHealth.status == RigConnectionStatus.ERROR && !rigError.isNullOrBlank()) {
                             Text(
                                 text = rigError,
-                                style = sans(12.5.sp, Cs.Red, 17.sp),
+                                style = AcType.BodySmall.copy(color = AcTokens.Red),
                                 modifier = Modifier.testTag("rig_connection_error_label")
                             )
                         }
@@ -356,58 +280,35 @@ fun SystemDeckSheet(
                     }
                 }
 
-                // Broadcast Channel Accent
-                item(key = "channel_switcher") {
-                    Column(
+                item(key = "newsroom_studio_entry") {
+                    SettingsGroupCaption("Overlays")
+                    AcCard(
+                        onClick = onOpenNewsroomStudio,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .sunkenPanel(radius = 18.dp)
-                            .padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                            .testTag("open_newsroom_studio_button")
                     ) {
-                        Text("BROADCAST ACCENT", style = SectionLabelStyle)
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            BrandChannel.entries.forEach { channel ->
-                                val selected = activeChannel == channel
-                                val color = if (channel == BrandChannel.VOLT_LIME) AcidVoltLime else BroadcastCobalt
-                                CsKey(
-                                    onClick = { onSelectChannel(channel) },
-                                    role = if (selected) KeyRole.ACTIVE else KeyRole.STD,
-                                    radius = 12.dp,
-                                    horizontalPadding = 12.dp,
-                                    contentAlignment = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(46.dp)
-                                        .testTag("channel_toggle_${channel.name.lowercase()}")
-                                ) { tint ->
-                                    Box(
-                                        modifier = Modifier
-                                            .size(10.dp)
-                                            .clip(RoundedCornerShape(3.dp))
-                                            .background(color)
-                                    )
-                                    Text(
-                                        text = channel.label,
-                                        style = mono(12.sp, if (selected) Cs.White else tint, FontWeight.Medium)
-                                    )
-                                }
+                            Icon(Icons.Sharp.Layers, contentDescription = null, tint = AcTokens.Ink, modifier = Modifier.size(20.dp))
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Newsroom Overlays Editor", style = AcType.Body)
+                                Text("Edit broadcast labels, chyrons, cards & live studio look", style = AcType.BodySmall)
                             }
+                            Icon(Icons.Sharp.ChevronRight, contentDescription = null, tint = AcTokens.Ink2, modifier = Modifier.size(20.dp))
                         }
                     }
                 }
 
                 // Storage & Reset
                 item(key = "storage_card") {
+                    SettingsGroupCaption("Storage")
                     val mbUsed = uiState.casTotalBytes / (1024.0 * 1024.0)
-                    Column(
+                    AcCard(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .sunkenPanel(radius = 18.dp)
-                            .padding(14.dp),
+                            .fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Row(
@@ -415,21 +316,19 @@ fun SystemDeckSheet(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("LOCAL VIDEO CACHE", style = SectionLabelStyle)
+                            Text("LOCAL VIDEO CACHE", style = AcType.Caption)
                             Text(
                                 text = "${"%.1f".format(mbUsed)} MB",
-                                style = mono(12.sp, Cs.InkSub, FontWeight.Medium),
+                                style = AcType.Label.copy(color = AcTokens.Ink2),
                                 modifier = Modifier.testTag("cas_cache_size_label")
                             )
                         }
-                        CsKey(
+                        AcKey(
                             onClick = onClearCasCache,
-                            role = KeyRole.STD,
-                            radius = 12.dp,
-                            contentAlignment = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            size = AcKeySize.Small,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(44.dp)
                                 .testTag("clear_cas_cache_button")
                         ) { tint ->
                             Icon(
@@ -438,14 +337,14 @@ fun SystemDeckSheet(
                                 tint = tint,
                                 modifier = Modifier.size(17.dp)
                             )
-                            Text("Clear cached files", style = mono(12.5.sp, tint, FontWeight.Medium))
+                            Text("Clear cached files", style = AcType.Label.copy(color = tint))
                         }
                     }
                 }
             }
         }
 
-        CsToastOverlay(
+        StudioToast(
             message = uiState.toastMessage,
             onDismiss = onDismissToast
         )
@@ -462,11 +361,9 @@ private fun ActivityLogCard(loadLogs: suspend () -> List<String>) {
         lines = runCatching { loadLogs() }.getOrDefault(emptyList())
         loading = false
     }
-    Column(
+    AcCard(
         modifier = Modifier
             .fillMaxWidth()
-            .sunkenPanel(radius = 18.dp)
-            .padding(14.dp)
             .testTag("activity_log_card"),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -475,10 +372,10 @@ private fun ActivityLogCard(loadLogs: suspend () -> List<String>) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("ACTIVITY LOG", style = SectionLabelStyle)
+            Text("ACTIVITY LOG", style = AcType.Caption)
             Text(
                 text = if (loading) "loading…" else "${lines.size} events",
-                style = mono(11.sp, Cs.Muted),
+                style = AcType.Caption.copy(color = AcTokens.Ink2),
                 modifier = Modifier.testTag("activity_log_count")
             )
         }
@@ -487,8 +384,7 @@ private fun ActivityLogCard(loadLogs: suspend () -> List<String>) {
                 .fillMaxWidth()
                 .heightIn(max = 200.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(Cs.Body)
-                .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
+                .background(AcTokens.Chassis)
                 .verticalScroll(rememberScrollState())
                 .padding(10.dp)
                 .testTag("activity_log_scroll")
@@ -496,29 +392,26 @@ private fun ActivityLogCard(loadLogs: suspend () -> List<String>) {
             if (lines.isEmpty()) {
                 Text(
                     text = if (loading) "Loading…" else "No activity yet.",
-                    style = sans(12.5.sp, Cs.Muted, 17.sp)
+                    style = AcType.BodySmall.copy(color = AcTokens.Ink2)
                 )
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     lines.takeLast(120).forEach { line ->
                         Text(
                             text = line,
-                            style = mono(10.sp, Cs.InkSub)
+                            style = AcType.Caption.copy(color = AcTokens.Ink2)
                         )
                     }
                 }
             }
         }
-        CsKeyLabel(
+        AcKey(
             label = if (loading) "Refreshing…" else "Refresh",
             onClick = { refreshKey++ },
             enabled = !loading,
-            role = KeyRole.STD,
-            radius = 12.dp,
-            size = 12.sp,
+            size = AcKeySize.Small,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(42.dp)
                 .testTag("activity_refresh_button")
         )
     }
@@ -553,11 +446,9 @@ private fun VoiceAndHeygenCard(
         }
     }
 
-    Column(
+    AcCard(
         modifier = Modifier
             .fillMaxWidth()
-            .sunkenPanel(radius = 18.dp)
-            .padding(14.dp)
             .testTag("voice_heygen_card"),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -566,16 +457,13 @@ private fun VoiceAndHeygenCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("VOICE & AVATAR VIDEO", style = SectionLabelStyle)
-            CsKey(
+            Text("VOICE & AVATAR VIDEO", style = AcType.Caption)
+            AcKey(
                 onClick = { onLoadOptions(true) },
                 enabled = !uiState.isLoadingStudioOptions,
-                role = KeyRole.STD,
-                radius = 10.dp,
-                horizontalPadding = 10.dp,
-                contentAlignment = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
+                horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
+                size = AcKeySize.Small,
                 modifier = Modifier
-                    .height(34.dp)
                     .testTag("studio_options_refresh_button")
             ) { tint ->
                 Icon(
@@ -586,7 +474,7 @@ private fun VoiceAndHeygenCard(
                 )
                 Text(
                     text = if (uiState.isLoadingStudioOptions) "Loading…" else "Refresh",
-                    style = mono(11.sp, tint, FontWeight.Medium)
+                    style = AcType.Caption.copy(color = tint)
                 )
             }
         }
@@ -595,7 +483,7 @@ private fun VoiceAndHeygenCard(
         if (!err.isNullOrBlank()) {
             Text(
                 text = err,
-                style = sans(12.5.sp, Cs.Red, 17.sp),
+                style = AcType.BodySmall.copy(color = AcTokens.Red),
                 modifier = Modifier.testTag("studio_options_error")
             )
         }
@@ -607,7 +495,7 @@ private fun VoiceAndHeygenCard(
                 } else {
                     "Connect to Mac Studio and tap Refresh to load voice engines & HeyGen looks."
                 },
-                style = sans(13.sp, Cs.Muted, 18.sp)
+                style = AcType.BodySmall.copy(color = AcTokens.Ink2)
             )
         } else {
             // 1. Mac Studio Voice Engine
@@ -616,11 +504,11 @@ private fun VoiceAndHeygenCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Mac voice engine", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
+                Text("Mac voice engine", style = AcType.BodySmall.copy(color = AcTokens.Ink))
                 Text(
                     text = options.voiceBackends.firstOrNull { it.id == settings.rigVoiceBackend }?.label
                         ?: settings.rigVoiceBackend,
-                    style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
+                    style = AcType.Caption.copy(color = AcTokens.Red),
                     modifier = Modifier.testTag("voice_backend_active_label")
                 )
             }
@@ -664,10 +552,10 @@ private fun VoiceAndHeygenCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Video provider", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
+                    Text("Video provider", style = AcType.BodySmall.copy(color = AcTokens.Ink))
                     Text(
                         text = activeVideoOption?.label ?: activeVideoBackend,
-                        style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
+                        style = AcType.Caption.copy(color = AcTokens.Red),
                         modifier = Modifier.testTag("video_backend_active_label")
                     )
                 }
@@ -704,49 +592,31 @@ private fun VoiceAndHeygenCard(
                     if (detail.isNotBlank()) {
                         Text(
                             text = detail,
-                            style = mono(11.sp, Cs.InkSub),
+                            style = AcType.Caption.copy(color = AcTokens.Ink2),
                             modifier = Modifier.testTag("video_backend_active_detail")
                         )
                     }
                     if (activeVideoBackend.equals("longcat_avatar_mlx", ignoreCase = true)) {
-                        Text("Scene prompt (optional)", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
+                        Text("Scene prompt (optional)", style = AcType.BodySmall.copy(color = AcTokens.Ink))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            BasicTextField(
+                            AcField(
                                 value = motionDraft,
                                 onValueChange = { motionDraft = it },
                                 singleLine = true,
-                                textStyle = sans(13.5.sp, Cs.White, 18.sp),
-                                cursorBrush = SolidColor(Cs.White),
+                                placeholder = "e.g. presenter in warm studio lighting",
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(46.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Cs.Body)
-                                    .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
-                                    .padding(horizontal = 12.dp, vertical = 13.dp)
-                                    .testTag("longcat_scene_prompt_input"),
-                                decorationBox = { inner ->
-                                    Box(contentAlignment = Alignment.CenterStart) {
-                                        if (motionDraft.isEmpty()) {
-                                            Text("e.g. presenter in warm studio lighting", style = sans(13.sp, Cs.Dim, 18.sp))
-                                        }
-                                        inner()
-                                    }
-                                }
+                                    .testTag("longcat_scene_prompt_input")
                             )
-                            CsKeyLabel(
+                            AcKey(
                                 label = "Save",
                                 onClick = { onSaveMotionPrompt(motionDraft) },
-                                role = KeyRole.ACTIVE,
-                                radius = 12.dp,
-                                size = 12.5.sp,
-                                weight = FontWeight.SemiBold,
+                                size = AcKeySize.Small,
                                 modifier = Modifier
-                                    .height(46.dp)
                                     .testTag("longcat_scene_prompt_save")
                             )
                         }
@@ -763,10 +633,10 @@ private fun VoiceAndHeygenCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("HeyGen look", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
+                    Text("HeyGen look", style = AcType.BodySmall.copy(color = AcTokens.Ink))
                     Text(
                         text = activeLook?.name ?: if (activeLookId.isBlank()) "Default" else activeLookId.take(8),
-                        style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
+                        style = AcType.Caption.copy(color = AcTokens.Red),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
@@ -777,61 +647,40 @@ private fun VoiceAndHeygenCard(
                 if (options.heygenLooks.isEmpty()) {
                     Text(
                         text = "No HeyGen looks returned from your account.",
-                        style = sans(12.5.sp, Cs.Muted, 17.sp)
+                        style = AcType.BodySmall.copy(color = AcTokens.Ink2)
                     )
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         options.heygenLooks.forEach { look ->
                             val selected = look.id == activeLookId
                             val typeLabel = if (look.avatarType == "digital_twin") "digital twin" else "photo look"
-                            Row(
+                            AcKey(
+                                onClick = { onSelectHeygenLook(look.id) },
+                                selected = selected,
+                                role = Role.RadioButton,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                contentPadding = 6.dp,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .neumorphicSurface(
-                                        role = if (selected) KeyRole.ACTIVE else KeyRole.STD,
-                                        pressed = false,
-                                        radius = 14.dp,
-                                        enabled = true,
-                                        accentBarColor = if (selected) Cs.Mint else null
-                                    )
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .clickable(role = Role.RadioButton) { onSelectHeygenLook(look.id) }
-                                    .padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 8.dp)
-                                    .testTag("heygen_look_${look.id}"),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
+                                    .testTag("heygen_look_${look.id}")
+                            ) { fg ->
                                 if (look.previewImageUrl.isNotBlank()) {
                                     AsyncImage(
                                         model = look.previewImageUrl,
                                         contentDescription = look.name,
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier
-                                            .size(40.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Cs.Body)
+                                            .size(34.dp)
+                                            .clip(CircleShape)
                                     )
                                 }
                                 Column(modifier = Modifier.weight(1f)) {
+                                    Text(look.name, style = AcType.Label.copy(color = fg), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(
-                                        text = look.name,
-                                        style = sans(
-                                            14.sp,
-                                            if (selected) Cs.White else Cs.Ink,
-                                            19.sp,
-                                            if (selected) FontWeight.SemiBold else FontWeight.Medium
-                                        ),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = "$typeLabel · ${look.preferredOrientation}",
-                                        style = mono(11.sp, if (selected) Cs.InkSub else Cs.Muted),
+                                        text = "$typeLabel · ${look.preferredOrientation}".uppercase(),
+                                        style = AcType.Caption.copy(color = fg),
                                         maxLines = 1
                                     )
-                                }
-                                if (selected) {
-                                    CsLedDot(color = Cs.Mint, size = 7.dp)
                                 }
                             }
                         }
@@ -846,10 +695,10 @@ private fun VoiceAndHeygenCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("HeyGen engine", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
+                    Text("HeyGen engine", style = AcType.BodySmall.copy(color = AcTokens.Ink))
                     Text(
                         text = options.heygenEngines.firstOrNull { it.id == activeEngine }?.label ?: activeEngine,
-                        style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
+                        style = AcType.Caption.copy(color = AcTokens.Red),
                         modifier = Modifier.testTag("heygen_engine_active_label")
                     )
                 }
@@ -895,10 +744,10 @@ private fun VoiceAndHeygenCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Video quality", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
+                    Text("Video quality", style = AcType.BodySmall.copy(color = AcTokens.Ink))
                     Text(
                         text = activeRes.uppercase(),
-                        style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
+                        style = AcType.Caption.copy(color = AcTokens.Red),
                         modifier = Modifier.testTag("heygen_resolution_active_label")
                     )
                 }
@@ -921,44 +770,26 @@ private fun VoiceAndHeygenCard(
                 }
 
                 // 6. Optional HeyGen Motion Prompt
-                Text("Motion prompt (optional)", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
+                Text("Motion prompt (optional)", style = AcType.BodySmall.copy(color = AcTokens.Ink))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    BasicTextField(
+                    AcField(
                         value = motionDraft,
                         onValueChange = { motionDraft = it },
                         singleLine = true,
-                        textStyle = sans(13.5.sp, Cs.White, 18.sp),
-                        cursorBrush = SolidColor(Cs.White),
+                        placeholder = "e.g. calm news anchor gestures",
                         modifier = Modifier
                             .weight(1f)
-                            .height(46.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Cs.Body)
-                            .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp, vertical = 13.dp)
-                            .testTag("heygen_motion_prompt_input"),
-                        decorationBox = { inner ->
-                            Box(contentAlignment = Alignment.CenterStart) {
-                                if (motionDraft.isEmpty()) {
-                                    Text("e.g. calm news anchor gestures", style = sans(13.sp, Cs.Dim, 18.sp))
-                                }
-                                inner()
-                            }
-                        }
+                            .testTag("heygen_motion_prompt_input")
                     )
-                    CsKeyLabel(
+                    AcKey(
                         label = "Save",
                         onClick = { onSaveMotionPrompt(motionDraft) },
-                        role = KeyRole.ACTIVE,
-                        radius = 12.dp,
-                        size = 12.5.sp,
-                        weight = FontWeight.SemiBold,
+                        size = AcKeySize.Small,
                         modifier = Modifier
-                            .height(46.dp)
                             .testTag("heygen_motion_prompt_save")
                     )
                 }
@@ -975,38 +806,25 @@ private fun TactileOptionTile(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Row(
+    // Unavailable options stay tappable: the tap explains why the backend can't be used.
+    AcKey(
+        onClick = onClick,
+        selected = selected,
+        role = Role.RadioButton,
+        size = AcKeySize.Small,
         modifier = modifier
-            .heightIn(min = 44.dp)
-            .neumorphicSurface(
-                role = if (selected) KeyRole.ACTIVE else KeyRole.STD,
-                pressed = false,
-                radius = 12.dp,
-                enabled = available,
-                accentBarColor = if (selected) Cs.Mint else null
-            )
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(role = Role.RadioButton, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (selected) {
-            CsLedDot(color = Cs.Mint, size = 6.dp)
-        }
+    ) { fg ->
         Text(
             text = label,
-            style = mono(
-                11.5.sp,
-                when {
-                    !available -> Cs.Dim
-                    selected -> Cs.White
-                    else -> Cs.Ink
-                },
-                if (selected) FontWeight.SemiBold else FontWeight.Medium
-            ),
+            style = AcType.Label.copy(color = if (!available && !selected) AcTokens.Ink2.copy(alpha = 0.6f) else fg),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
     }
+}
+
+/** Settings group heading. */
+@Composable
+private fun SettingsGroupCaption(text: String) {
+    SectionCaption(text, modifier = Modifier.padding(start = 6.dp, top = 6.dp, bottom = 6.dp))
 }
