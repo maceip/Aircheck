@@ -259,7 +259,8 @@ abstract class DraftingDeckAppFunctionEntryPoint : AppFunctionService() {
         if (cleanBody.isEmpty()) {
             throw AppFunctionInvalidArgumentException("spokenText must not be blank.")
         }
-        val configuredUrl = container.profileStore.current().tailscaleRigUrl.ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+        val profileSettings = container.profileStore.current()
+        val configuredUrl = profileSettings.tailscaleRigUrl.ifBlank { DEFAULT_MAC_RIG_LAN_URL }
         val health = runCatching {
             container.macRigGateway.resolveAndCheckHealth(configuredUrl)
         }.getOrElse { err ->
@@ -298,7 +299,12 @@ abstract class DraftingDeckAppFunctionEntryPoint : AppFunctionService() {
                 photoSha = null,
                 resolution = "1080P",
                 ratio = "9:16",
-                maxDurationSec = project.totalActiveSeconds.coerceIn(5, 10)
+                maxDurationSec = project.totalActiveSeconds.coerceIn(5, 10),
+                videoBackend = profileSettings.rigVideoBackend.ifBlank { "heygen" },
+                heygenLookId = profileSettings.heygenLookId.takeIf { it.isNotBlank() },
+                heygenEngine = profileSettings.heygenEngine.takeIf { it.isNotBlank() },
+                heygenResolution = profileSettings.heygenResolution.takeIf { it.isNotBlank() },
+                heygenMotionPrompt = profileSettings.heygenMotionPrompt.takeIf { it.isNotBlank() }
             )
         } catch (e: Exception) {
             throw AppFunctionAppUnknownException(e.localizedMessage ?: "Mac Studio render request failed.")
