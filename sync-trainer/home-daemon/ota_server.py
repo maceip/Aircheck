@@ -80,6 +80,7 @@ from drafting_passes import (
     MAX_DRAFT_TEXT_BODY_BYTES,
     DraftPassEngine,
 )
+from media_providers.registry import catalog as media_catalog, load_config as load_media_config
 from llm_router import (
     LlmProviderError,
     LlmRouter,
@@ -1347,7 +1348,10 @@ class RenderJobManager:
         aligner_fn: Callable[[Path, str], list[dict[str, Any]]] | None = None,
         plate_runner: Callable[[str, str, Path], None] | None = None,
         remotion_worker_url: str | None = None,
+        media_config_path: Path | str | None = None,
     ) -> None:
+        self.media_config_path = Path(media_config_path).resolve() if media_config_path is not None else None
+        self.media_config = load_media_config(self.media_config_path)
         self._plate_runner = plate_runner
         self.remotion_worker_url = (
             str(remotion_worker_url).strip().rstrip("/")
@@ -2111,27 +2115,34 @@ class RenderJobManager:
                     f"Unsupported voice_backend {voice_backend!r}; must be one of {sorted(VALID_VOICE_BACKENDS)}"
                 )
 
-            voice_endpoint = os.environ.get("AIRCHECK_VOICE_ENDPOINT", "http://127.0.0.1:8452").strip()
+            local_synth = None
             external_synth_fn: Callable[..., list[Any]] | None = None
             strict_gates = True
-            if norm_backend == "s2pro_v002":
-                external_synth_fn = None
-                _report_async_progress(0.22, "Voicing with S2-Pro v002 LoRA on Mac Studio…")
-            elif norm_backend in ("chatterbox", "f5"):
-                external_synth_fn = _build_lambda_voice_synthesizer_fn(
-                    voice_endpoint,
-                    backend=norm_backend,
-                    strict_required=True,
-                )
-            elif norm_backend == "heygen_voice":
-                external_synth_fn = _build_heygen_voice_synthesizer_fn(heygen_voice_id)
-                strict_gates = False
+            if norm_backend == "auto" and self.media_config.tts_backend == "chatterbox":
+                from media_providers.chatterbox import ChatterboxSynthesizer
+
+                local_synth = ChatterboxSynthesizer(self.media_config.chatterbox or {}, self.python_bin)
             else:
-                external_synth_fn = (
-                    _build_lambda_voice_synthesizer_fn(voice_endpoint, backend="chatterbox")
-                    if voice_endpoint
-                    else None
-                )
+                voice_endpoint = os.environ.get("AIRCHECK_VOICE_ENDPOINT", "http://127.0.0.1:8452").strip()
+                if norm_backend == "s2pro_v002":
+                    external_synth_fn = None
+                    _report_async_progress(0.22, "Voicing with S2-Pro v002 LoRA on Mac Studio…")
+                elif norm_backend in ("chatterbox", "f5"):
+                    external_synth_fn = _build_lambda_voice_synthesizer_fn(
+                        voice_endpoint,
+                        backend=norm_backend,
+                        strict_required=True,
+                    )
+                elif norm_backend == "heygen_voice":
+                    external_synth_fn = _build_heygen_voice_synthesizer_fn(heygen_voice_id)
+                    strict_gates = False
+                else:
+                    external_synth_fn = (
+                        _build_lambda_voice_synthesizer_fn(voice_endpoint, backend="chatterbox")
+                        if voice_endpoint
+                        else None
+                    )
+            selected_synth = local_synth or external_synth_fn
 
             eff_caller_clauses = caller_clauses
             orig_clauses_for_unmerge: list[dict[str, str]] | None = None
@@ -2151,8 +2162,8 @@ class RenderJobManager:
                 "skip_video": True,
                 "require_strict_gates": strict_gates,
                 "require_real_alignment": True,
-                "warm_engine": None if external_synth_fn is not None else self._get_warm_tts_engine(),
-                "synthesizer_fn": external_synth_fn,
+                "warm_engine": None if selected_synth is not None else self._get_warm_tts_engine(),
+                "synthesizer_fn": selected_synth,
                 "early_exit_on_pass": True,
                 "min_clause_words": 6 if external_synth_fn is not None else 0,
                 "gate_max_cer": LIVE_TTS_GATE_MAX_CER,
@@ -2183,6 +2194,8 @@ class RenderJobManager:
                 kwargs["room_tone_path"] = assets["room_tone"]
 
             studio_res = rbs.render_broadcast_studio(**kwargs)
+            if local_synth is not None and local_synth.provenance is not None:
+                studio_res.setdefault("metrics", {})["tts_provider"] = local_synth.provenance
             if orig_clauses_for_unmerge is not None:
                 dur_ms = int(round(float(studio_res.get("duration_sec") or 0.0) * 1000.0))
                 if dur_ms <= 0 and studio_res.get("master_wav_path"):
@@ -2336,7 +2349,11 @@ class RenderJobManager:
         report_progress(
             status="LIPSYNC",
             progress_fraction=0.60,
-            stage_detail=f"Rendering {eff_hg_res} talking-head video (HeyGen {eff_hg_engine})",
+            stage_detail=(
+                f"Rendering {resolution} talking-head video (MuseTalk)"
+                if self.media_config.video_backend == "musetalk"
+                else f"Rendering {eff_hg_res} talking-head video (HeyGen {eff_hg_engine})"
+            ),
             metrics=metrics,
         )
 
@@ -2364,6 +2381,11 @@ class RenderJobManager:
             "--max-duration",
             str(max_duration),
         ]
+        if self.media_config_path is not None:
+            config_snapshot = work_dir / "media_provider_config.json"
+            _atomic_write_json(self.media_config.snapshot(), config_snapshot)
+            config_snapshot.chmod(0o600)
+            head_cmd.extend(["--media-config", str(config_snapshot)])
         if spoken_text:
             head_cmd.extend(["--transcript", spoken_text])
         if spec.get("custom_photo"):
@@ -2410,6 +2432,11 @@ class RenderJobManager:
                     broll_prefetch_thread.start()
 
         head_timeout_sec = max(TALKING_HEAD_TIMEOUT_BASE_SEC, max_duration * 25)
+        if self.media_config.video_backend == "musetalk":
+            configured_timeout = (self.media_config.musetalk or {}).get("timeout_seconds", 1800)
+            if type(configured_timeout) is not int or not 1 <= configured_timeout <= 7200:
+                raise ValueError("MuseTalk timeout_seconds must be 1..7200")
+            head_timeout_sec = max(head_timeout_sec, configured_timeout * 2 + 120)
         try:
             head_proc = subprocess.run(
                 head_cmd,
@@ -2493,6 +2520,8 @@ class RenderJobManager:
             metrics_out["identity_qa"] = dict(head_meta["identity_qa"])
         if head_meta.get("engine"):
             metrics_out["video_engine"] = str(head_meta["engine"])
+        if isinstance(head_meta.get("provenance"), Mapping):
+            metrics_out["video_provider"] = dict(head_meta["provenance"])
 
         duration_ms = _probe_media_duration_ms(staged_mp4)
         if duration_ms <= 0:
@@ -4459,6 +4488,10 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             self._handle_health(head_only=head_only)
             return
 
+        if raw_path == "/v1/media/providers":
+            self._send_json(HTTPStatus.OK, media_catalog(self.server.render_manager.media_config), head_only=head_only)
+            return
+
         if raw_path == "/v1/llm/providers":
             self._handle_get_llm_providers(head_only=head_only)
             return
@@ -5408,6 +5441,7 @@ def create_ota_server(
     plate_runner: Callable[[str, str, Path], None] | None = None,
     llm_router: LlmRouter | None = None,
     llm_config_path: Path | str | None = None,
+    media_config_path: Path | str | None = None,
     quiet: bool = False,
 ) -> OtaHttpServer:
     """Factory creating an OtaHttpServer bound to `(host, port)`."""
@@ -5436,6 +5470,7 @@ def create_ota_server(
         tts_studio_runner=tts_studio_runner,
         aligner_fn=aligner_fn,
         plate_runner=plate_runner,
+        media_config_path=media_config_path,
     )
     return OtaHttpServer(
         (host, port),
@@ -5478,6 +5513,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=str(DEFAULT_AVATAR_PATH),
         help="Fallback portrait image used when a phone render request omits photo_jpeg_base64",
     )
+    parser.add_argument("--media-config", type=Path, default=None, help="Opt-in local media provider configuration; omitted preserves existing backends")
     parser.add_argument("--quiet", action="store_true", help="Suppress per-request access logs")
 
     args = parser.parse_args(argv)
@@ -5490,6 +5526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         preferences_path=args.preferences_file,
         renders_dir=args.renders_dir,
         default_avatar_path=args.default_avatar,
+        media_config_path=args.media_config,
         quiet=args.quiet,
     )
     _setup_durable_logging(server.render_manager.renders_dir)

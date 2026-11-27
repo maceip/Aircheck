@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "tts_backend": "legacy",
+  "video_backend": "legacy"
+}
