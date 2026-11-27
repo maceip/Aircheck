@@ -533,3 +533,32 @@ def test_compute_longcat_segments_matches_25fps_schedule():
     assert compute_longcat_segments(6920) == 2
     assert compute_longcat_segments(16000) == 5
 
+
+def test_mux_and_frame_avatar_square_backdrop_and_crop_pass_ffprobe_qa(tmp_path):
+    from media_providers.mlx_avatars import _mux_and_frame_avatar
+
+    raw_mp4 = tmp_path / "raw_512.mp4"
+    wav = tmp_path / "master.wav"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=blue:s=512x512:d=1.2:r=25", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(raw_mp4)],
+        check=True,
+    )
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1.2", str(wav)],
+        check=True,
+    )
+    out_backdrop = tmp_path / "framed_9x16.mp4"
+    qa1 = _mux_and_frame_avatar(
+        raw_mp4=raw_mp4, master_wav=wav, output=out_backdrop,
+        width=540, height=960, duration_ms=1200, square_backdrop=True, timeout_sec=60,
+    )
+    assert out_backdrop.is_file() and qa1["width"] == 540 and qa1["height"] == 960
+
+    out_crop = tmp_path / "cropped_9x16.mp4"
+    qa2 = _mux_and_frame_avatar(
+        raw_mp4=raw_mp4, master_wav=wav, output=out_crop,
+        width=540, height=960, duration_ms=1200, square_backdrop=False, timeout_sec=60,
+    )
+    assert out_crop.is_file() and qa2["width"] == 540 and qa2["height"] == 960
+
+

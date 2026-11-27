@@ -186,18 +186,20 @@ def _mux_and_frame_avatar(
 
     if square_backdrop:
         # Full-bleed blurred studio backdrop behind centered 512x512 face crop (no harsh black bars or ear crop)
-        vf = (
-            f"split=2[bg][fg];"
+        fc = (
+            f"[0:v]split=2[bg][fg];"
             f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={width}:{height},gblur=sigma=32,eq=brightness=-0.16[bg2];"
             f"[fg]scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos[fg2];"
-            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
+            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,format=yuv420p[vout]"
         )
+        filter_args = ["-filter_complex", fc, "-map", "[vout]", "-map", "1:a:0"]
     else:
         vf = (
             f"scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={width}:{height},format=yuv420p"
         )
+        filter_args = ["-map", "0:v:0", "-map", "1:a:0", "-vf", vf]
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".mlx_publish_", dir=output.parent) as publish_dir:
@@ -208,10 +210,7 @@ def _mux_and_frame_avatar(
             "-y",
             "-i", str(raw_mp4),
             "-i", str(master_wav),
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-filter_complex" if square_backdrop else "-vf",
-            vf,
+            *filter_args,
             "-c:v", "libx264",
             "-crf", "16",
             "-preset", "medium",

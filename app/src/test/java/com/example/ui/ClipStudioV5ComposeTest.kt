@@ -928,9 +928,8 @@ class ClipStudioV5ComposeTest {
     }
 
     @Test
-    fun systemDeckSelectsMlxAvatarBackendsAndTransmitsVideoBackendToMacRig() = composeRule.run {
-        val app = ApplicationProvider.getApplicationContext<AircheckApplication>()
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    fun systemDeckSelectsMlxAvatarBackendsAndTransmitsVideoBackendToMacRig() = runComposeUiTest {
+        val server = startTestServer()
         val capturedRenderBodies = CopyOnWriteArrayList<String>()
         server.createContext("/health") { ex ->
             val resp = """{"status":"ok","render_bridge":true}""".toByteArray()
