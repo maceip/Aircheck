@@ -257,6 +257,7 @@ test("POST /render executes real Newsroom916 (alignUrl + image/video B-roll) and
     assert.equal(body916.durationMs, 2900); // 15 cover + 72 content = 87 frames
     assert.equal(body916.outputLocalPath, out916);
     assert.match(body916.finalSha256, /^[0-9a-f]{64}$/);
+    assert.ok(Number.isInteger(body916.captionPhraseCount) && body916.captionPhraseCount > 0);
 
     const fileBytes916 = await fs.readFile(out916);
     assert.equal(crypto.createHash("sha256").update(fileBytes916).digest("hex"), body916.finalSha256);
