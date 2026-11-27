@@ -350,11 +350,12 @@ def render_longcat_avatar(
         tmp = Path(tmp_str)
         raw_mp4 = tmp / "longcat_raw.mp4"
         runner = f"""
-import pathlib, subprocess, sys, time
+import gc, pathlib, subprocess, sys, time
 import mlx.core as mx
 import numpy as np
 sys.path.insert(0, {str(repo / 'scripts')!r})
 import run_inference as ri
+from longcat_video_avatar.audio_process import window_audio_features
 
 weights = pathlib.Path({str(weights_root)!r})
 variant = {variant!r}
@@ -371,29 +372,75 @@ image = ri.preprocess_image(image_path, height=height, width=width)
 audio_mel, audio_num_samples = ri.preprocess_audio_mel(
     audio_path, seconds=total_frames / pipeline.config.target_fps + 1.0
 )
+
+# Encode prompt then evict 11+ GB umT5-XXL from unified GPU memory before denoising
 ids, mask = ri.tokenize_prompt(prompt, weights / ri.VARIANT_DIRNAMES[variant])
 text_embeds = pipeline.text_encoder(ids, mask=mask)[:, None, :, :]
 text_mask = mask[:, None, None, :]
 empty_ids, empty_mask = mx.zeros_like(ids), mx.zeros_like(mask)
 uncond_embeds = pipeline.text_encoder(empty_ids, mask=empty_mask)[:, None, :, :]
 uncond_mask = empty_mask[:, None, None, :]
+mx.eval(text_embeds, uncond_embeds)
+pipeline.text_encoder = None
+gc.collect()
+mx.clear_cache()
+
+# Encode audio then evict Whisper-large-v3 before denoising
+frame_audio = pipeline.encode_audio(audio_mel, audio_num_samples)
+mx.eval(frame_audio)
+pipeline.audio_encoder = None
+gc.collect()
+mx.clear_cache()
+
+def _to_uint8_nhwc(vid_tensor):
+    return (np.asarray(vid_tensor).transpose(0, 2, 3, 4, 1)[0] * 127.5 + 127.5).clip(0, 255).astype(np.uint8)
 
 step_t = [time.time()]
-def on_step(seg, step, total):
-    now = time.time()
-    if step > 0:
-        print(f"longcat seg {{seg+1}}/{{num_segments}} step {{step}}/{{total}}: {{now - step_t[0]:.1f}}s", file=sys.stderr, flush=True)
-    step_t[0] = now
+def _make_cb(seg_idx):
+    def _cb(step, total):
+        now = time.time()
+        if step > 0:
+            print(f"longcat seg {{seg_idx+1}}/{{num_segments}} step {{step}}/{{total}}: {{now - step_t[0]:.1f}}s", file=sys.stderr, flush=True)
+        step_t[0] = now
+    return _cb
 
-video = pipeline(
-    image=image, audio_mel=audio_mel,
-    text_embeds=text_embeds, text_mask=text_mask,
-    uncond_embeds=uncond_embeds, uncond_mask=uncond_mask,
-    height=height, width=width, num_frames=num_frames, seed=42,
-    num_segments=num_segments, audio_num_samples=audio_num_samples, on_step=on_step,
+text_args = (text_embeds, text_mask, uncond_embeds, uncond_mask)
+video_0, latents_0 = pipeline.generate_ai2v(
+    image,
+    window_audio_features(frame_audio, 0, num_frames),
+    *text_args,
+    num_frames=num_frames, height=height, width=width, seed=42,
+    on_step=_make_cb(0),
 )
-mx.eval(video)
-arr = (np.asarray(video).transpose(0, 2, 3, 4, 1)[0] * 127.5 + 127.5).clip(0, 255).astype(np.uint8)
+mx.eval(video_0, latents_0)
+ref_latent = latents_0[:, :, :1]
+cond_tail = video_0[:, :, -pipeline.config.num_cond_frames :]
+mx.eval(ref_latent, cond_tail)
+cpu_chunks = [_to_uint8_nhwc(video_0)]
+del video_0, latents_0
+gc.collect()
+mx.clear_cache()
+
+stride = num_frames - pipeline.config.num_cond_frames
+for seg_idx in range(1, num_segments):
+    step_t[0] = time.time()
+    seg_vid, _ = pipeline.generate_avc(
+        cond_tail,
+        ref_latent,
+        window_audio_features(frame_audio, seg_idx * stride, num_frames),
+        *text_args,
+        num_frames=num_frames, height=height, width=width, seed=42 + seg_idx,
+        on_step=_make_cb(seg_idx),
+    )
+    mx.eval(seg_vid)
+    cond_tail = seg_vid[:, :, -pipeline.config.num_cond_frames :]
+    mx.eval(cond_tail)
+    cpu_chunks.append(_to_uint8_nhwc(seg_vid[:, :, pipeline.config.num_cond_frames :]))
+    del seg_vid
+    gc.collect()
+    mx.clear_cache()
+
+arr = np.concatenate(cpu_chunks, axis=0)
 fps = pipeline.config.target_fps
 subprocess.run([
     "ffmpeg", "-loglevel", "error", "-y",
@@ -406,12 +453,13 @@ subprocess.run([
     "-c:a", "aac", "-shortest", str(out_path),
 ], input=np.ascontiguousarray(arr).tobytes(), check=True)
 """
+        eff_timeout = max(timeout_sec, num_segments * 1800)
         proc = subprocess.run(
             [str(py), "-c", runner],
             cwd=str(repo),
             capture_output=True,
             text=True,
-            timeout=timeout_sec,
+            timeout=eff_timeout,
             check=False,
         )
         if proc.returncode != 0 or not raw_mp4.is_file() or raw_mp4.stat().st_size == 0:
