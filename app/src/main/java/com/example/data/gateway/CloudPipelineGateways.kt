@@ -179,7 +179,7 @@ class DirectMacRigGateway(
             val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
             val suffix = if (refresh) "?refresh=1" else ""
             val req = Request.Builder()
-                .url("$baseUrl/v1/studio/options$suffix")
+                .url("$baseUrl/v1/media/providers$suffix")
                 .get()
                 .build()
             val rawBody = okHttpClient.newCall(req).execute().use { resp ->
@@ -187,7 +187,7 @@ class DirectMacRigGateway(
                 if (!resp.isSuccessful) {
                     val detail = extractErrorDetail(bodyStr)
                     throw IllegalStateException(
-                        "Failed loading studio options (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                        "Failed loading media providers (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
                     )
                 }
                 bodyStr
@@ -208,7 +208,23 @@ class DirectMacRigGateway(
                     )
                 }
             }
-            val looksArr = json.optJSONArray("heygen_looks") ?: JSONArray()
+            val videosArr = json.optJSONArray("video_backends") ?: JSONArray()
+            val videos = buildList {
+                for (i in 0 until videosArr.length()) {
+                    val obj = videosArr.optJSONObject(i) ?: continue
+                    val id = obj.optNullableString("id") ?: continue
+                    add(
+                        RigVideoBackendOption(
+                            id = id,
+                            label = obj.optNullableString("label") ?: id,
+                            available = obj.optBoolean("available", false),
+                            detail = obj.optNullableString("detail").orEmpty()
+                        )
+                    )
+                }
+            }
+            val heygenObj = json.optJSONObject("heygen") ?: JSONObject()
+            val looksArr = heygenObj.optJSONArray("looks") ?: JSONArray()
             val looks = buildList {
                 for (i in 0 until looksArr.length()) {
                     val obj = looksArr.optJSONObject(i) ?: continue
@@ -231,7 +247,7 @@ class DirectMacRigGateway(
                     )
                 }
             }
-            val enginesArr = json.optJSONArray("heygen_engines") ?: JSONArray()
+            val enginesArr = heygenObj.optJSONArray("engines") ?: JSONArray()
             val engines = buildList {
                 for (i in 0 until enginesArr.length()) {
                     val obj = enginesArr.optJSONObject(i) ?: continue
@@ -254,10 +270,12 @@ class DirectMacRigGateway(
             val defaultsObj = json.optJSONObject("defaults")
             StudioRigOptions(
                 voiceBackends = voices,
-                heygenAvailable = json.optBoolean("heygen_available", false),
-                heygenError = json.optNullableString("heygen_error"),
+                videoBackends = videos,
+                heygenAvailable = heygenObj.optBoolean("available", false),
+                heygenError = heygenObj.optNullableString("error"),
                 heygenLooks = looks,
                 heygenEngines = engines,
+                defaultVideoBackend = defaultsObj?.optNullableString("video_backend") ?: "heygen",
                 defaultHeygenLookId = defaultsObj?.optNullableString("heygen_look_id").orEmpty(),
                 defaultHeygenEngine = defaultsObj?.optNullableString("heygen_engine") ?: "heygen-avatar-6",
                 defaultHeygenResolution = defaultsObj?.optNullableString("heygen_resolution") ?: "1080p"
@@ -276,6 +294,7 @@ class DirectMacRigGateway(
         useRemotion: Boolean?,
         brollPlan: List<CoreStoryClause>,
         brollAspect: String,
+        videoBackend: String?,
         heygenLookId: String?,
         heygenEngine: String?,
         heygenResolution: String?,
@@ -320,6 +339,7 @@ class DirectMacRigGateway(
             append(resolution).append('|')
             append(ratio).append('|')
             append(clampedMaxDuration).append('|')
+            append(videoBackend.orEmpty()).append('|')
             append(heygenLookId.orEmpty()).append('|')
             append(heygenEngine.orEmpty()).append('|')
             append(heygenResolution.orEmpty()).append('|')
@@ -338,6 +358,9 @@ class DirectMacRigGateway(
             .put("chyron_headline", headline)
             .put("chyron_subline", subline)
             .put("show_brand_bug", showBug)
+        if (!videoBackend.isNullOrBlank()) {
+            payload.put("video_backend", videoBackend.trim().lowercase())
+        }
         if (!heygenLookId.isNullOrBlank()) {
             payload.put("heygen_look_id", heygenLookId.trim())
         }

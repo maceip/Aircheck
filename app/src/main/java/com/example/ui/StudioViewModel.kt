@@ -2097,6 +2097,13 @@ class StudioViewModel internal constructor(
         }
     }
 
+    fun setRigVideoBackend(backend: String) {
+        viewModelScope.launch {
+            profileStore.setRigVideoBackend(backend)
+            _uiState.update { it.copy(toastMessage = "Video provider updated") }
+        }
+    }
+
     fun setHeygenLookId(lookId: String) {
         viewModelScope.launch {
             profileStore.setHeygenLookId(lookId)

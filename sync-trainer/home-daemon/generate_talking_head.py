@@ -568,6 +568,7 @@ def generate_talking_head(
     whisper_model: Path = DEFAULT_WHISPER_MODEL,
     bl_timeout_sec: int = BL_BEAT_TIMEOUT_SEC,
     use_custom_photo: bool = False,
+    video_backend: str | None = None,
     heygen_look_id: str | None = None,
     heygen_engine: str | None = None,
     heygen_resolution: str | None = None,
@@ -575,9 +576,14 @@ def generate_talking_head(
     heygen_motion_prompt: str | None = None,
     media_config_path: Path | None = None,
 ) -> dict:
-    from media_providers.registry import load_config
+    from media_providers.registry import VALID_VIDEO_BACKENDS, load_config
 
     media_config = load_config(media_config_path)
+    eff_video_backend = (video_backend or media_config.video_backend or "heygen").strip().lower()
+    if eff_video_backend not in VALID_VIDEO_BACKENDS:
+        raise ValueError(
+            f"Unsupported video_backend {eff_video_backend!r}; must be one of {VALID_VIDEO_BACKENDS}"
+        )
     norm_resolution = normalize_talking_head_resolution(resolution)
     norm_ratio = _validate_ratio_and_duration(ratio, max_duration)
     target_w, target_h = _RESOLUTION_DIMENSIONS[(norm_resolution, norm_ratio)]
@@ -598,9 +604,13 @@ def generate_talking_head(
             master_wav,
             max_duration_sec=max_duration,
         )
-        if media_config.video_backend == "musetalk":
+        if eff_video_backend == "musetalk":
             from media_providers.musetalk import render
 
+            if not media_config.local_musetalk_configured:
+                raise RuntimeError(
+                    "MuseTalk video_backend requested without configured musetalk block in --media-config; no hosted fallback attempted."
+                )
             return render(
                 media_config.musetalk or {}, master_wav=master_wav, avatar=avatar_path,
                 output=output_mp4, width=target_w, height=target_h, duration_ms=total_ms,
@@ -712,7 +722,8 @@ def main() -> int:
     parser.add_argument("--resolution", default="720P", choices=["480P", "720P", "1080P"])
     parser.add_argument("--ratio", default="9:16", choices=["9:16", "16:9", "1:1"])
     parser.add_argument("--max-duration", type=int, default=10, help="Max clip duration in seconds (2..120, default 10)")
-    parser.add_argument("--media-config", type=Path, default=None, help="Opt-in provider configuration; omitted keeps HeyGen")
+    parser.add_argument("--media-config", type=Path, default=None, help="Opt-in local provider configuration")
+    parser.add_argument("--video-backend", default=None, choices=["heygen", "musetalk"], help="Video provider backend (heygen or musetalk)")
     parser.add_argument("--custom-photo", action="store_true", help="Animate the supplied --avatar image instead of the default HeyGen look")
     parser.add_argument("--heygen-look-id", default=None, help="Override HeyGen avatar look ID")
     parser.add_argument("--heygen-engine", default=None, choices=list(VALID_HEYGEN_ENGINES), help="Override HeyGen engine")
@@ -730,6 +741,7 @@ def main() -> int:
         ratio=args.ratio,
         max_duration=args.max_duration,
         use_custom_photo=bool(args.custom_photo),
+        video_backend=args.video_backend,
         heygen_look_id=args.heygen_look_id,
         heygen_engine=args.heygen_engine,
         heygen_resolution=args.heygen_resolution,

@@ -4,77 +4,213 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
-
-@dataclass(frozen=True)
-class Project:
-    id: str
-    capability: str
-    source: str
-    code_license: str
-    model_license: str
-    integration: str
-    apple_support: str
-    caveat: str
-
-
-PROJECTS = (
-    Project("openavatarchat", "orchestration", "HumanAIGC-Engineering/OpenAvatarChat", "Apache-2.0", "per component", "architecture reference", "standard stack requires CUDA", "Session/stream patterns only; no vendored handlers or models."),
-    Project("chatterbox", "tts", "resemble-ai/chatterbox", "MIT", "MIT", "local adapter", "MPS or CPU", "Upstream retired; no inference benchmark claimed. PerTh watermark retained."),
-    Project("musetalk", "lip_sync", "TMElyralab/MuseTalk", "MIT", "MIT with HDTF commercialization notice", "external CLI adapter", "CUDA worker; no native MPS claim", "Requires explicit artifact clearance and installed upstream checkout."),
-    Project("amphion", "evaluation_and_codecs", "open-mmlab/Amphion", "MIT", "many checkpoints CC BY-NC / CC BY-NC-ND", "evaluation concepts", "CUDA oriented", "Restricted checkpoints are not integrated."),
-    Project("rvc", "voice_conversion", "RVC-Project/Retrieval-based-Voice-Conversion-WebUI", "MIT", "per artifact", "not implemented", "current main lacks MPS selection", "Separate performance conversion, never a default post-TTS stage."),
-    Project("sadtalker", "portrait_animation", "OpenTalker/SadTalker", "Apache-2.0 with third-party exceptions", "review dependencies", "not implemented", "documented M1 CPU setup", "No accelerated Mac path or live performance claimed."),
-    Project("echomimic_v2", "upper_body_animation", "antgroup/echomimic_v2", "Apache-2.0", "unresolved", "blocked", "CUDA dependent", "Checkpoint permission unresolved; offline rendering only."),
-    Project("facefusion", "face_processing", "facefusion/facefusion", "OpenRAIL-AS; incomplete inspected text", "mixed, including noncommercial", "blocked", "CoreML integration upstream", "No code or weights copied; obtain complete governing terms."),
-    Project("vidu_s", "hosted_avatar", "shengshu-ai/Vidu-S", "no core implementation license", "unreleased", "not implemented", "API client only", "No public local model; hosted service needs separate authorization."),
-    Project("omnitalker", "joint_audio_video", "HumanAIGC/omnitalker", "no model implementation license", "unreleased", "blocked", "unknown", "Project page and remote demo frontend are not inference code."),
-    Project("deepfake_live_macos", "camera_face_swap", "ilyasakkus/deepfake-live-for-macos", "AGPL-3.0 with additional terms", "research-only InsightFace models", "blocked", "CoreML swap; CPU detection", "Mouth compositing is not audio-driven lip sync."),
+VALID_VOICE_BACKENDS: tuple[str, ...] = (
+    "auto",
+    "s2pro_v002",
+    "chatterbox_local",
+    "chatterbox",
+    "f5",
+    "heygen_voice",
 )
+VALID_VIDEO_BACKENDS: tuple[str, ...] = (
+    "heygen",
+    "musetalk",
+)
+
+# Normalize legacy config aliases ("legacy" / "chatterbox" inside --media-config).
+_CONFIG_TTS_ALIASES: dict[str, str] = {
+    "legacy": "auto",
+    "auto": "auto",
+    "chatterbox": "chatterbox_local",
+    "chatterbox_local": "chatterbox_local",
+}
+_CONFIG_VIDEO_ALIASES: dict[str, str] = {
+    "legacy": "heygen",
+    "heygen": "heygen",
+    "musetalk": "musetalk",
+}
 
 
 @dataclass(frozen=True)
 class ProviderConfig:
-    tts_backend: str = "legacy"
-    video_backend: str = "legacy"
+    """Server-level opt-in configuration for local media providers (never exposes host paths over HTTP)."""
+
+    tts_backend: str = "auto"
+    video_backend: str = "heygen"
     chatterbox: dict[str, Any] | None = None
     musetalk: dict[str, Any] | None = None
 
+    @property
+    def local_chatterbox_configured(self) -> bool:
+        return isinstance(self.chatterbox, dict) and bool(self.chatterbox)
+
+    @property
+    def local_musetalk_configured(self) -> bool:
+        return isinstance(self.musetalk, dict) and bool(self.musetalk)
+
     def snapshot(self) -> dict[str, Any]:
-        return {"schema_version": 1, **{key: value for key, value in asdict(self).items() if value is not None}}
+        return {
+            "schema_version": 1,
+            **{key: value for key, value in asdict(self).items() if value is not None},
+        }
 
 
 def load_config(path: Path | str | None) -> ProviderConfig:
     if path is None:
         return ProviderConfig()
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or set(raw) - {"schema_version", "tts_backend", "video_backend", "chatterbox", "musetalk"}:
+    if not isinstance(raw, dict) or set(raw) - {
+        "schema_version",
+        "tts_backend",
+        "video_backend",
+        "chatterbox",
+        "musetalk",
+    }:
         raise ValueError("Invalid media provider configuration fields")
     if type(raw.get("schema_version")) is not int or raw["schema_version"] != 1:
         raise ValueError("Media provider configuration requires schema_version 1")
-    tts = raw.get("tts_backend", "legacy")
-    video = raw.get("video_backend", "legacy")
-    if tts not in ("legacy", "chatterbox") or video not in ("legacy", "musetalk"):
+    raw_tts = raw.get("tts_backend", "auto")
+    raw_video = raw.get("video_backend", "heygen")
+    if not isinstance(raw_tts, str) or raw_tts not in _CONFIG_TTS_ALIASES:
         raise ValueError("Unsupported media backend; unimplemented providers cannot be enabled")
+    if not isinstance(raw_video, str) or raw_video not in _CONFIG_VIDEO_ALIASES:
+        raise ValueError("Unsupported media backend; unimplemented providers cannot be enabled")
+    tts = _CONFIG_TTS_ALIASES[raw_tts]
+    video = _CONFIG_VIDEO_ALIASES[raw_video]
     for name in ("chatterbox", "musetalk"):
         if name in raw and not isinstance(raw[name], dict):
             raise ValueError(f"{name} configuration must be an object")
-    if tts == "chatterbox" and not raw.get("chatterbox"):
+    if tts == "chatterbox_local" and not raw.get("chatterbox"):
         raise ValueError("Selected Chatterbox backend requires configuration")
     if video == "musetalk" and not raw.get("musetalk"):
         raise ValueError("Selected MuseTalk backend requires configuration")
     return ProviderConfig(tts, video, raw.get("chatterbox"), raw.get("musetalk"))
 
 
-def catalog(config: ProviderConfig) -> dict[str, Any]:
+def build_provider_catalog(
+    config: ProviderConfig,
+    *,
+    s2pro_available: bool,
+    lambda_backends: Sequence[str],
+    heygen_options: Mapping[str, Any],
+    heygen_engines: Sequence[Mapping[str, Any]],
+    default_heygen_look_id: str,
+    default_heygen_engine: str,
+    default_heygen_resolution: str,
+    default_heygen_voice_id: str,
+) -> dict[str, Any]:
+    """Build the single unified `GET /v1/media/providers` payload (zero leaked filesystem paths)."""
+    lambda_set = {str(b).lower() for b in lambda_backends}
+    heygen_available = bool(heygen_options.get("available"))
+    heygen_looks = list(heygen_options.get("looks") or [])
+    heygen_voice = heygen_options.get("voice") if isinstance(heygen_options.get("voice"), Mapping) else None
+
+    voice_backends: list[dict[str, Any]] = [
+        {
+            "id": "auto",
+            "label": "Auto (Best Available)",
+            "available": True,
+            "execution": "auto",
+            "detail": (
+                "Local Chatterbox (--media-config)"
+                if config.tts_backend == "chatterbox_local"
+                else "Active GPU endpoint or local S2-Pro v002"
+            ),
+        },
+        {
+            "id": "s2pro_v002",
+            "label": "S2-Pro v002 LoRA",
+            "available": bool(s2pro_available),
+            "execution": "local_gpu",
+            "detail": "Fine-tuned on your voice (Mac Studio GPU)",
+        },
+        {
+            "id": "chatterbox_local",
+            "label": "Chatterbox Local",
+            "available": config.local_chatterbox_configured,
+            "execution": "local_mps",
+            "detail": (
+                "Isolated local Chatterbox (--media-config)"
+                if config.local_chatterbox_configured
+                else "Requires --media-config chatterbox block"
+            ),
+        },
+        {
+            "id": "chatterbox",
+            "label": "Chatterbox GPU",
+            "available": "chatterbox" in lambda_set,
+            "execution": "remote_gpu",
+            "detail": "Fast zero-shot voice on GPU endpoint",
+        },
+        {
+            "id": "f5",
+            "label": "F5-TTS GPU",
+            "available": "f5" in lambda_set,
+            "execution": "remote_gpu",
+            "detail": "Zero-shot F5 voice on GPU endpoint",
+        },
+        {
+            "id": "heygen_voice",
+            "label": "HeyGen Voice",
+            "available": heygen_voice is not None,
+            "execution": "hosted",
+            "detail": (
+                f"HeyGen {heygen_voice.get('mode', 'instant')} clone"
+                if heygen_voice is not None
+                else "HeyGen cloned voice unavailable"
+            ),
+        },
+    ]
+
+    video_backends: list[dict[str, Any]] = [
+        {
+            "id": "heygen",
+            "label": "HeyGen Avatar",
+            "available": heygen_available,
+            "execution": "hosted",
+            "detail": (
+                f"{len(heygen_looks)} live look(s)"
+                if heygen_available
+                else str(heygen_options.get("error") or "HeyGen CLI unavailable")
+            ),
+        },
+        {
+            "id": "musetalk",
+            "label": "MuseTalk v1.5",
+            "available": config.local_musetalk_configured,
+            "execution": "local_cuda",
+            "detail": (
+                "Isolated CUDA worker (--media-config)"
+                if config.local_musetalk_configured
+                else "Requires --media-config musetalk block (CUDA)"
+            ),
+        },
+    ]
+
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "tts_backend": config.tts_backend,
         "video_backend": config.video_backend,
         "automatic_downloads": False,
-        "readiness": "configuration_only; models not loaded or benchmarked",
-        "projects": [dict(asdict(p), source=f"https://github.com/{p.source}") for p in PROJECTS],
+        "voice_backends": voice_backends,
+        "video_backends": video_backends,
+        "heygen": {
+            "available": heygen_available,
+            "error": heygen_options.get("error"),
+            "looks": heygen_looks,
+            "engines": [dict(e) for e in heygen_engines],
+            "voice": dict(heygen_voice) if heygen_voice is not None else None,
+        },
+        "defaults": {
+            "voice_backend": config.tts_backend,
+            "video_backend": config.video_backend,
+            "heygen_look_id": default_heygen_look_id,
+            "heygen_engine": default_heygen_engine,
+            "heygen_resolution": default_heygen_resolution,
+            "heygen_voice_id": default_heygen_voice_id,
+        },
     }
 
 

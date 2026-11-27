@@ -636,6 +636,7 @@ class CoreStoryPipelineCoordinatorTest {
             useRemotion: Boolean?,
             brollPlan: List<CoreStoryClause>,
             brollAspect: String,
+            videoBackend: String?,
             heygenLookId: String?,
             heygenEngine: String?,
             heygenResolution: String?,

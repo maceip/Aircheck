@@ -1,24 +1,10 @@
-# Optional Mac media providers
+# Unified Media Providers
 
-This is an opt-in integration layer, not an installation or replacement of the running rig. No dependency, model, service, launch agent, or default backend is changed. Without `--media-config`, the existing voice-service/S2-Pro selection and HeyGen rendering are unchanged.
+`media_providers/registry.py` is the single provider registry for Aircheck's Mac Studio daemon (`ota_server.py`) and Android Studio Settings UI, exposed via one endpoint: **`GET /v1/media/providers`**.
 
-## Implemented versus deferred
-
-| Project | Integration in this change |
-|---|---|
-| Chatterbox | Local Original/Turbo/Nano/Multilingual V3 adapter through existing broadcast verification/mastering; CPU/MPS selection |
-| MuseTalk | Reviewed v1.5 CLI adapter for an explicitly provisioned **CUDA worker**; no native Apple acceleration claim |
-| OpenAvatarChat | Independently implemented sample-clock/session/cancellation primitives inspired by its architecture; no WebRTC server added |
-| Amphion | Independently implemented pre-aligned contour RMSE/correlation and real-time-factor utilities; no restricted model imports |
-| RVC | Cataloged as optional future performance conversion; not added after synthesis |
-| SadTalker | Cataloged; no runnable adapter yet |
-| EchoMimic V2 | Cataloged and unavailable pending checkpoint license clearance |
-| FaceFusion | Cataloged and unavailable pending governing license/model review |
-| Vidu-S | Cataloged as a hosted service; no API calls or credentials added |
-| OmniTalker | Cataloged as unreleased inference; cannot be activated |
-| deepfake-live-for-macos | Cataloged as restricted camera swapping; not imported |
-
-All eleven appear in `GET /v1/media/providers`. This endpoint reports **configuration and research status**, not model readiness, benchmark results, or license certification. It does not load models or disclose local config paths. Only `legacy`/`chatterbox` TTS and `legacy`/`musetalk` video can be selected. Other IDs fail closed.
+- **Voice backends (`voice_backend`)**: `auto`, `s2pro_v002` (Mac Studio GPU LoRA), `chatterbox_local` (isolated local MPS/CPU via `--media-config`), `chatterbox` (GPU endpoint `:8452`), `f5` (GPU endpoint `:8452`), and `heygen_voice` (HeyGen Voice clone).
+- **Video backends (`video_backend`)**: `heygen` (HeyGen Avatar with live looks, engine, resolution, and motion prompt selection) and `musetalk` (isolated CUDA worker via `--media-config`).
+- Without `--media-config`, defaults stay `auto` voice + `heygen` video, and `chatterbox_local` / `musetalk` report `available: false` and fail closed if explicitly requested without a verified manifest. No local host paths are ever returned over HTTP.
 
 ## Safe opt-in configuration
 

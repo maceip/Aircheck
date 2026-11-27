@@ -805,26 +805,37 @@ class ClipStudioV5ComposeTest {
             ex.sendResponseHeaders(200, resp.size.toLong())
             ex.responseBody.use { it.write(resp) }
         }
-        server.createContext("/v1/studio/options") { ex ->
+        server.createContext("/v1/media/providers") { ex ->
             val resp = """
                 {
+                  "schema_version": 2,
+                  "tts_backend": "auto",
+                  "video_backend": "heygen",
                   "voice_backends": [
-                    {"id":"auto","label":"Auto (Fast GPU)","available":true,"detail":"Auto"},
+                    {"id":"auto","label":"Auto (Best Available)","available":true,"detail":"Auto"},
                     {"id":"s2pro_v002","label":"S2-Pro v002 LoRA","available":true,"detail":"Fine-tuned"},
+                    {"id":"chatterbox_local","label":"Chatterbox Local","available":false,"detail":"Unconfigured"},
                     {"id":"chatterbox","label":"Chatterbox GPU","available":true,"detail":"Zero-shot"},
                     {"id":"heygen_voice","label":"HeyGen Voice","available":true,"detail":"Instant clone"}
                   ],
-                  "heygen_available": true,
-                  "heygen_looks": [
-                    {"id":"28bbc1a0f7217675473054ab02d759d9","name":"Ryan anchor v3","avatar_type":"photo_avatar","preferred_orientation":"portrait","supported_api_engines":["avatar_v","avatar_iv","heygen-avatar-6"]},
-                    {"id":"8445adef497a4fbabef51263b2d2bcef","name":"Ryan MacArthur -- 1","avatar_type":"digital_twin","preferred_orientation":"landscape","supported_api_engines":["avatar_v","avatar_iv","heygen-avatar-6"]}
+                  "video_backends": [
+                    {"id":"heygen","label":"HeyGen Avatar","available":true,"detail":"2 live look(s)"},
+                    {"id":"musetalk","label":"MuseTalk v1.5","available":false,"detail":"Requires CUDA"}
                   ],
-                  "heygen_engines": [
-                    {"id":"heygen-avatar-6","label":"Avatar 6","resolutions":["1080p","2k"]},
-                    {"id":"avatar_v","label":"Avatar V","resolutions":["720p","1080p"]}
-                  ],
+                  "heygen": {
+                    "available": true,
+                    "looks": [
+                      {"id":"28bbc1a0f7217675473054ab02d759d9","name":"Ryan anchor v3","avatar_type":"photo_avatar","preferred_orientation":"portrait","supported_api_engines":["avatar_v","avatar_iv","heygen-avatar-6"]},
+                      {"id":"8445adef497a4fbabef51263b2d2bcef","name":"Ryan MacArthur -- 1","avatar_type":"digital_twin","preferred_orientation":"landscape","supported_api_engines":["avatar_v","avatar_iv","heygen-avatar-6"]}
+                    ],
+                    "engines": [
+                      {"id":"heygen-avatar-6","label":"Avatar 6","resolutions":["1080p","2k"]},
+                      {"id":"avatar_v","label":"Avatar V","resolutions":["720p","1080p"]}
+                    ]
+                  },
                   "defaults": {
                     "voice_backend":"auto",
+                    "video_backend":"heygen",
                     "heygen_look_id":"28bbc1a0f7217675473054ab02d759d9",
                     "heygen_engine":"heygen-avatar-6",
                     "heygen_resolution":"1080p"
@@ -888,6 +899,7 @@ class ClipStudioV5ComposeTest {
                     onTestRigConnection = studioVm::testMacRigConnection,
                     onLoadStudioOptions = studioVm::loadStudioRigOptions,
                     onSelectVoiceBackend = studioVm::setRigVoiceBackend,
+                    onSelectVideoBackend = studioVm::setRigVideoBackend,
                     onSelectHeygenLook = studioVm::setHeygenLookId,
                     onSelectHeygenEngine = studioVm::setHeygenEngine,
                     onSelectHeygenResolution = studioVm::setHeygenResolution,
@@ -897,7 +909,7 @@ class ClipStudioV5ComposeTest {
         }
         val studioVm = checkNotNull(studioVmRef)
 
-        // Scroll to the Voice & HeyGen card and wait for real live options from /v1/studio/options
+        // Scroll to the Voice & Video providers card and wait for real live options from /v1/media/providers
         onNodeWithTag("system_deck_lazy_list").performScrollToNode(hasTestTag("voice_heygen_card"))
         waitUntil(timeoutMillis = 8_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
@@ -940,6 +952,7 @@ class ClipStudioV5ComposeTest {
                     beats = listOf(ScriptBeat(id = "b0", index = 0, spokenText = "Hello world."))
                 ),
                 photoSha = null,
+                videoBackend = saved.rigVideoBackend,
                 heygenLookId = saved.heygenLookId,
                 heygenEngine = saved.heygenEngine,
                 heygenResolution = saved.heygenResolution,
@@ -948,6 +961,7 @@ class ClipStudioV5ComposeTest {
         }
         assertTrue(capturedTtsBodies.single().contains("\"voice_backend\":\"s2pro_v002\""))
         val renderBody = capturedRenderBodies.single()
+        assertTrue(renderBody.contains("\"video_backend\":\"heygen\""))
         assertTrue(renderBody.contains("\"heygen_look_id\":\"8445adef497a4fbabef51263b2d2bcef\""))
         assertTrue(renderBody.contains("\"heygen_engine\":\"avatar_v\""))
         assertTrue(renderBody.contains("\"heygen_resolution\":\"1080p\""))

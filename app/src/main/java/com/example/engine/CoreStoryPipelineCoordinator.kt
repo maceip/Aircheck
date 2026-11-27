@@ -425,6 +425,7 @@ class CoreStoryPipelineCoordinator(
             lateinit var snapshot: MacRigJobSnapshot
 
             val profileSettings = runCatching { profileStore?.current() }.getOrNull()
+            val selectedVideoBackend = profileSettings?.rigVideoBackend?.takeIf { it.isNotBlank() }
             val selectedHeygenLookId = profileSettings?.heygenLookId?.takeIf { it.isNotBlank() }
             val selectedHeygenEngine = profileSettings?.heygenEngine?.takeIf { it.isNotBlank() }
             val selectedHeygenRes = profileSettings?.heygenResolution?.takeIf { it.isNotBlank() }
@@ -443,6 +444,7 @@ class CoreStoryPipelineCoordinator(
                         alignUrl = session.alignUrl,
                         brollPlan = activeClauses,
                         brollAspect = session.renderOptions.aspect,
+                        videoBackend = selectedVideoBackend,
                         heygenLookId = selectedHeygenLookId,
                         heygenEngine = selectedHeygenEngine,
                         heygenResolution = selectedHeygenRes,

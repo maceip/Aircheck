@@ -153,6 +153,13 @@ data class RigVoiceBackendOption(
     val detail: String = ""
 )
 
+data class RigVideoBackendOption(
+    val id: String,
+    val label: String,
+    val available: Boolean,
+    val detail: String = ""
+)
+
 data class HeygenLookOption(
     val id: String,
     val name: String,
@@ -170,10 +177,12 @@ data class HeygenEngineOption(
 
 data class StudioRigOptions(
     val voiceBackends: List<RigVoiceBackendOption> = emptyList(),
+    val videoBackends: List<RigVideoBackendOption> = emptyList(),
     val heygenAvailable: Boolean = false,
     val heygenError: String? = null,
     val heygenLooks: List<HeygenLookOption> = emptyList(),
     val heygenEngines: List<HeygenEngineOption> = emptyList(),
+    val defaultVideoBackend: String = "heygen",
     val defaultHeygenLookId: String = "",
     val defaultHeygenEngine: String = "heygen-avatar-6",
     val defaultHeygenResolution: String = "1080p"
@@ -199,6 +208,7 @@ interface MacRigRenderGateway {
         useRemotion: Boolean? = null,
         brollPlan: List<CoreStoryClause> = emptyList(),
         brollAspect: String = "9:16",
+        videoBackend: String? = null,
         heygenLookId: String? = null,
         heygenEngine: String? = null,
         heygenResolution: String? = null,

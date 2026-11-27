@@ -370,10 +370,12 @@ def test_rybbit_shipping_gated_and_payload(monkeypatch: pytest.MonkeyPatch) -> N
         logging.getLogger().removeHandler(h)
 
 
-def test_studio_options_endpoint_and_heygen_controls(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+def test_media_providers_endpoint_and_heygen_controls(
+    tmp_path: pathlib.Path, monkeypatch: Any
 ) -> None:
     import subprocess
+    import urllib.error
+    import pytest
     import generate_talking_head as gth
     import ota_server
 
@@ -426,16 +428,25 @@ def test_studio_options_endpoint_and_heygen_controls(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with urllib.request.urlopen(f"http://{host}:{port}/v1/studio/options?refresh=1") as resp:
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/media/providers?refresh=1") as resp:
             assert resp.status == 200
             body = json.loads(resp.read().decode("utf-8"))
-        assert body["heygen_available"] is True
-        assert body["heygen_looks"][0]["id"] == "8445adef497a4fbabef51263b2d2bcef"
-        assert body["heygen_looks"][0]["avatar_type"] == "digital_twin"
+        assert body["heygen"]["available"] is True
+        assert body["heygen"]["looks"][0]["id"] == "8445adef497a4fbabef51263b2d2bcef"
+        assert body["heygen"]["looks"][0]["avatar_type"] == "digital_twin"
         by_id = {v["id"]: v for v in body["voice_backends"]}
         assert by_id["chatterbox"]["available"] is True
         assert by_id["f5"]["available"] is True
         assert by_id["heygen_voice"]["available"] is True
+        assert by_id["chatterbox_local"]["available"] is False
+        vid_by_id = {v["id"]: v for v in body["video_backends"]}
+        assert vid_by_id["heygen"]["available"] is True
+        assert vid_by_id["musetalk"]["available"] is False
+
+        # Ensure the old duplicate /v1/studio/options route no longer exists (single unified endpoint).
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(f"http://{host}:{port}/v1/studio/options")
+        assert exc_info.value.code == 404
 
         # Verify HeyGen engine/resolution/motion payload building in generate_talking_head.py
         captured_bodies: list[dict] = []

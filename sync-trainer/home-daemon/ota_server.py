@@ -80,7 +80,12 @@ from drafting_passes import (
     MAX_DRAFT_TEXT_BODY_BYTES,
     DraftPassEngine,
 )
-from media_providers.registry import catalog as media_catalog, load_config as load_media_config
+from media_providers.registry import (
+    VALID_VIDEO_BACKENDS,
+    VALID_VOICE_BACKENDS,
+    build_provider_catalog,
+    load_config as load_media_config,
+)
 from llm_router import (
     LlmProviderError,
     LlmRouter,
@@ -848,9 +853,6 @@ STUDIO_REF_10S_TEXT = (
     "where I was working on TLS notary, and previously started a startup in the "
     "cloud access security brokerage space."
 )
-
-
-VALID_VOICE_BACKENDS = frozenset({"auto", "s2pro_v002", "chatterbox", "f5", "heygen_voice"})
 
 
 def _probe_lambda_voice_health(endpoint: str, timeout: float = 2.0) -> dict[str, Any] | None:
@@ -1852,6 +1854,11 @@ class RenderJobManager:
             raise ValueError(
                 f"voice_backend must be one of {sorted(VALID_VOICE_BACKENDS)}, got {raw_voice_backend!r}"
             )
+        raw_video_backend = str(payload.get("video_backend") or "").strip().lower() or None
+        if raw_video_backend is not None and raw_video_backend not in VALID_VIDEO_BACKENDS:
+            raise ValueError(
+                f"video_backend must be one of {sorted(VALID_VIDEO_BACKENDS)}, got {raw_video_backend!r}"
+            )
         heygen_voice_id = str(payload.get("heygen_voice_id") or "").strip() or None
         heygen_look_id = str(payload.get("heygen_look_id") or "").strip() or None
         heygen_engine = str(payload.get("heygen_engine") or "").strip().lower() or None
@@ -1878,6 +1885,7 @@ class RenderJobManager:
             "spoken_text": spoken_text,
             "voice_source": voice_source,
             "voice_backend": raw_voice_backend,
+            "video_backend": raw_video_backend,
             "heygen_voice_id": heygen_voice_id,
             "heygen_look_id": heygen_look_id,
             "heygen_engine": heygen_engine,
@@ -2001,8 +2009,8 @@ class RenderJobManager:
             self._warm_tts_engine = s2_pro_infer.get_shared_warm_engine()
         return self._warm_tts_engine
 
-    def get_studio_options(self, *, refresh: bool = False) -> dict[str, Any]:
-        """Return live voice backends and HeyGen avatar looks/engines from the rig & HeyGen account."""
+    def get_media_providers(self, *, refresh: bool = False) -> dict[str, Any]:
+        """Single unified provider registry payload (`GET /v1/media/providers`)."""
         now = time.time()
         cache = getattr(self, "_heygen_options_cache", None)
         if refresh or cache is None or (now - cache[0]) > 60.0:
@@ -2017,68 +2025,23 @@ class RenderJobManager:
 
         assets = resolve_latest_synthesis_assets(self.models_root, self.bundles_root)
         s2pro_available = bool(assets.get("lora_dir"))
-        heygen_voice_info = hg.get("voice") if isinstance(hg, Mapping) else None
-
-        voice_backends: list[dict[str, Any]] = [
-            {
-                "id": "auto",
-                "label": "Auto (Fast GPU)",
-                "available": True,
-                "detail": "Uses active GPU voice endpoint or falls back to local S2-Pro v002",
-            },
-            {
-                "id": "s2pro_v002",
-                "label": "S2-Pro v002 LoRA",
-                "available": s2pro_available,
-                "detail": "Fine-tuned on your voice (Mac Studio GPU)",
-            },
-            {
-                "id": "chatterbox",
-                "label": "Chatterbox GPU",
-                "available": "chatterbox" in lambda_backends,
-                "detail": "Fast zero-shot voice on GPU endpoint",
-            },
-            {
-                "id": "f5",
-                "label": "F5-TTS GPU",
-                "available": "f5" in lambda_backends,
-                "detail": "Zero-shot F5 voice on GPU endpoint",
-            },
-            {
-                "id": "heygen_voice",
-                "label": "HeyGen Voice",
-                "available": heygen_voice_info is not None,
-                "detail": (
-                    f"HeyGen {heygen_voice_info.get('mode', 'instant')} clone"
-                    if isinstance(heygen_voice_info, Mapping)
-                    else "HeyGen cloned voice unavailable"
-                ),
-            },
-        ]
-
         heygen_engines = [
             {"id": "heygen-avatar-6", "label": "Avatar 6", "resolutions": ["1080p", "2k"]},
             {"id": "heygen-avatar-6-turbo", "label": "Avatar 6 Turbo", "resolutions": ["1080p", "2k"]},
             {"id": "avatar_v", "label": "Avatar V", "resolutions": ["720p", "1080p"]},
             {"id": "avatar_iv", "label": "Avatar IV", "resolutions": ["720p", "1080p"]},
         ]
-
-        return {
-            "voice_backends": voice_backends,
-            "heygen_available": bool(hg.get("available")),
-            "heygen_error": hg.get("error"),
-            "heygen_looks": list(hg.get("looks") or []),
-            "heygen_engines": heygen_engines,
-            "heygen_resolutions": list(VALID_HEYGEN_RESOLUTIONS),
-            "heygen_voice": heygen_voice_info,
-            "defaults": {
-                "voice_backend": "auto",
-                "heygen_look_id": HEYGEN_LOOK_ID,
-                "heygen_engine": HEYGEN_ENGINE,
-                "heygen_resolution": "1080p",
-                "heygen_voice_id": HEYGEN_VOICE_ID,
-            },
-        }
+        return build_provider_catalog(
+            self.media_config,
+            s2pro_available=s2pro_available,
+            lambda_backends=lambda_backends,
+            heygen_options=hg,
+            heygen_engines=heygen_engines,
+            default_heygen_look_id=HEYGEN_LOOK_ID,
+            default_heygen_engine=HEYGEN_ENGINE,
+            default_heygen_resolution="1080p",
+            default_heygen_voice_id=HEYGEN_VOICE_ID,
+        )
 
     def _run_broadcast_tts_stage(
         self,
@@ -2118,9 +2081,17 @@ class RenderJobManager:
             local_synth = None
             external_synth_fn: Callable[..., list[Any]] | None = None
             strict_gates = True
-            if norm_backend == "auto" and self.media_config.tts_backend == "chatterbox":
+            use_local_chatterbox = (
+                norm_backend == "chatterbox_local"
+                or (norm_backend == "auto" and self.media_config.tts_backend == "chatterbox_local")
+            )
+            if use_local_chatterbox:
                 from media_providers.chatterbox import ChatterboxSynthesizer
 
+                if not self.media_config.local_chatterbox_configured:
+                    raise RuntimeError(
+                        "chatterbox_local voice_backend requested without configured chatterbox block in --media-config; no cloud fallback attempted."
+                    )
                 local_synth = ChatterboxSynthesizer(self.media_config.chatterbox or {}, self.python_bin)
             else:
                 voice_endpoint = os.environ.get("AIRCHECK_VOICE_ENDPOINT", "http://127.0.0.1:8452").strip()
@@ -2344,6 +2315,7 @@ class RenderJobManager:
         if not head_script.is_file():
             raise FileNotFoundError(f"generate_talking_head.py not found at {head_script}")
 
+        eff_video_backend = str(spec.get("video_backend") or self.media_config.video_backend or "heygen").strip().lower()
         eff_hg_engine = str(spec.get("heygen_engine") or HEYGEN_ENGINE)
         eff_hg_res = str(spec.get("heygen_resolution") or resolution)
         report_progress(
@@ -2351,7 +2323,7 @@ class RenderJobManager:
             progress_fraction=0.60,
             stage_detail=(
                 f"Rendering {resolution} talking-head video (MuseTalk)"
-                if self.media_config.video_backend == "musetalk"
+                if eff_video_backend == "musetalk"
                 else f"Rendering {eff_hg_res} talking-head video (HeyGen {eff_hg_engine})"
             ),
             metrics=metrics,
@@ -2380,6 +2352,8 @@ class RenderJobManager:
             ratio,
             "--max-duration",
             str(max_duration),
+            "--video-backend",
+            eff_video_backend,
         ]
         if self.media_config_path is not None:
             config_snapshot = work_dir / "media_provider_config.json"
@@ -2390,16 +2364,17 @@ class RenderJobManager:
             head_cmd.extend(["--transcript", spoken_text])
         if spec.get("custom_photo"):
             head_cmd.append("--custom-photo")
-        if spec.get("heygen_look_id"):
-            head_cmd.extend(["--heygen-look-id", str(spec["heygen_look_id"])])
-        if spec.get("heygen_engine"):
-            head_cmd.extend(["--heygen-engine", str(spec["heygen_engine"])])
-        if spec.get("heygen_resolution"):
-            head_cmd.extend(["--heygen-resolution", str(spec["heygen_resolution"])])
-        if spec.get("heygen_expressiveness"):
-            head_cmd.extend(["--heygen-expressiveness", str(spec["heygen_expressiveness"])])
-        if spec.get("heygen_motion_prompt"):
-            head_cmd.extend(["--heygen-motion-prompt", str(spec["heygen_motion_prompt"])])
+        if eff_video_backend == "heygen":
+            if spec.get("heygen_look_id"):
+                head_cmd.extend(["--heygen-look-id", str(spec["heygen_look_id"])])
+            if spec.get("heygen_engine"):
+                head_cmd.extend(["--heygen-engine", str(spec["heygen_engine"])])
+            if spec.get("heygen_resolution"):
+                head_cmd.extend(["--heygen-resolution", str(spec["heygen_resolution"])])
+            if spec.get("heygen_expressiveness"):
+                head_cmd.extend(["--heygen-expressiveness", str(spec["heygen_expressiveness"])])
+            if spec.get("heygen_motion_prompt"):
+                head_cmd.extend(["--heygen-motion-prompt", str(spec["heygen_motion_prompt"])])
 
         # B-roll overlap: warm the still cache concurrently with the (long) HeyGen render so the later
         # chop hits cache instead of regenerating. Gated by prefetch_broll (set only by the app) so
@@ -2432,7 +2407,7 @@ class RenderJobManager:
                     broll_prefetch_thread.start()
 
         head_timeout_sec = max(TALKING_HEAD_TIMEOUT_BASE_SEC, max_duration * 25)
-        if self.media_config.video_backend == "musetalk":
+        if eff_video_backend == "musetalk":
             configured_timeout = (self.media_config.musetalk or {}).get("timeout_seconds", 1800)
             if type(configured_timeout) is not int or not 1 <= configured_timeout <= 7200:
                 raise ValueError("MuseTalk timeout_seconds must be 1..7200")
@@ -4489,7 +4464,7 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             return
 
         if raw_path == "/v1/media/providers":
-            self._send_json(HTTPStatus.OK, media_catalog(self.server.render_manager.media_config), head_only=head_only)
+            self._handle_media_providers(parsed.query, head_only=head_only)
             return
 
         if raw_path == "/v1/llm/providers":
@@ -4506,10 +4481,6 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
 
         if raw_path == "/v1/logs":
             self._handle_get_logs(head_only=head_only)
-            return
-
-        if raw_path == "/v1/studio/options":
-            self._handle_studio_options(parsed.query, head_only=head_only)
             return
 
         if raw_path.startswith("/v1/plates/") and raw_path.endswith(".png"):
@@ -4610,17 +4581,17 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             head_only=head_only,
         )
 
-    def _handle_studio_options(self, query: str, *, head_only: bool) -> None:
+    def _handle_media_providers(self, query: str, *, head_only: bool) -> None:
         qs = urllib.parse.parse_qs(query or "")
         refresh = any(v.lower() in ("1", "true", "yes") for v in qs.get("refresh", []))
         try:
-            payload = self.server.render_manager.get_studio_options(refresh=refresh)
+            payload = self.server.render_manager.get_media_providers(refresh=refresh)
             self._send_json(HTTPStatus.OK, payload, head_only=head_only)
         except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Failed to build /v1/studio/options: %s", exc, exc_info=True)
+            LOGGER.warning("Failed to build /v1/media/providers: %s", exc, exc_info=True)
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"error": "studio_options_failed", "detail": str(exc)},
+                {"error": "media_providers_failed", "detail": str(exc)},
                 head_only=head_only,
             )
 

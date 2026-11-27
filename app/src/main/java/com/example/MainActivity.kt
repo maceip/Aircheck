@@ -203,6 +203,7 @@ fun AircheckApp(
                         onLoadActivity = { studioViewModel.loadActivityLog() },
                         onLoadStudioOptions = { refresh -> studioViewModel.loadStudioRigOptions(refresh) },
                         onSelectVoiceBackend = studioViewModel::setRigVoiceBackend,
+                        onSelectVideoBackend = studioViewModel::setRigVideoBackend,
                         onSelectHeygenLook = studioViewModel::setHeygenLookId,
                         onSelectHeygenEngine = studioViewModel::setHeygenEngine,
                         onSelectHeygenResolution = studioViewModel::setHeygenResolution,

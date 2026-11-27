@@ -83,7 +83,8 @@ data class AircheckProfileProto(
     @ProtoNumber(37) val heygenLookId: String = "",
     @ProtoNumber(38) val heygenEngine: String = "heygen-avatar-6",
     @ProtoNumber(39) val heygenResolution: String = "1080p",
-    @ProtoNumber(40) val heygenMotionPrompt: String = ""
+    @ProtoNumber(40) val heygenMotionPrompt: String = "",
+    @ProtoNumber(41) val rigVideoBackend: String = "heygen"
 )
 
 data class StudioSettings(
@@ -100,6 +101,7 @@ data class StudioSettings(
     val phoneOnlyVoiceMode: Boolean = true,
     val preferOnPhoneVoice: Boolean = false,
     val rigVoiceBackend: String = "auto",
+    val rigVideoBackend: String = "heygen",
     val heygenLookId: String = "",
     val heygenEngine: String = "heygen-avatar-6",
     val heygenResolution: String = "1080p",
@@ -179,6 +181,11 @@ class AircheckProfileStore(
     suspend fun setRigVoiceBackend(backend: String) {
         val clean = backend.trim().lowercase().ifBlank { "auto" }
         dataStore.updateData { it.copy(rigVoiceBackend = clean) }
+    }
+
+    suspend fun setRigVideoBackend(backend: String) {
+        val clean = backend.trim().lowercase().ifBlank { "heygen" }
+        dataStore.updateData { it.copy(rigVideoBackend = clean) }
     }
 
     suspend fun setHeygenLookId(lookId: String) {
@@ -326,6 +333,7 @@ class AircheckProfileStore(
         phoneOnlyVoiceMode = phoneOnlyVoiceMode,
         preferOnPhoneVoice = preferOnPhoneVoice,
         rigVoiceBackend = rigVoiceBackend.ifBlank { "auto" },
+        rigVideoBackend = rigVideoBackend.ifBlank { "heygen" },
         heygenLookId = heygenLookId.trim(),
         heygenEngine = heygenEngine.ifBlank { "heygen-avatar-6" },
         heygenResolution = heygenResolution.ifBlank { "1080p" },

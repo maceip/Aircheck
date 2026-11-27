@@ -90,6 +90,7 @@ fun SystemDeckSheet(
     onDeviceModels: (@Composable () -> Unit)? = null,
     onLoadStudioOptions: ((refresh: Boolean) -> Unit)? = null,
     onSelectVoiceBackend: ((String) -> Unit)? = null,
+    onSelectVideoBackend: ((String) -> Unit)? = null,
     onSelectHeygenLook: ((String) -> Unit)? = null,
     onSelectHeygenEngine: ((String) -> Unit)? = null,
     onSelectHeygenResolution: ((String) -> Unit)? = null,
@@ -360,6 +361,7 @@ fun SystemDeckSheet(
                         uiState = uiState,
                         onLoadOptions = onLoadStudioOptions,
                         onSelectVoiceBackend = onSelectVoiceBackend,
+                        onSelectVideoBackend = onSelectVideoBackend ?: {},
                         onSelectHeygenLook = onSelectHeygenLook,
                         onSelectHeygenEngine = onSelectHeygenEngine,
                         onSelectHeygenResolution = onSelectHeygenResolution,
@@ -506,8 +508,8 @@ private fun ActivityLogCard(loadLogs: suspend () -> List<String>) {
 }
 
 /**
- * Real, rig-backed Voice Engine & HeyGen Talking-Head controls.
- * Fetches available voice engines and live HeyGen avatar looks from `GET /v1/studio/options`
+ * Real, rig-backed Voice & Video provider controls.
+ * Fetches available voice/video engines and live HeyGen avatar looks from `GET /v1/media/providers`
  * and persists selections in `AircheckProfileStore`.
  */
 @Composable
@@ -515,6 +517,7 @@ private fun VoiceAndHeygenCard(
     uiState: StudioUiState,
     onLoadOptions: (refresh: Boolean) -> Unit,
     onSelectVoiceBackend: (String) -> Unit,
+    onSelectVideoBackend: (String) -> Unit,
     onSelectHeygenLook: (String) -> Unit,
     onSelectHeygenEngine: (String) -> Unit,
     onSelectHeygenResolution: (String) -> Unit,
@@ -656,7 +659,68 @@ private fun VoiceAndHeygenCard(
                     }
                 }
 
-                // 2. HeyGen Avatar Look (live from Ryan's HeyGen account)
+                // 2. Video Provider (HeyGen Avatar / local MuseTalk CUDA worker)
+                val activeVideoBackend = settings.rigVideoBackend.ifBlank { options.defaultVideoBackend }
+                if (options.videoBackends.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Video provider", style = MaterialTheme.typography.bodyMedium, color = StudioCrisp)
+                        Text(
+                            text = options.videoBackends.firstOrNull { it.id == activeVideoBackend }?.label
+                                ?: activeVideoBackend,
+                            style = TelemetryTimecodeStyle,
+                            color = tokens.channelAccent,
+                            modifier = Modifier.testTag("video_backend_active_label")
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        options.videoBackends.forEach { vOpt ->
+                            val selected = activeVideoBackend.equals(vOpt.id, ignoreCase = true)
+                            Surface(
+                                color = if (selected) tokens.channelAccent.copy(alpha = 0.16f) else ConsoleElevated,
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (selected) tokens.channelAccent else tokens.hairline
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 44.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable(enabled = vOpt.available && !selected) {
+                                        onSelectVideoBackend(vOpt.id)
+                                    }
+                                    .testTag("video_backend_${vOpt.id}")
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = vOpt.label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = when {
+                                            !vOpt.available -> TelemetryMuted.copy(alpha = 0.5f)
+                                            selected -> tokens.channelAccent
+                                            else -> StudioCrisp
+                                        },
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. HeyGen Avatar Look, Engine, Quality, Motion Prompt (only when HeyGen video backend is active)
+                if (activeVideoBackend.equals("heygen", ignoreCase = true)) {
                 val activeLookId = settings.heygenLookId.ifBlank { options.defaultHeygenLookId }
                 val activeLook = options.heygenLooks.firstOrNull { it.id == activeLookId }
                 Row(
@@ -881,6 +945,7 @@ private fun VoiceAndHeygenCard(
                     ) {
                         Text("Save")
                     }
+                }
                 }
             }
         }

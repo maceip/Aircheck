@@ -1011,7 +1011,7 @@ class LlmStageRouterAndSchemaTest {
             }
 
             override suspend fun listRemoteRenders(rigBaseUrl: String): List<RemoteRenderSummary> = emptyList()
-            override suspend fun enqueueMacRigRender(rigBaseUrl: String, project: ScriptProject, photoSha: String?, resolution: String, ratio: String, maxDurationSec: Int, words: List<AlignedWord>, alignUrl: String?, useRemotion: Boolean?, brollPlan: List<CoreStoryClause>, brollAspect: String, heygenLookId: String?, heygenEngine: String?, heygenResolution: String?, heygenMotionPrompt: String?): EnqueuedRenderResult = throw UnsupportedOperationException()
+            override suspend fun enqueueMacRigRender(rigBaseUrl: String, project: ScriptProject, photoSha: String?, resolution: String, ratio: String, maxDurationSec: Int, words: List<AlignedWord>, alignUrl: String?, useRemotion: Boolean?, brollPlan: List<CoreStoryClause>, brollAspect: String, videoBackend: String?, heygenLookId: String?, heygenEngine: String?, heygenResolution: String?, heygenMotionPrompt: String?): EnqueuedRenderResult = throw UnsupportedOperationException()
             override suspend fun pollMacRigJob(rigBaseUrl: String, jobId: String): MacRigJobSnapshot = throw UnsupportedOperationException()
             override suspend fun downloadRenderedMp4ToCas(videoUrl: String): CasStoredAsset = throw UnsupportedOperationException()
             override suspend fun downloadAudioWavToCas(audioUrl: String): CasStoredAsset = throw UnsupportedOperationException()

@@ -16,7 +16,7 @@ import pytest
 from media_providers.chatterbox import VARIANTS, generate_local, offline_environment, select_device, validate_config
 from media_providers.evaluation import compare_contours, timing_metrics
 from media_providers.musetalk import avatar_cache_key
-from media_providers.registry import ProviderConfig, catalog, load_config, verify_artifacts
+from media_providers.registry import ProviderConfig, build_provider_catalog, load_config, verify_artifacts
 from media_providers.session import MediaSession, MediaStamp
 
 
@@ -45,12 +45,30 @@ def _chatterbox_config(tmp_path: Path, variant: str = "turbo") -> dict:
 
 
 def test_no_config_preserves_existing_backends():
-    assert load_config(None) == ProviderConfig()
-    result = catalog(load_config(None))
-    assert result["tts_backend"] == result["video_backend"] == "legacy"
-    assert len(result["projects"]) == 11
+    cfg = load_config(None)
+    assert cfg == ProviderConfig()
+    assert cfg.tts_backend == "auto"
+    assert cfg.video_backend == "heygen"
+    result = build_provider_catalog(
+        cfg,
+        s2pro_available=True,
+        lambda_backends=["chatterbox", "f5"],
+        heygen_options={"available": True, "looks": [], "voice": None},
+        heygen_engines=[{"id": "heygen-avatar-6", "label": "Avatar 6", "resolutions": ["1080p", "2k"]}],
+        default_heygen_look_id="look_1",
+        default_heygen_engine="heygen-avatar-6",
+        default_heygen_resolution="1080p",
+        default_heygen_voice_id="voice_1",
+    )
+    assert result["tts_backend"] == "auto"
+    assert result["video_backend"] == "heygen"
     assert result["automatic_downloads"] is False
-    assert "configuration_only" in result["readiness"]
+    voices = {v["id"]: v for v in result["voice_backends"]}
+    videos = {v["id"]: v for v in result["video_backends"]}
+    assert voices["chatterbox_local"]["available"] is False
+    assert voices["s2pro_v002"]["available"] is True
+    assert videos["heygen"]["available"] is True
+    assert videos["musetalk"]["available"] is False
 
 
 @pytest.mark.parametrize("raw", [[], {"schema_version": True}, {"schema_version": 1, "unknown": True}, {"schema_version": 1, "tts_backend": "amphion"}, {"schema_version": 1, "video_backend": "musetalk"}, {"schema_version": 1, "chatterbox": []}])
@@ -225,8 +243,16 @@ def test_evaluation_reports_measured_values_and_undefined_correlation():
         timing_metrics(elapsed_seconds=0, audio_seconds=0)
 
 
-def test_provider_endpoint_does_not_load_models_or_expose_config_paths(tmp_path):
+def test_provider_endpoint_does_not_load_models_or_expose_config_paths(monkeypatch, tmp_path):
+    import ota_server
     from ota_server import create_ota_server
+
+    monkeypatch.setattr(
+        ota_server,
+        "list_heygen_account_options",
+        lambda: {"available": True, "error": None, "looks": [], "voice": None},
+    )
+    monkeypatch.setattr(ota_server, "_probe_lambda_voice_health", lambda *a, **k: None)
 
     config_path = tmp_path / "providers.json"
     config_path.write_text(json.dumps({"schema_version": 1, "tts_backend": "chatterbox", "chatterbox": {"model_dir": "/private/model/path"}}))
@@ -236,9 +262,11 @@ def test_provider_endpoint_does_not_load_models_or_expose_config_paths(tmp_path)
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/media/providers") as response:
             body = response.read().decode()
-        assert len(json.loads(body)["projects"]) == 11
+        parsed = json.loads(body)
         assert "/private/model/path" not in body
-        assert json.loads(body)["tts_backend"] == "chatterbox"
+        assert parsed["tts_backend"] == "chatterbox_local"
+        voices = {v["id"]: v for v in parsed["voice_backends"]}
+        assert voices["chatterbox_local"]["available"] is True
     finally:
         server.shutdown()
         server.server_close()
