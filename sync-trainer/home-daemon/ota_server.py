@@ -70,12 +70,15 @@ from generate_talking_head import (
 from studio_cut import (
     ASPECT_SIZES as STUDIO_ASPECT_SIZES,
     StudioRenderOptions,
+    apply_broll_segments_to_clauses,
     broll_media_dir as studio_broll_media_dir,
     broll_media_path as studio_broll_media_path,
     compose_studio_cut,
     detect_silence_gaps,
     generate_backdrop_plate,
     generate_broll_images,
+    parse_broll_segments,
+    parse_edit_ranges,
     plate_path as studio_plate_path,
     save_broll_media_bytes,
     _probe_video_dims,
@@ -2726,7 +2729,21 @@ class RenderJobManager:
         studio_stats: dict[str, Any] = {}
         render_opts_raw = payload.get("render_options") if isinstance(payload.get("render_options"), dict) else {}
         use_remotion = bool(payload.get("use_remotion") or render_opts_raw.get("use_remotion"))
+
+        # Cut edits from the app: kept talking-head ranges after trim/split, and timed B-roll
+        # segments (talking-head source ms) that replace per-sentence B-roll tags.
+        edit_ranges = parse_edit_ranges(payload.get("edit_ranges"), max(1, int(_probe_media_duration_ms(src_mp4))))
+        broll_segments = parse_broll_segments(payload.get("broll_segments"))
+        segment_clauses = clauses
+        segments_aligned = True
+        if broll_segments is not None:
+            segment_clauses, segments_aligned = apply_broll_segments_to_clauses(clauses, broll_segments)
+        if use_remotion and (edit_ranges is not None or not segments_aligned) and "render_options" in payload:
+            # The Remotion template only knows whole-sentence cutaways on an uncut source.
+            LOGGER.info("chop job=%s: trim/split or off-sentence B-roll -> FFmpeg compositor", final_id)
+            use_remotion = False
         if use_remotion:
+            clauses = segment_clauses
             studio_stats = self._compose_via_remotion_worker(
                 final_id=final_id,
                 source_job_id=source_job_id,
@@ -2754,6 +2771,8 @@ class RenderJobManager:
                 probe_duration_ms=_probe_media_duration_ms,
                 bl_bin=DEFAULT_BL_BIN,
                 image_runner=self._plate_runner,
+                edit_ranges=edit_ranges,
+                broll_segments=broll_segments,
             )
             studio_stats["remotion_used"] = False
             studio_stats["renderer"] = "ffmpeg"
@@ -2761,6 +2780,9 @@ class RenderJobManager:
             broll_cuts = int(studio_stats["broll_cut_count"])
             applied_overlays = int(studio_stats["applied_overlay_count"])
         else:
+            if edit_ranges is not None:
+                raise ValueError("Trim/split edits need render_options (studio cut).")
+            clauses = segment_clauses
             produced_mp4, broll_cuts, applied_overlays = _compose_broll_and_saved_overlays_mp4(
                 src_mp4=src_mp4,
                 out_mp4=staged_out,

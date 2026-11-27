@@ -280,6 +280,153 @@ def remap_ms(ms: int, gaps: Sequence[tuple[int, int]]) -> int:
     return max(0, ms - removed)
 
 
+# ---------------------------------------------------------------------------
+# Cut edits: per-clip trim / split (edit ranges) and timed B-roll segments
+# ---------------------------------------------------------------------------
+
+MIN_EDIT_RANGE_MS = 100
+MIN_BROLL_SEGMENT_MS = 200
+
+
+def merge_ranges(ranges: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Sorts and merges overlapping/adjacent (start_ms, end_ms) ranges; drops empty ones."""
+    out: list[tuple[int, int]] = []
+    for start, end in sorted((int(s), int(e)) for s, e in ranges if int(e) > int(s)):
+        if out and start <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], end))
+        else:
+            out.append((start, end))
+    return out
+
+
+def complement_ranges(keep: Sequence[tuple[int, int]], total_ms: int) -> list[tuple[int, int]]:
+    """Removed (gap) ranges of [0, total_ms] that are not inside any kept range."""
+    gaps: list[tuple[int, int]] = []
+    cursor = 0
+    for start, end in merge_ranges(keep):
+        start, end = max(0, start), min(total_ms, end)
+        if start > cursor:
+            gaps.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < total_ms:
+        gaps.append((cursor, total_ms))
+    return gaps
+
+
+def parse_edit_ranges(raw: Any, total_ms: int) -> list[tuple[int, int]] | None:
+    """Parses the app's `edit_ranges` (talking-head source ms kept after trim/split).
+
+    Returns the merged kept ranges, or None when there is no edit (missing, empty, or the
+    ranges keep the whole source).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError("edit_ranges must be a list")
+    ranges: list[tuple[int, int]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            start, end = item.get("start_ms"), item.get("end_ms")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            start, end = item
+        else:
+            raise ValueError("edit_ranges items must be {start_ms, end_ms}")
+        try:
+            s_ms, e_ms = int(start), int(end)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("edit_ranges start_ms/end_ms must be integers") from exc
+        s_ms, e_ms = max(0, s_ms), min(total_ms, e_ms)
+        if e_ms - s_ms >= MIN_EDIT_RANGE_MS:
+            ranges.append((s_ms, e_ms))
+    if not ranges:
+        if raw:
+            raise ValueError("edit_ranges removes the whole video")
+        return None
+    merged = merge_ranges(ranges)
+    if not complement_ranges(merged, total_ms):
+        return None
+    return merged
+
+
+_SEGMENT_SOURCE_KEYS = (
+    "broll_caption",
+    "b_roll_prompt",
+    "broll_media_id",
+    "broll_media_base64",
+    "broll_media_ext",
+    "b_roll_sha",
+    "broll_framing",
+    "transition",
+    "transition_duration_ms",
+)
+
+
+def parse_broll_segments(raw: Any) -> list[dict[str, Any]] | None:
+    """Parses `broll_segments` ({id, start_ms, duration_ms, ...source}) into clause-like cutaway items.
+
+    start_ms is in talking-head source time; returns None when the key is absent (legacy request).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError("broll_segments must be a list")
+    items: list[dict[str, Any]] = []
+    for idx, seg in enumerate(raw):
+        if not isinstance(seg, dict):
+            raise ValueError("broll_segments items must be objects")
+        try:
+            start = max(0, int(seg.get("start_ms") or 0))
+            dur = int(seg.get("duration_ms") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("broll_segments start_ms/duration_ms must be integers") from exc
+        if dur < MIN_BROLL_SEGMENT_MS:
+            continue
+        item: dict[str, Any] = {
+            "id": str(seg.get("id") or f"seg_{idx}"),
+            "spoken_text": "",
+            "start_ms": start,
+            "end_ms": start + dur,
+            "segment_mode": "BROLL_CUTAWAY",
+            "origin_clause_id": str(seg.get("origin_clause_id") or ""),
+        }
+        for key in _SEGMENT_SOURCE_KEYS:
+            if seg.get(key) not in (None, ""):
+                item[key] = seg[key]
+        items.append(item)
+    items.sort(key=lambda it: (it["start_ms"], it["id"]))
+    return items
+
+
+def apply_broll_segments_to_clauses(
+    clauses: list[Any], segments: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], bool]:
+    """Expresses timed B-roll segments as per-clause cutaways for renderers that only know clauses.
+
+    Returns (clauses, aligned). aligned is False when some segment does not cover exactly one
+    clause window, in which case only the segment-aware FFmpeg compositor can honor the timing.
+    """
+    out = [dict(c) for c in clauses if isinstance(c, dict)]
+    for c in out:
+        c["segment_mode"] = "TALKING_HEAD"
+    aligned = True
+    for seg in segments:
+        match = next(
+            (
+                c for c in out
+                if int(c.get("start_ms") or 0) == seg["start_ms"] and int(c.get("end_ms") or 0) == seg["end_ms"]
+            ),
+            None,
+        )
+        if match is None:
+            aligned = False
+            continue
+        match["segment_mode"] = "BROLL_CUTAWAY"
+        for key in _SEGMENT_SOURCE_KEYS:
+            if key in seg:
+                match[key] = seg[key]
+    return out, aligned
+
+
 def _strip_silence(src_mp4: Path, out_mp4: Path, segments: Sequence[tuple[int, int]]) -> None:
     expr = "+".join(f"between(t,{s / 1000.0:.3f},{e / 1000.0:.3f})" for s, e in segments)
     cmd = [
@@ -779,7 +926,15 @@ def compose_studio_cut(
     probe_duration_ms: Any,
     bl_bin: Path | None = None,
     image_runner: Any = None,
+    edit_ranges: Sequence[tuple[int, int]] | None = None,
+    broll_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Composes the studio cut.
+
+    edit_ranges: kept talking-head source ranges after trim/split (None = keep everything).
+    broll_segments: timed cutaways from parse_broll_segments; when given they replace the
+    per-clause segment_mode tags.
+    """
     from PIL import Image, ImageDraw, ImageOps
 
     src_w, src_h = _probe_video_dims(src_mp4)
@@ -789,15 +944,23 @@ def compose_studio_cut(
     f_title, f_body, f_tag = _fonts(scale)
     total_ms = max(1000, int(probe_duration_ms(src_mp4)))
 
-    gaps: list[tuple[int, int]] = []
-    source = src_mp4
+    source_total_ms = total_ms
+    silence_gaps: list[tuple[int, int]] = []
     if options.strip_silence:
-        gaps = detect_silence_gaps(src_mp4, total_ms)
-        if gaps:
-            stripped = work_dir / "silence_stripped.mp4"
-            _strip_silence(src_mp4, stripped, keep_segments(total_ms, gaps))
-            source = stripped
-            total_ms = max(1000, int(probe_duration_ms(stripped)))
+        silence_gaps = detect_silence_gaps(src_mp4, total_ms)
+    edit_gaps = complement_ranges(edit_ranges, total_ms) if edit_ranges else []
+    # Every removed range (trimmed/split-out video and silent pauses) in source time; all clause,
+    # caption and B-roll windows are remapped onto the edited timeline through these gaps.
+    gaps: list[tuple[int, int]] = merge_ranges(list(silence_gaps) + list(edit_gaps))
+    source = src_mp4
+    if gaps:
+        kept = keep_segments(total_ms, gaps)
+        if not kept:
+            raise ValueError("Trim and silence removal leave no video.")
+        stripped = work_dir / "edited_source.mp4"
+        _strip_silence(src_mp4, stripped, kept)
+        source = stripped
+        total_ms = max(1, int(probe_duration_ms(stripped)))
 
     def remapped_window(item: dict[str, Any]) -> tuple[int, int] | None:
         start = remap_ms(max(0, int(item.get("start_ms") or 0)), gaps)
@@ -805,7 +968,28 @@ def compose_studio_cut(
         return (start, end) if end > start else None
 
     total_s = max(1.0, total_ms / 1000.0)
-    clause_dicts = [c for c in clauses if isinstance(c, dict)]
+    spoken_clauses = [c for c in clauses if isinstance(c, dict)]
+    if broll_segments is not None:
+        # Timed segments replace per-sentence tags: every sentence stays talking head (captions,
+        # punch-ins) and each segment is its own cutaway window.
+        segment_items: list[dict[str, Any]] = []
+        for seg in broll_segments:
+            item = dict(seg)
+            if not str(item.get("b_roll_prompt") or item.get("broll_caption") or "").strip():
+                # No prompt given: describe the line being spoken where the cutaway starts.
+                under = next(
+                    (
+                        c for c in spoken_clauses
+                        if int(c.get("start_ms") or 0) <= item["start_ms"] < int(c.get("end_ms") or 0)
+                    ),
+                    None,
+                )
+                if under is not None:
+                    item["broll_caption"] = str(under.get("spoken_text") or "").strip()
+            segment_items.append(item)
+        clause_dicts = [dict(c, segment_mode="TALKING_HEAD") for c in spoken_clauses] + segment_items
+    else:
+        clause_dicts = spoken_clauses
     valid_overlays = [
         o for o in overlays
         if isinstance(o, dict)
@@ -1353,24 +1537,32 @@ def compose_studio_cut(
         tail = (proc.stderr or "").strip().splitlines()[-4:]
         raise RuntimeError("ffmpeg studio cut failed: " + " | ".join(tail))
 
-    remapped_clauses = []
-    for item in clause_dicts:
-        window = remapped_window(item)
-        remapped_clauses.append(
-            {
-                "id": str(item.get("id") or ""),
-                "start_ms": window[0] if window else 0,
-                "end_ms": window[1] if window else 0,
-            }
-        )
+    def remapped_entries(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        entries = []
+        for item in items:
+            window = remapped_window(item)
+            entries.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "start_ms": window[0] if window else 0,
+                    "end_ms": window[1] if window else 0,
+                }
+            )
+        return entries
+
+    remapped_clauses = remapped_entries(spoken_clauses)
     return {
+        "source_duration_ms": source_total_ms,
+        "edit_range_count": len(edit_ranges or []),
+        "removed_edit_ms": sum(e - s for s, e in edit_gaps),
+        "broll_segments": remapped_entries(list(broll_segments or [])),
         "broll_cut_count": broll_count,
         "transition_count": transition_count,
         "applied_overlay_count": overlay_count,
         "caption_count": caption_count,
         "punch_in_count": len(punch_windows),
-        "removed_silence_gap_count": len(gaps),
-        "removed_silence_ms": sum(e - s for s, e in gaps),
+        "removed_silence_gap_count": len(silence_gaps),
+        "removed_silence_ms": sum(e - s for s, e in silence_gaps),
         "aspect": options.aspect,
         "clauses": remapped_clauses,
     }
