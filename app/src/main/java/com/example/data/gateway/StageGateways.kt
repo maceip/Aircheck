@@ -146,8 +146,44 @@ data class RemoteRenderSummary(
     val thumbUrl: String
 )
 
+data class RigVoiceBackendOption(
+    val id: String,
+    val label: String,
+    val available: Boolean,
+    val detail: String = ""
+)
+
+data class HeygenLookOption(
+    val id: String,
+    val name: String,
+    val avatarType: String,
+    val preferredOrientation: String = "portrait",
+    val supportedEngines: List<String> = emptyList(),
+    val previewImageUrl: String = ""
+)
+
+data class HeygenEngineOption(
+    val id: String,
+    val label: String,
+    val resolutions: List<String> = listOf("1080p")
+)
+
+data class StudioRigOptions(
+    val voiceBackends: List<RigVoiceBackendOption> = emptyList(),
+    val heygenAvailable: Boolean = false,
+    val heygenError: String? = null,
+    val heygenLooks: List<HeygenLookOption> = emptyList(),
+    val heygenEngines: List<HeygenEngineOption> = emptyList(),
+    val defaultHeygenLookId: String = "",
+    val defaultHeygenEngine: String = "heygen-avatar-6",
+    val defaultHeygenResolution: String = "1080p"
+)
+
 interface MacRigRenderGateway {
     suspend fun resolveAndCheckHealth(configuredUrl: String): MacRigHealthResult
+
+    suspend fun fetchStudioOptions(rigBaseUrl: String, refresh: Boolean = false): StudioRigOptions =
+        StudioRigOptions()
 
     suspend fun listRemoteRenders(rigBaseUrl: String): List<RemoteRenderSummary>
 
@@ -162,7 +198,11 @@ interface MacRigRenderGateway {
         alignUrl: String? = null,
         useRemotion: Boolean? = null,
         brollPlan: List<CoreStoryClause> = emptyList(),
-        brollAspect: String = "9:16"
+        brollAspect: String = "9:16",
+        heygenLookId: String? = null,
+        heygenEngine: String? = null,
+        heygenResolution: String? = null,
+        heygenMotionPrompt: String? = null
     ): EnqueuedRenderResult
 
     suspend fun pollMacRigJob(rigBaseUrl: String, jobId: String): MacRigJobSnapshot
@@ -180,7 +220,8 @@ interface MacRigRenderGateway {
         rigBaseUrl: String,
         projectId: String,
         clauses: List<CoreStoryClause>,
-        task: RigTaskHandle? = null
+        task: RigTaskHandle? = null,
+        voiceBackend: String = "auto"
     ): CoreTtsSynthesisResult
 
     suspend fun chopTalkingHeadIntoBroll(

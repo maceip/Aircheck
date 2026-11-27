@@ -635,7 +635,11 @@ class CoreStoryPipelineCoordinatorTest {
             alignUrl: String?,
             useRemotion: Boolean?,
             brollPlan: List<CoreStoryClause>,
-            brollAspect: String
+            brollAspect: String,
+            heygenLookId: String?,
+            heygenEngine: String?,
+            heygenResolution: String?,
+            heygenMotionPrompt: String?
         ): EnqueuedRenderResult {
             enqueueCount++
             lastEnqueuedMaxDurationSec = maxDurationSec
@@ -662,7 +666,8 @@ class CoreStoryPipelineCoordinatorTest {
             rigBaseUrl: String,
             projectId: String,
             clauses: List<CoreStoryClause>,
-            task: RigTaskHandle?
+            task: RigTaskHandle?,
+            voiceBackend: String
         ): CoreTtsSynthesisResult {
             ttsCallCount++
             return CoreTtsSynthesisResult(

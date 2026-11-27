@@ -34,6 +34,7 @@ import com.example.data.VoiceSource
 import com.example.data.estimateDurationSeconds
 import com.example.data.gateway.MacRigRenderGateway
 import com.example.data.gateway.RemoteRenderSummary
+import com.example.data.gateway.StudioRigOptions
 import com.example.data.local.AircheckLocalRepository
 import com.example.data.local.AircheckProfileStore
 import com.example.data.local.CasMediaStore
@@ -114,6 +115,9 @@ data class StudioUiState(
     val isTweakingLook: Boolean = false,
     val otaBundleState: OtaBundleState = OtaBundleState(),
     val rigHealth: RigHealthUiState = RigHealthUiState(),
+    val studioRigOptions: StudioRigOptions? = null,
+    val isLoadingStudioOptions: Boolean = false,
+    val studioOptionsError: String? = null,
     val voiceStorageSnapshot: VoiceStorageSnapshot? = null,
     val voiceQualityReport: VoiceQualityReport? = null,
     val isCheckingVoiceQuality: Boolean = false,
@@ -2084,6 +2088,80 @@ class StudioViewModel internal constructor(
 
     fun setBrandChannel(channel: BrandChannel) {
         viewModelScope.launch { profileStore.setBrandChannel(channel) }
+    }
+
+    fun setRigVoiceBackend(backend: String) {
+        viewModelScope.launch {
+            profileStore.setRigVoiceBackend(backend)
+            _uiState.update { it.copy(toastMessage = "Voice engine updated") }
+        }
+    }
+
+    fun setHeygenLookId(lookId: String) {
+        viewModelScope.launch {
+            profileStore.setHeygenLookId(lookId)
+            _uiState.update { it.copy(toastMessage = "HeyGen look updated") }
+        }
+    }
+
+    fun setHeygenEngine(engine: String) {
+        viewModelScope.launch {
+            profileStore.setHeygenEngine(engine)
+            _uiState.update { it.copy(toastMessage = "HeyGen engine updated") }
+        }
+    }
+
+    fun setHeygenResolution(resolution: String) {
+        viewModelScope.launch {
+            profileStore.setHeygenResolution(resolution)
+            _uiState.update { it.copy(toastMessage = "HeyGen quality updated") }
+        }
+    }
+
+    fun setHeygenMotionPrompt(prompt: String) {
+        viewModelScope.launch {
+            profileStore.setHeygenMotionPrompt(prompt)
+            _uiState.update { it.copy(toastMessage = "Motion prompt saved") }
+        }
+    }
+
+    fun loadStudioRigOptions(refresh: Boolean = false) {
+        val currentState = _uiState.value
+        val fallbackUrl = currentState.settings.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoadingStudioOptions = true, studioOptionsError = null) }
+            val result = runCatching {
+                val persistedUrl = runCatching { profileStore.current().tailscaleRigUrl.trim() }
+                    .getOrNull()
+                    ?.takeIf { it.isNotBlank() }
+                val effectiveCandidate = when {
+                    currentState.rigHealth.status == RigConnectionStatus.ONLINE &&
+                        currentState.rigHealth.resolvedUrl.isNotBlank() -> currentState.rigHealth.resolvedUrl.trim()
+                    !persistedUrl.isNullOrBlank() -> persistedUrl
+                    else -> fallbackUrl
+                }
+                val baseUrl = runCatching { macRigGateway.resolveAndCheckHealth(effectiveCandidate).resolvedUrl }
+                    .getOrDefault(effectiveCandidate)
+                macRigGateway.fetchStudioOptions(baseUrl, refresh = refresh)
+            }
+            result.onSuccess { opts ->
+                _uiState.update {
+                    it.copy(
+                        studioRigOptions = opts,
+                        isLoadingStudioOptions = false,
+                        studioOptionsError = opts.heygenError
+                    )
+                }
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                _uiState.update {
+                    it.copy(
+                        isLoadingStudioOptions = false,
+                        studioOptionsError = err.localizedMessage ?: "Connect to Mac Studio to load voice & HeyGen options."
+                    )
+                }
+            }
+        }
     }
 
     fun clearCasCache() {

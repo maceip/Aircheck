@@ -11,14 +11,17 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.runComposeUiTest
+import androidx.compose.ui.test.swipeUp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import com.example.AircheckApplication
@@ -27,10 +30,14 @@ import com.example.ai.LlmStageRouter
 import com.example.data.BrollSegmentMode
 import com.example.data.ClipRecord
 import com.example.data.CorePipelineSession
+import com.example.data.CoreStoryClause
 import com.example.data.LlmProviderChoice
 import com.example.data.LlmStage
 import com.example.data.OverlayObjectKind
 import com.example.data.RenderJobStatus
+import com.example.data.ScriptBeat
+import com.example.data.ScriptProject
+import com.example.data.VoiceSource
 import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.draft.BrushNudge
 import com.example.draft.DraftApiClient
@@ -41,6 +48,7 @@ import com.example.graph.GraphPostRecord
 import com.example.ui.clipstudio.ClipStudioScreen
 import com.example.ui.clipstudio.ClipStudioShell
 import com.example.ui.draft.DraftDeckViewModel
+import com.example.ui.screens.SystemDeckSheet
 import com.example.ui.theme.AircheckTheme
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
@@ -664,5 +672,285 @@ class ClipStudioV5ComposeTest {
                 draftVm.uiState.value.document.arcBeats.size == 4
         }
         onNodeWithText("FOLLOW-UP:", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun scriptScreen_newIdeaButton_resetsDraftAndNavigatesToEmptySpark() = runComposeUiTest {
+        val server = startTestServer()
+        server.createContext("/health") { ex ->
+            val resp = """{"status":"ok"}""".toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/draft/angles") { ex ->
+            val resp = """
+                {
+                  "extracted_angles": [
+                    {"id":"a_edge","label":"edge AI","preview":"Runs locally"}
+                  ],
+                  "blindspots": [],
+                  "tone": "direct"
+                }
+            """.trimIndent().toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/draft/arc") { ex ->
+            val resp = """
+                {
+                  "target_sec": 30,
+                  "word_budget": 75,
+                  "beats": [
+                    {"label":"HOOK","start_sec":0,"end_sec":8,"text":"First idea hook."},
+                    {"label":"DETAIL","start_sec":8,"end_sec":16,"text":"First idea detail."},
+                    {"label":"SHIFT","start_sec":16,"end_sec":24,"text":"First idea shift."},
+                    {"label":"PAYOFF","start_sec":24,"end_sec":30,"text":"First idea payoff."}
+                  ]
+                }
+            """.trimIndent().toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/draft/synthesize-script") { ex ->
+            val resp = """
+                {
+                  "target_sec": 30,
+                  "word_budget": 75,
+                  "tone": "direct",
+                  "candidates": [
+                    {"posture_label":"DIRECT","text":"First idea hook. First idea detail.\n\nFirst idea payoff."},
+                    {"posture_label":"PUNCHY","text":"Short hook.\n\nShort payoff."},
+                    {"posture_label":"STORY","text":"Story hook.\n\nStory payoff."}
+                  ]
+                }
+            """.trimIndent().toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/studio/shot-preview") { ex ->
+            ex.sendResponseHeaders(404, 0)
+            ex.responseBody.close()
+        }
+        server.start()
+        httpServer = server
+        val rigUrl = "http://127.0.0.1:${server.address.port}"
+        runBlocking { app.container.profileStore.setTailscaleRigUrl(rigUrl) }
+
+        var draftVmRef: DraftDeckViewModel? = null
+        var studioVmRef: StudioViewModel? = null
+        var activeScreen = ClipStudioScreen.SPARK
+        setContent {
+            val draftVm = draftVmRef ?: buildDraftVm(rigUrl).also { draftVmRef = it }
+            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
+            val draftState by draftVm.uiState.collectAsStateWithLifecycle()
+            val studioState by studioVm.uiState.collectAsStateWithLifecycle()
+            var screen by remember { mutableStateOf(ClipStudioScreen.SPARK) }
+            activeScreen = screen
+            AircheckTheme {
+                ClipStudioShell(
+                    draftState = draftState,
+                    draftVm = draftVm,
+                    studioState = studioState,
+                    studioVm = studioVm,
+                    screen = screen,
+                    onScreen = { screen = it },
+                    onOpenSettings = {},
+                    onOpenOverlayBuilder = {}
+                )
+            }
+        }
+        val draftVm = checkNotNull(draftVmRef)
+
+        // Seed first idea -> write script -> land on 02 SCRIPT
+        draftVm.submitTypedNote("My first rough idea about edge AI.")
+        waitUntil(timeoutMillis = 8_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            draftVm.uiState.value.document.arcBeats.size == 4 && !draftVm.uiState.value.isBusy
+        }
+        // Verify populated 01 SPARK also shows the quick "+ new" button
+        onNodeWithTag("cs_spark_new_idea").assertIsDisplayed()
+
+        onNodeWithTag("cs_write_script").performClick()
+        waitUntil(timeoutMillis = 8_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            activeScreen == ClipStudioScreen.SCRIPT &&
+                onAllNodesWithTag("cs_script_root").fetchSemanticsNodes().isNotEmpty() &&
+                !draftVm.uiState.value.isBusy
+        }
+
+        // Tap "+ new" right on 02 SCRIPT -> resets draft and navigates directly to empty 01 SPARK
+        onNodeWithTag("cs_new_idea").assertIsDisplayed().performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            activeScreen == ClipStudioScreen.SPARK &&
+                draftVm.uiState.value.document.seedTranscript.isBlank() &&
+                draftVm.uiState.value.document.arcBeats.isEmpty() &&
+                draftVm.uiState.value.document.candidates.isEmpty()
+        }
+        onNodeWithText("What's the clip about?").assertIsDisplayed()
+    }
+
+    @Test
+    fun studioSettings_voiceAndHeygenControls_loadLiveOptionsAndPersistEndToEnd() = runComposeUiTest {
+        val server = startTestServer()
+        val capturedTtsBodies = CopyOnWriteArrayList<String>()
+        val capturedRenderBodies = CopyOnWriteArrayList<String>()
+        server.createContext("/health") { ex ->
+            val resp = """{"status":"ok","render_bridge":true}""".toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/studio/options") { ex ->
+            val resp = """
+                {
+                  "voice_backends": [
+                    {"id":"auto","label":"Auto (Fast GPU)","available":true,"detail":"Auto"},
+                    {"id":"s2pro_v002","label":"S2-Pro v002 LoRA","available":true,"detail":"Fine-tuned"},
+                    {"id":"chatterbox","label":"Chatterbox GPU","available":true,"detail":"Zero-shot"},
+                    {"id":"heygen_voice","label":"HeyGen Voice","available":true,"detail":"Instant clone"}
+                  ],
+                  "heygen_available": true,
+                  "heygen_looks": [
+                    {"id":"28bbc1a0f7217675473054ab02d759d9","name":"Ryan anchor v3","avatar_type":"photo_avatar","preferred_orientation":"portrait","supported_api_engines":["avatar_v","avatar_iv","heygen-avatar-6"]},
+                    {"id":"8445adef497a4fbabef51263b2d2bcef","name":"Ryan MacArthur -- 1","avatar_type":"digital_twin","preferred_orientation":"landscape","supported_api_engines":["avatar_v","avatar_iv","heygen-avatar-6"]}
+                  ],
+                  "heygen_engines": [
+                    {"id":"heygen-avatar-6","label":"Avatar 6","resolutions":["1080p","2k"]},
+                    {"id":"avatar_v","label":"Avatar V","resolutions":["720p","1080p"]}
+                  ],
+                  "defaults": {
+                    "voice_backend":"auto",
+                    "heygen_look_id":"28bbc1a0f7217675473054ab02d759d9",
+                    "heygen_engine":"heygen-avatar-6",
+                    "heygen_resolution":"1080p"
+                  }
+                }
+            """.trimIndent().toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/core/tts") { ex ->
+            capturedTtsBodies.add(ex.requestBody.bufferedReader().readText())
+            val resp = """{"job_id":"task_tts_1","status":"QUEUED"}""".toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(202, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/jobs/task_tts_1") { ex ->
+            val resp = """
+                {
+                  "job_id":"task_tts_1",
+                  "status":"READY",
+                  "progress_fraction":1.0,
+                  "result":{
+                    "tts_id":"tts_test_1",
+                    "audio_url":"/v1/renders/tts_test_1.wav",
+                    "duration_ms":2000,
+                    "waveform_peaks":[0.5,0.8],
+                    "clauses":[{"id":"c0","start_ms":0,"end_ms":2000}],
+                    "words":[{"word":"Hello","start_ms":0,"end_ms":500}]
+                  }
+                }
+            """.trimIndent().toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.createContext("/v1/render-video") { ex ->
+            capturedRenderBodies.add(ex.requestBody.bufferedReader().readText())
+            val resp = """{"job_id":"job_hg_1"}""".toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(202, resp.size.toLong())
+            ex.responseBody.use { it.write(resp) }
+        }
+        server.start()
+        httpServer = server
+        val rigUrl = "http://127.0.0.1:${server.address.port}"
+        runBlocking { app.container.profileStore.setTailscaleRigUrl(rigUrl) }
+
+        var studioVmRef: StudioViewModel? = null
+        setContent {
+            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
+            val studioState by studioVm.uiState.collectAsStateWithLifecycle()
+            AircheckTheme {
+                SystemDeckSheet(
+                    uiState = studioState,
+                    onSelectChannel = studioVm::setBrandChannel,
+                    onClearCasCache = {},
+                    onClose = {},
+                    onSaveTailscaleRigUrl = studioVm::saveTailscaleRigUrl,
+                    onTestRigConnection = studioVm::testMacRigConnection,
+                    onLoadStudioOptions = studioVm::loadStudioRigOptions,
+                    onSelectVoiceBackend = studioVm::setRigVoiceBackend,
+                    onSelectHeygenLook = studioVm::setHeygenLookId,
+                    onSelectHeygenEngine = studioVm::setHeygenEngine,
+                    onSelectHeygenResolution = studioVm::setHeygenResolution,
+                    onSaveHeygenMotionPrompt = studioVm::setHeygenMotionPrompt
+                )
+            }
+        }
+        val studioVm = checkNotNull(studioVmRef)
+
+        // Scroll to the Voice & HeyGen card and wait for real live options from /v1/studio/options
+        onNodeWithTag("system_deck_lazy_list").performScrollToNode(hasTestTag("voice_heygen_card"))
+        waitUntil(timeoutMillis = 8_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.studioRigOptions?.heygenLooks?.size == 2
+        }
+
+        // Select S2-Pro v002 LoRA voice backend, Digital Twin look, Avatar V engine, and motion prompt
+        onNodeWithTag("voice_backend_s2pro_v002").performClick()
+        onNodeWithTag("heygen_look_8445adef497a4fbabef51263b2d2bcef").performClick()
+        onNodeWithTag("system_deck_lazy_list").performTouchInput { swipeUp() }
+        onNodeWithTag("heygen_engine_avatar_v").performClick()
+        onNodeWithTag("system_deck_lazy_list").performTouchInput { swipeUp() }
+        onNodeWithTag("heygen_motion_prompt_input").performTextReplacement("calm broadcast anchor delivery")
+        onNodeWithTag("heygen_motion_prompt_save").performClick()
+
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            val s = studioVm.uiState.value.settings
+            s.rigVoiceBackend == "s2pro_v002" &&
+                s.heygenLookId == "8445adef497a4fbabef51263b2d2bcef" &&
+                s.heygenEngine == "avatar_v" &&
+                s.heygenMotionPrompt == "calm broadcast anchor delivery"
+        }
+
+        // Verify persisted settings are actually transmitted by MacRigRenderGateway
+        runBlocking {
+            val saved = app.container.profileStore.current()
+            app.container.macRigGateway.synthesizeCoreStoryTts(
+                rigBaseUrl = rigUrl,
+                projectId = "proj_test",
+                clauses = listOf(CoreStoryClause(id = "c0", index = 0, spokenText = "Hello world.")),
+                voiceBackend = saved.rigVoiceBackend
+            )
+            app.container.macRigGateway.enqueueMacRigRender(
+                rigBaseUrl = rigUrl,
+                project = ScriptProject(
+                    id = "proj_test",
+                    title = "Test",
+                    voiceSource = VoiceSource.ENROLLED_VOICE_CLONE,
+                    beats = listOf(ScriptBeat(id = "b0", index = 0, spokenText = "Hello world."))
+                ),
+                photoSha = null,
+                heygenLookId = saved.heygenLookId,
+                heygenEngine = saved.heygenEngine,
+                heygenResolution = saved.heygenResolution,
+                heygenMotionPrompt = saved.heygenMotionPrompt
+            )
+        }
+        assertTrue(capturedTtsBodies.single().contains("\"voice_backend\":\"s2pro_v002\""))
+        val renderBody = capturedRenderBodies.single()
+        assertTrue(renderBody.contains("\"heygen_look_id\":\"8445adef497a4fbabef51263b2d2bcef\""))
+        assertTrue(renderBody.contains("\"heygen_engine\":\"avatar_v\""))
+        assertTrue(renderBody.contains("\"heygen_resolution\":\"1080p\""))
+        assertTrue(renderBody.contains("\"heygen_motion_prompt\":\"calm broadcast anchor delivery\""))
     }
 }

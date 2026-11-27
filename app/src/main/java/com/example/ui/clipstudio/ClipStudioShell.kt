@@ -111,6 +111,13 @@ fun ClipStudioShell(
         }
     }
 
+    val startNewIdea: () -> Unit = {
+        lastOpenedScript = null
+        draftVm.resetNewDraft()
+        draftVm.showToast("Ready for a new idea")
+        onScreen(ClipStudioScreen.SPARK)
+    }
+
     val activeToast = draftState.toastMessage ?: studioState.toastMessage
 
     Box(
@@ -131,6 +138,7 @@ fun ClipStudioShell(
                     onRequestMic = requestMic,
                     onOpenSettings = onOpenSettings,
                     onNavigate = navigate,
+                    onNewIdea = startNewIdea,
                     lastCompletedVideo = studioState.lastCompletedVideo,
                     renderGlobalOverlays = false
                 )
@@ -139,6 +147,7 @@ fun ClipStudioShell(
                     vm = draftVm,
                     onRequestMic = requestMic,
                     onNavigate = navigate,
+                    onNewIdea = startNewIdea,
                     onCreateVideo = { text ->
                         val quote = draftState.document.attachment as? XAttachment.QuotePost
                         // Persist the new CorePipelineSession to Room BEFORE auto-starting Stage 1 TTS
@@ -160,6 +169,7 @@ fun ClipStudioShell(
                     onOpenSettings = onOpenSettings,
                     onOpenNewsroom = { onScreen(ClipStudioScreen.NEWSROOM) },
                     onNavigate = navigate,
+                    onNewIdea = startNewIdea,
                     renderGlobalOverlays = false
                 )
                 ClipStudioScreen.NEWSROOM -> NewsroomLookScreen(

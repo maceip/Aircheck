@@ -354,11 +354,23 @@ def verify_av_sync_ffprobe(
 
 
 # HeyGen is the single talking-head engine (Ryan, 2026-11-25: "Just yes, use it"; bake-off winner
-# was HeyGen Avatar 6). Renders Ryan's approved photo-avatar look lip-synced to the exact voice wav.
+# was HeyGen Avatar 6). Renders Ryan's approved photo-avatar or digital-twin look lip-synced to the exact voice wav.
 HEYGEN_BIN = Path(os.environ.get("AIRCHECK_HEYGEN_BIN", str(Path.home() / ".local/bin/heygen")))
+HEYGEN_GROUP_ID = os.environ.get("AIRCHECK_HEYGEN_GROUP_ID", "49475c7a39704a95bcba875769333c75")
 HEYGEN_LOOK_ID = os.environ.get("AIRCHECK_HEYGEN_LOOK_ID", "28bbc1a0f7217675473054ab02d759d9")
 HEYGEN_ENGINE = os.environ.get("AIRCHECK_HEYGEN_ENGINE", "heygen-avatar-6")
+HEYGEN_VOICE_ID = os.environ.get("AIRCHECK_HEYGEN_VOICE_ID", "bba48bed853342a7a063970cf9161bee")
 HEYGEN_POLL_SEC = 10
+
+VALID_HEYGEN_ENGINES = (
+    "heygen-avatar-6",
+    "heygen-avatar-6-turbo",
+    "avatar_v",
+    "avatar_iv",
+    "avatar_iii",
+)
+VALID_HEYGEN_RESOLUTIONS = ("720p", "1080p", "2k")
+VALID_HEYGEN_EXPRESSIVENESS = ("low", "medium", "high")
 
 
 def _heygen_json(args: list[str], timeout: int = 180) -> dict[str, Any]:
@@ -371,6 +383,82 @@ def _heygen_json(args: list[str], timeout: int = 180) -> dict[str, Any]:
         raise RuntimeError(f"heygen {args[0]} {args[1]} returned non-JSON: {proc.stdout[:300]}") from exc
 
 
+def list_heygen_account_options() -> dict[str, Any]:
+    """Query the live authenticated HeyGen CLI for Ryan's avatar looks and active cloned voice."""
+    if not HEYGEN_BIN.is_file():
+        return {
+            "available": False,
+            "error": f"HeyGen CLI not found at {HEYGEN_BIN}",
+            "looks": [],
+            "voice": None,
+        }
+    looks_out: list[dict[str, Any]] = []
+    error_msg: str | None = None
+    try:
+        raw_looks = _heygen_json(
+            ["avatar", "looks", "list", "--group-id", HEYGEN_GROUP_ID],
+            timeout=30,
+        )
+        for item in raw_looks.get("data") or []:
+            if not isinstance(item, Mapping):
+                continue
+            status = str(item.get("status") or "").lower()
+            if status and status != "completed":
+                continue
+            looks_out.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "name": str(item.get("name") or "Unnamed Look"),
+                    "avatar_type": str(item.get("avatar_type") or "photo_avatar"),
+                    "preferred_orientation": str(item.get("preferred_orientation") or "portrait"),
+                    "supported_api_engines": [
+                        str(e) for e in (item.get("supported_api_engines") or []) if str(e).strip()
+                    ],
+                    "preview_image_url": str(item.get("preview_image_url") or ""),
+                    "default_voice_id": str(item.get("default_voice_id") or ""),
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        error_msg = str(exc)
+
+    voice_info: dict[str, Any] | None = None
+    if HEYGEN_VOICE_ID:
+        try:
+            raw_voice = _heygen_json(
+                ["model", "audio", "voices", "get", HEYGEN_VOICE_ID],
+                timeout=20,
+            )
+            vdata = raw_voice.get("data")
+            if isinstance(vdata, Mapping) and str(vdata.get("status") or "").upper() == "ACTIVE":
+                voice_info = {
+                    "voice_id": str(vdata.get("voice_id") or HEYGEN_VOICE_ID),
+                    "name": str(vdata.get("name") or "HeyGen Clone"),
+                    "mode": str(vdata.get("mode") or "instant"),
+                    "language": str(vdata.get("language") or "en"),
+                }
+        except Exception:  # noqa: BLE001
+            voice_info = None
+
+    return {
+        "available": True,
+        "error": error_msg,
+        "group_id": HEYGEN_GROUP_ID,
+        "looks": looks_out,
+        "voice": voice_info,
+    }
+
+
+def _normalize_heygen_resolution(engine: str, raw_resolution: str | None, fallback_res: str) -> str:
+    candidate = (raw_resolution or fallback_res or "1080p").strip().lower()
+    if candidate not in VALID_HEYGEN_RESOLUTIONS:
+        candidate = "1080p"
+    if engine in ("heygen-avatar-6", "heygen-avatar-6-turbo"):
+        # Avatar 6 accepts only 1080p or 2k
+        return "2k" if candidate == "2k" else "1080p"
+    # Avatar III / IV / V / image accept 720p or 1080p
+    return "720p" if candidate == "720p" else "1080p"
+
+
 def _invoke_heygen_avatar(
     *,
     master_wav: Path,
@@ -380,9 +468,30 @@ def _invoke_heygen_avatar(
     ratio: str,
     resolution: str,
     timeout_sec: int,
+    heygen_look_id: str | None = None,
+    heygen_engine: str | None = None,
+    heygen_resolution: str | None = None,
+    heygen_expressiveness: str | None = None,
+    heygen_motion_prompt: str | None = None,
 ) -> dict[str, Any]:
     if not HEYGEN_BIN.is_file():
         raise RuntimeError(f"HeyGen CLI not found at {HEYGEN_BIN}")
+    eff_look_id = (heygen_look_id or "").strip() or HEYGEN_LOOK_ID
+    eff_engine = (heygen_engine or "").strip().lower() or HEYGEN_ENGINE
+    if eff_engine not in VALID_HEYGEN_ENGINES:
+        raise ValueError(f"Unsupported heygen_engine {eff_engine!r}; must be one of {VALID_HEYGEN_ENGINES}")
+    eff_res = _normalize_heygen_resolution(
+        "image" if use_custom_photo else eff_engine,
+        heygen_resolution,
+        resolution,
+    )
+    eff_expr = (heygen_expressiveness or "").strip().lower()
+    if eff_expr and eff_expr not in VALID_HEYGEN_EXPRESSIVENESS:
+        raise ValueError(
+            f"Unsupported heygen_expressiveness {eff_expr!r}; must be one of {VALID_HEYGEN_EXPRESSIVENESS}"
+        )
+    eff_motion = (heygen_motion_prompt or "").strip()[:400]
+
     asset = _heygen_json(["asset", "create", "--file", str(master_wav)])["data"]
     if use_custom_photo and avatar_path.is_file():
         img_asset = _heygen_json(["asset", "create", "--file", str(avatar_path)])["data"]
@@ -391,17 +500,28 @@ def _invoke_heygen_avatar(
             "image": {"type": "asset_id", "asset_id": img_asset["asset_id"]},
             "audio_asset_id": asset["asset_id"],
             "aspect_ratio": ratio,
-            "resolution": "1080p",
+            "resolution": eff_res,
         }
+        if eff_expr:
+            body["expressiveness"] = eff_expr
+        if eff_motion:
+            body["motion_prompt"] = eff_motion
     else:
+        engine_cfg: dict[str, Any] = {"type": eff_engine}
+        if eff_engine == "avatar_v":
+            engine_cfg["more_blinking"] = True
         body = {
             "type": "avatar",
-            "avatar_id": HEYGEN_LOOK_ID,
+            "avatar_id": eff_look_id,
             "audio_asset_id": asset["asset_id"],
-            "engine": {"type": HEYGEN_ENGINE},
+            "engine": engine_cfg,
             "aspect_ratio": ratio,
-            "resolution": "1080p",  # Avatar 6 accepts only 1080p or 2k
+            "resolution": eff_res,
         }
+        if eff_expr and eff_engine == "avatar_iv":
+            body["expressiveness"] = eff_expr
+        if eff_motion and eff_engine != "avatar_iii":
+            body["motion_prompt"] = eff_motion
     created = _heygen_json(["video", "create", "-d", json.dumps(body)])["data"]
     video_id = created.get("video_id") or created.get("id")
     if not video_id:
@@ -428,8 +548,9 @@ def _invoke_heygen_avatar(
         raise RuntimeError(f"heygen video download failed: {(proc.stderr or proc.stdout).strip()[:400]}")
     return {
         "heygen_video_id": video_id,
-        "heygen_look_id": "custom_photo" if use_custom_photo else HEYGEN_LOOK_ID,
-        "heygen_engine": HEYGEN_ENGINE,
+        "heygen_look_id": "custom_photo" if use_custom_photo else eff_look_id,
+        "heygen_engine": eff_engine,
+        "heygen_resolution": eff_res,
         "used_custom_photo": use_custom_photo,
     }
 
@@ -447,6 +568,11 @@ def generate_talking_head(
     whisper_model: Path = DEFAULT_WHISPER_MODEL,
     bl_timeout_sec: int = BL_BEAT_TIMEOUT_SEC,
     use_custom_photo: bool = False,
+    heygen_look_id: str | None = None,
+    heygen_engine: str | None = None,
+    heygen_resolution: str | None = None,
+    heygen_expressiveness: str | None = None,
+    heygen_motion_prompt: str | None = None,
 ) -> dict:
     norm_resolution = normalize_talking_head_resolution(resolution)
     norm_ratio = _validate_ratio_and_duration(ratio, max_duration)
@@ -488,6 +614,11 @@ def generate_talking_head(
             ratio=norm_ratio,
             resolution=norm_resolution,
             timeout_sec=max(bl_timeout_sec, 1800),
+            heygen_look_id=heygen_look_id,
+            heygen_engine=heygen_engine,
+            heygen_resolution=heygen_resolution,
+            heygen_expressiveness=heygen_expressiveness,
+            heygen_motion_prompt=heygen_motion_prompt,
         )
         qa_target = output_mp4
         result_lambda: dict[str, Any] = {
@@ -540,11 +671,19 @@ def generate_talking_head(
             qa_target = orig_audio_mp4
             result_lambda["exact_input_voice_mp4"] = str(orig_audio_mp4)
 
+        eff_hg_res = str(remote_meta.get("heygen_resolution") or "").lower()
+        if eff_hg_res == "2k":
+            qa_w, qa_h = None, None
+        elif (eff_hg_res.upper(), norm_ratio) in _RESOLUTION_DIMENSIONS:
+            qa_w, qa_h = _RESOLUTION_DIMENSIONS[(eff_hg_res.upper(), norm_ratio)]
+        else:
+            qa_w, qa_h = target_w, target_h
+
         qa = verify_av_sync_ffprobe(
             qa_target,
             expected_audio_ms=total_ms,
-            expected_width=target_w,
-            expected_height=target_h,
+            expected_width=qa_w,
+            expected_height=qa_h,
         )
         result_lambda["ffprobe_qa"] = qa
         result_lambda["av_sync_drift_ms"] = qa["av_sync_drift_ms"]
@@ -563,6 +702,11 @@ def main() -> int:
     parser.add_argument("--ratio", default="9:16", choices=["9:16", "16:9", "1:1"])
     parser.add_argument("--max-duration", type=int, default=10, help="Max clip duration in seconds (2..120, default 10)")
     parser.add_argument("--custom-photo", action="store_true", help="Animate the supplied --avatar image instead of the default HeyGen look")
+    parser.add_argument("--heygen-look-id", default=None, help="Override HeyGen avatar look ID")
+    parser.add_argument("--heygen-engine", default=None, choices=list(VALID_HEYGEN_ENGINES), help="Override HeyGen engine")
+    parser.add_argument("--heygen-resolution", default=None, choices=list(VALID_HEYGEN_RESOLUTIONS), help="Override HeyGen output resolution (720p/1080p/2k)")
+    parser.add_argument("--heygen-expressiveness", default=None, choices=list(VALID_HEYGEN_EXPRESSIVENESS), help="HeyGen expressiveness (low/medium/high; Avatar IV / image)")
+    parser.add_argument("--heygen-motion-prompt", default=None, help="Natural-language HeyGen motion prompt")
     args = parser.parse_args()
 
     res = generate_talking_head(
@@ -574,6 +718,11 @@ def main() -> int:
         ratio=args.ratio,
         max_duration=args.max_duration,
         use_custom_photo=bool(args.custom_photo),
+        heygen_look_id=args.heygen_look_id,
+        heygen_engine=args.heygen_engine,
+        heygen_resolution=args.heygen_resolution,
+        heygen_expressiveness=args.heygen_expressiveness,
+        heygen_motion_prompt=args.heygen_motion_prompt,
     )
     print(json.dumps(res, indent=2))
     return 0

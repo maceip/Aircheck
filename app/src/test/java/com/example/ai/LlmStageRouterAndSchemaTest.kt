@@ -1011,11 +1011,11 @@ class LlmStageRouterAndSchemaTest {
             }
 
             override suspend fun listRemoteRenders(rigBaseUrl: String): List<RemoteRenderSummary> = emptyList()
-            override suspend fun enqueueMacRigRender(rigBaseUrl: String, project: ScriptProject, photoSha: String?, resolution: String, ratio: String, maxDurationSec: Int, words: List<AlignedWord>, alignUrl: String?, useRemotion: Boolean?, brollPlan: List<CoreStoryClause>, brollAspect: String): EnqueuedRenderResult = throw UnsupportedOperationException()
+            override suspend fun enqueueMacRigRender(rigBaseUrl: String, project: ScriptProject, photoSha: String?, resolution: String, ratio: String, maxDurationSec: Int, words: List<AlignedWord>, alignUrl: String?, useRemotion: Boolean?, brollPlan: List<CoreStoryClause>, brollAspect: String, heygenLookId: String?, heygenEngine: String?, heygenResolution: String?, heygenMotionPrompt: String?): EnqueuedRenderResult = throw UnsupportedOperationException()
             override suspend fun pollMacRigJob(rigBaseUrl: String, jobId: String): MacRigJobSnapshot = throw UnsupportedOperationException()
             override suspend fun downloadRenderedMp4ToCas(videoUrl: String): CasStoredAsset = throw UnsupportedOperationException()
             override suspend fun downloadAudioWavToCas(audioUrl: String): CasStoredAsset = throw UnsupportedOperationException()
-            override suspend fun synthesizeCoreStoryTts(rigBaseUrl: String, projectId: String, clauses: List<CoreStoryClause>, task: RigTaskHandle?): CoreTtsSynthesisResult = throw UnsupportedOperationException()
+            override suspend fun synthesizeCoreStoryTts(rigBaseUrl: String, projectId: String, clauses: List<CoreStoryClause>, task: RigTaskHandle?, voiceBackend: String): CoreTtsSynthesisResult = throw UnsupportedOperationException()
             override suspend fun chopTalkingHeadIntoBroll(rigBaseUrl: String, scriptId: String, title: String, sourceJobId: String?, sourceMp4Sha: String?, clauses: List<CoreStoryClause>, overlays: List<SavedNewsroomOverlay>, renderOptions: CoreRenderOptions?, look: NewsroomLook?, task: RigTaskHandle?, alignedWords: List<AlignedWord>, alignUrl: String?, useRemotion: Boolean?): ChoppedBrollResult = throw UnsupportedOperationException()
             override suspend fun detectSilenceGaps(rigBaseUrl: String, sourceJobId: String): SilenceGapsResult = throw UnsupportedOperationException()
             override suspend fun generateBackdropPlate(rigBaseUrl: String, prompt: String, aspect: String, task: RigTaskHandle?): BackdropPlateResult = throw UnsupportedOperationException()

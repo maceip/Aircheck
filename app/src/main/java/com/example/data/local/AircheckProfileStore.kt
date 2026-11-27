@@ -78,7 +78,12 @@ data class AircheckProfileProto(
     @ProtoNumber(32) val newsroomOverlayLlmProvider: String = LlmProviderChoice.MAC_RIG_DEFAULT.id,
     @ProtoNumber(33) val newsroomOverlayLlmRemoteProvider: String = DEFAULT_REMOTE_LLM_PROVIDER_ID,
     @ProtoNumber(34) val newsroomOverlayLlmModel: String = "",
-    @ProtoNumber(35) val preferOnPhoneVoice: Boolean = false
+    @ProtoNumber(35) val preferOnPhoneVoice: Boolean = false,
+    @ProtoNumber(36) val rigVoiceBackend: String = "auto",
+    @ProtoNumber(37) val heygenLookId: String = "",
+    @ProtoNumber(38) val heygenEngine: String = "heygen-avatar-6",
+    @ProtoNumber(39) val heygenResolution: String = "1080p",
+    @ProtoNumber(40) val heygenMotionPrompt: String = ""
 )
 
 data class StudioSettings(
@@ -94,6 +99,11 @@ data class StudioSettings(
     val remotionInstallNote: String = "",
     val phoneOnlyVoiceMode: Boolean = true,
     val preferOnPhoneVoice: Boolean = false,
+    val rigVoiceBackend: String = "auto",
+    val heygenLookId: String = "",
+    val heygenEngine: String = "heygen-avatar-6",
+    val heygenResolution: String = "1080p",
+    val heygenMotionPrompt: String = "",
     val llmRouting: LlmRoutingSettings = LlmRoutingSettings()
 )
 
@@ -164,6 +174,36 @@ class AircheckProfileStore(
 
     suspend fun setPreferOnPhoneVoice(enabled: Boolean) {
         dataStore.updateData { it.copy(preferOnPhoneVoice = enabled) }
+    }
+
+    suspend fun setRigVoiceBackend(backend: String) {
+        val clean = backend.trim().lowercase().ifBlank { "auto" }
+        dataStore.updateData { it.copy(rigVoiceBackend = clean) }
+    }
+
+    suspend fun setHeygenLookId(lookId: String) {
+        dataStore.updateData { it.copy(heygenLookId = lookId.trim()) }
+    }
+
+    suspend fun setHeygenEngine(engine: String) {
+        val clean = engine.trim().lowercase().ifBlank { "heygen-avatar-6" }
+        dataStore.updateData { cur ->
+            val adjustedRes = when {
+                clean.startsWith("heygen-avatar-6") && cur.heygenResolution == "720p" -> "1080p"
+                !clean.startsWith("heygen-avatar-6") && cur.heygenResolution == "2k" -> "1080p"
+                else -> cur.heygenResolution.ifBlank { "1080p" }
+            }
+            cur.copy(heygenEngine = clean, heygenResolution = adjustedRes)
+        }
+    }
+
+    suspend fun setHeygenResolution(resolution: String) {
+        val clean = resolution.trim().lowercase().ifBlank { "1080p" }
+        dataStore.updateData { it.copy(heygenResolution = clean) }
+    }
+
+    suspend fun setHeygenMotionPrompt(prompt: String) {
+        dataStore.updateData { it.copy(heygenMotionPrompt = prompt.trim().take(400)) }
     }
 
     suspend fun recordRemotionInstallRequest(
@@ -285,6 +325,11 @@ class AircheckProfileStore(
         remotionInstallNote = remotionInstallNote,
         phoneOnlyVoiceMode = phoneOnlyVoiceMode,
         preferOnPhoneVoice = preferOnPhoneVoice,
+        rigVoiceBackend = rigVoiceBackend.ifBlank { "auto" },
+        heygenLookId = heygenLookId.trim(),
+        heygenEngine = heygenEngine.ifBlank { "heygen-avatar-6" },
+        heygenResolution = heygenResolution.ifBlank { "1080p" },
+        heygenMotionPrompt = heygenMotionPrompt.trim(),
         llmRouting = LlmRoutingSettings(
             drafting = LlmStageConfig(
                 provider = LlmProviderChoice.fromRaw(draftingLlmProvider),

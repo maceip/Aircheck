@@ -30,6 +30,7 @@ import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.sharp.Notes
 import androidx.compose.material.icons.automirrored.sharp.Undo
+import androidx.compose.material.icons.sharp.Add
 import androidx.compose.material.icons.sharp.ClosedCaption
 import androidx.compose.material.icons.sharp.ContentCut
 import androidx.compose.material.icons.sharp.CropLandscape
@@ -117,6 +118,7 @@ fun CutScreen(
     onOpenNewsroom: () -> Unit,
     modifier: Modifier = Modifier,
     onNavigate: (Int) -> Unit = {},
+    onNewIdea: () -> Unit = { onNavigate(1) },
     renderGlobalOverlays: Boolean = true
 ) {
     val session = state.corePipelineSession
@@ -222,6 +224,39 @@ fun CutScreen(
                             .padding(horizontal = 2.dp)
                             .testTag("cs_cut_badge")
                     )
+                    CsIconKey(
+                        icon = Icons.Sharp.Add,
+                        contentDescription = "New idea",
+                        onClick = onNewIdea,
+                        size = 40.dp,
+                        radius = 11.dp,
+                        iconSize = 20.dp,
+                        modifier = Modifier.testTag("cs_cut_new_idea")
+                    )
+                } else {
+                    CsKey(
+                        onClick = onNewIdea,
+                        role = KeyRole.STD,
+                        radius = 11.dp,
+                        horizontalPadding = 8.dp,
+                        contentAlignment = Arrangement.spacedBy(3.dp),
+                        modifier = Modifier
+                            .height(40.dp)
+                            .testTag("cs_cut_new_idea")
+                    ) { tint ->
+                        Icon(
+                            imageVector = Icons.Sharp.Add,
+                            contentDescription = "New idea",
+                            tint = tint,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "new",
+                            style = mono(11.5.sp, tint, FontWeight.Medium),
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
                 CsIconKey(
                     icon = Icons.AutoMirrored.Sharp.Undo,

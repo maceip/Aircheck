@@ -201,6 +201,12 @@ fun AircheckApp(
                             showNewsroomStudioModal = true
                         },
                         onLoadActivity = { studioViewModel.loadActivityLog() },
+                        onLoadStudioOptions = { refresh -> studioViewModel.loadStudioRigOptions(refresh) },
+                        onSelectVoiceBackend = studioViewModel::setRigVoiceBackend,
+                        onSelectHeygenLook = studioViewModel::setHeygenLookId,
+                        onSelectHeygenEngine = studioViewModel::setHeygenEngine,
+                        onSelectHeygenResolution = studioViewModel::setHeygenResolution,
+                        onSaveHeygenMotionPrompt = studioViewModel::setHeygenMotionPrompt,
                         onDeviceModels = {
                             val appCtx = androidx.compose.ui.platform.LocalContext.current.applicationContext
                             val container = (appCtx as AircheckApplication).container

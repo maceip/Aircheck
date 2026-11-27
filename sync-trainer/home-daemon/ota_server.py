@@ -55,8 +55,16 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from generate_talking_head import (
+    HEYGEN_BIN,
+    HEYGEN_ENGINE,
+    HEYGEN_LOOK_ID,
+    HEYGEN_VOICE_ID,
     MAX_AV_SYNC_DRIFT_MS,
     MAX_TOTAL_DURATION_SEC as MAX_RENDER_DURATION_SEC,
+    VALID_HEYGEN_ENGINES,
+    VALID_HEYGEN_EXPRESSIVENESS,
+    VALID_HEYGEN_RESOLUTIONS,
+    list_heygen_account_options,
     normalize_talking_head_resolution,
 )
 from studio_cut import (
@@ -841,31 +849,58 @@ STUDIO_REF_10S_TEXT = (
 )
 
 
-def _build_lambda_voice_synthesizer_fn(endpoint: str) -> Callable[..., list[Any]] | None:
+VALID_VOICE_BACKENDS = frozenset({"auto", "s2pro_v002", "chatterbox", "f5", "heygen_voice"})
+
+
+def _probe_lambda_voice_health(endpoint: str, timeout: float = 2.0) -> dict[str, Any] | None:
+    base = endpoint.rstrip("/")
+    if not base:
+        return None
+    try:
+        with urllib.request.urlopen(f"{base}/health", timeout=timeout) as resp:
+            health = json.loads(resp.read().decode("utf-8"))
+        if isinstance(health, dict) and health.get("ok"):
+            return health
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _build_lambda_voice_synthesizer_fn(
+    endpoint: str,
+    *,
+    backend: str = "chatterbox",
+    strict_required: bool = False,
+) -> Callable[..., list[Any]] | None:
     """Return a `render_broadcast_studio` synthesizer_fn backed by the warm Lambda GPU-1 voice server.
 
-    Returns None when the endpoint is unhealthy so the caller falls back to the local warm engine.
+    Returns None when the endpoint is unhealthy and `strict_required` is False so the caller falls
+    back to the local warm S2-Pro v002 engine.
     """
     base = endpoint.rstrip("/")
-    try:
-        with urllib.request.urlopen(f"{base}/health", timeout=2.5) as resp:
-            health = json.loads(resp.read().decode("utf-8"))
-        if not health.get("ok"):
-            raise RuntimeError(f"Unhealthy voice endpoint {base}: {health}")
-    except Exception as exc:
-        # Fall back to the local warm TTS engine whenever the Lambda voice endpoint is unreachable
-        # (e.g. away from home / tunnel down), even when AIRCHECK_VOICE_ENDPOINT is explicitly set,
-        # so voice synthesis keeps working instead of hard-failing the whole clip.
+    eff_backend = backend if backend in ("chatterbox", "f5") else "chatterbox"
+    health = _probe_lambda_voice_health(base, timeout=2.5)
+    if health is None:
+        if strict_required:
+            raise RuntimeError(f"Selected voice backend '{eff_backend}' is unreachable at {base}")
         LOGGER.warning(
-            "Lambda voice endpoint %s unavailable (%s); falling back to local warm TTS engine.", base, exc
+            "Lambda voice endpoint %s unavailable; falling back to local warm S2-Pro v002 engine.", base
         )
         return None
+    avail_backends = [str(b).lower() for b in (health.get("backends") or [])]
+    if avail_backends and eff_backend not in avail_backends:
+        if strict_required:
+            raise RuntimeError(
+                f"Voice backend '{eff_backend}' not advertised by {base} (available: {avail_backends})"
+            )
+        eff_backend = avail_backends[0]
 
     import numpy as np
     import render_broadcast_studio as rbs
 
     call_counter = [0]
     base_nonce = int(time.time() * 1000) % 10000
+    backend_label = "F5-TTS GPU" if eff_backend == "f5" else "Chatterbox GPU"
 
     def _synth(clause: Any, count: int) -> list[Any]:
         out: list[Any] = []
@@ -873,7 +908,7 @@ def _build_lambda_voice_synthesizer_fn(endpoint: str) -> Callable[..., list[Any]
         clause_idx = int(getattr(clause, "index", 0))
         _report_async_progress(
             min(0.85, 0.22 + 0.60 * (clause_idx / float(total_clauses))),
-            f"Voicing clause {clause_idx + 1} on Mac Studio GPU…",
+            f"Voicing clause {clause_idx + 1} ({backend_label})…",
         )
         for idx in range(max(1, int(count))):
             call_counter[0] += 1
@@ -882,7 +917,7 @@ def _build_lambda_voice_synthesizer_fn(endpoint: str) -> Callable[..., list[Any]
             body = {
                 "text": str(clause.raw_text),
                 "ref_text": STUDIO_REF_10S_TEXT,
-                "backend": "chatterbox",
+                "backend": eff_backend,
                 "seed": seed,
                 "exaggeration": exaggeration,
                 "cfg_weight": 0.62,
@@ -927,9 +962,89 @@ def _build_lambda_voice_synthesizer_fn(endpoint: str) -> Callable[..., list[Any]
                     discrete_audio_tokens=[],
                     seed=seed,
                     temperature=0.28,
-                    generation_meta={"engine": "lambda_chatterbox_bf16"},
+                    generation_meta={"engine": f"lambda_{eff_backend}_bf16"},
                 )
             )
+        return out
+
+    return _synth
+
+
+def _build_heygen_voice_synthesizer_fn(voice_id: str | None = None) -> Callable[..., list[Any]]:
+    """Return a `render_broadcast_studio` synthesizer_fn backed by HeyGen Voice (`heygen-voice-1`)."""
+    if not HEYGEN_BIN.is_file():
+        raise RuntimeError(f"HeyGen CLI not found at {HEYGEN_BIN}")
+    eff_voice_id = (voice_id or "").strip() or HEYGEN_VOICE_ID
+    if not eff_voice_id:
+        raise RuntimeError("No HeyGen voice_id configured")
+
+    import numpy as np
+    import render_broadcast_studio as rbs
+
+    def _synth(clause: Any, count: int) -> list[Any]:
+        out: list[Any] = []
+        total_clauses = max(1, int(getattr(clause, "total_clauses", 4)))
+        clause_idx = int(getattr(clause, "index", 0))
+        _report_async_progress(
+            min(0.85, 0.22 + 0.60 * (clause_idx / float(total_clauses))),
+            f"Voicing clause {clause_idx + 1} (HeyGen Voice)…",
+        )
+        payload = {
+            "voice_id": eff_voice_id,
+            "text": str(clause.raw_text),
+            "model": "heygen-voice-1",
+            "language": "en",
+        }
+        proc = subprocess.run(
+            [str(HEYGEN_BIN), "model", "audio", "tts", "create", "-d", json.dumps(payload)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"HeyGen voice synthesis failed: {(proc.stderr or proc.stdout).strip()[:400]}"
+            )
+        parsed = json.loads(proc.stdout or "{}")
+        audio_url = str((parsed.get("data") or {}).get("audio_url") or "").strip()
+        if not audio_url:
+            raise RuntimeError(f"HeyGen voice synthesis returned no audio_url: {proc.stdout[:300]}")
+        with urllib.request.urlopen(audio_url, timeout=60) as resp:
+            wav_bytes = resp.read()
+        dec = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                "pipe:0",
+                "-ac",
+                "1",
+                "-ar",
+                "44100",
+                "-f",
+                "f32le",
+                "pipe:1",
+            ],
+            input=wav_bytes,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if dec.returncode != 0 or not dec.stdout:
+            raise RuntimeError(f"ffmpeg decode of HeyGen voice WAV failed (rc={dec.returncode})")
+        pcm44 = np.frombuffer(dec.stdout, dtype=np.float32).copy()
+        pcm44 = np.concatenate([pcm44, np.zeros(int(44100 * 0.12), dtype=np.float32)])
+        out.append(
+            rbs.SynthesizedTakeData(
+                pcm44k=pcm44,
+                discrete_audio_tokens=[],
+                seed=clause_idx,
+                temperature=0.0,
+                generation_meta={"engine": "heygen_voice_1", "voice_id": eff_voice_id},
+            )
+        )
         return out
 
     return _synth
@@ -1046,6 +1161,7 @@ def _validate_strict_tts_metrics(
     *,
     require_present: bool,
     max_cer: float = LIVE_TTS_GATE_MAX_CER,
+    allow_external_voice: bool = False,
 ) -> None:
     """Enforce 4-gate pass (`passed_all_strict_gates is True` and `cer <= max_cer`)."""
     if metrics is None:
@@ -1056,7 +1172,7 @@ def _validate_strict_tts_metrics(
         raise RuntimeError("TTS synthesis returned malformed verification metrics.")
     passed = metrics.get("passed_all_strict_gates")
     cer_raw = metrics.get("cer")
-    if passed is False or (require_present and passed is not True):
+    if not allow_external_voice and (passed is False or (require_present and passed is not True)):
         raise RuntimeError(
             f"TTS synthesis failed strict 4-gate verification (passed_all_strict_gates={passed}, cer={cer_raw})"
         )
@@ -1727,12 +1843,43 @@ class RenderJobManager:
         default_bug = bool(chyron_headline or chyron_subline) and voice_source != "MIC_VOICEOVER"
         show_brand_bug = bool(payload["show_brand_bug"]) if "show_brand_bug" in payload else default_bug
 
+        raw_voice_backend = str(payload.get("voice_backend") or "auto").strip().lower()
+        if raw_voice_backend not in VALID_VOICE_BACKENDS:
+            raise ValueError(
+                f"voice_backend must be one of {sorted(VALID_VOICE_BACKENDS)}, got {raw_voice_backend!r}"
+            )
+        heygen_voice_id = str(payload.get("heygen_voice_id") or "").strip() or None
+        heygen_look_id = str(payload.get("heygen_look_id") or "").strip() or None
+        heygen_engine = str(payload.get("heygen_engine") or "").strip().lower() or None
+        if heygen_engine is not None and heygen_engine not in VALID_HEYGEN_ENGINES:
+            raise ValueError(
+                f"heygen_engine must be one of {VALID_HEYGEN_ENGINES}, got {heygen_engine!r}"
+            )
+        heygen_resolution = str(payload.get("heygen_resolution") or "").strip().lower() or None
+        if heygen_resolution is not None and heygen_resolution not in VALID_HEYGEN_RESOLUTIONS:
+            raise ValueError(
+                f"heygen_resolution must be one of {VALID_HEYGEN_RESOLUTIONS}, got {heygen_resolution!r}"
+            )
+        heygen_expressiveness = str(payload.get("heygen_expressiveness") or "").strip().lower() or None
+        if heygen_expressiveness is not None and heygen_expressiveness not in VALID_HEYGEN_EXPRESSIVENESS:
+            raise ValueError(
+                f"heygen_expressiveness must be one of {VALID_HEYGEN_EXPRESSIVENESS}, got {heygen_expressiveness!r}"
+            )
+        heygen_motion_prompt = str(payload.get("heygen_motion_prompt") or "").strip()[:400] or None
+
         work_spec: dict[str, Any] = {
             "job_id": job_id,
             "script_id": script_id,
             "title": title,
             "spoken_text": spoken_text,
             "voice_source": voice_source,
+            "voice_backend": raw_voice_backend,
+            "heygen_voice_id": heygen_voice_id,
+            "heygen_look_id": heygen_look_id,
+            "heygen_engine": heygen_engine,
+            "heygen_resolution": heygen_resolution,
+            "heygen_expressiveness": heygen_expressiveness,
+            "heygen_motion_prompt": heygen_motion_prompt,
             "audio_wav_path": audio_wav_path,
             "avatar_path": avatar_path,
             "custom_photo": photo_bytes is not None,
@@ -1850,6 +1997,85 @@ class RenderJobManager:
             self._warm_tts_engine = s2_pro_infer.get_shared_warm_engine()
         return self._warm_tts_engine
 
+    def get_studio_options(self, *, refresh: bool = False) -> dict[str, Any]:
+        """Return live voice backends and HeyGen avatar looks/engines from the rig & HeyGen account."""
+        now = time.time()
+        cache = getattr(self, "_heygen_options_cache", None)
+        if refresh or cache is None or (now - cache[0]) > 60.0:
+            hg = list_heygen_account_options()
+            self._heygen_options_cache = (now, hg)
+        else:
+            hg = cache[1]
+
+        voice_endpoint = os.environ.get("AIRCHECK_VOICE_ENDPOINT", "http://127.0.0.1:8452").strip()
+        lambda_health = _probe_lambda_voice_health(voice_endpoint, timeout=1.5) if voice_endpoint else None
+        lambda_backends = [str(b).lower() for b in ((lambda_health or {}).get("backends") or [])]
+
+        assets = resolve_latest_synthesis_assets(self.models_root, self.bundles_root)
+        s2pro_available = bool(assets.get("lora_dir"))
+        heygen_voice_info = hg.get("voice") if isinstance(hg, Mapping) else None
+
+        voice_backends: list[dict[str, Any]] = [
+            {
+                "id": "auto",
+                "label": "Auto (Fast GPU)",
+                "available": True,
+                "detail": "Uses active GPU voice endpoint or falls back to local S2-Pro v002",
+            },
+            {
+                "id": "s2pro_v002",
+                "label": "S2-Pro v002 LoRA",
+                "available": s2pro_available,
+                "detail": "Fine-tuned on your voice (Mac Studio GPU)",
+            },
+            {
+                "id": "chatterbox",
+                "label": "Chatterbox GPU",
+                "available": "chatterbox" in lambda_backends,
+                "detail": "Fast zero-shot voice on GPU endpoint",
+            },
+            {
+                "id": "f5",
+                "label": "F5-TTS GPU",
+                "available": "f5" in lambda_backends,
+                "detail": "Zero-shot F5 voice on GPU endpoint",
+            },
+            {
+                "id": "heygen_voice",
+                "label": "HeyGen Voice",
+                "available": heygen_voice_info is not None,
+                "detail": (
+                    f"HeyGen {heygen_voice_info.get('mode', 'instant')} clone"
+                    if isinstance(heygen_voice_info, Mapping)
+                    else "HeyGen cloned voice unavailable"
+                ),
+            },
+        ]
+
+        heygen_engines = [
+            {"id": "heygen-avatar-6", "label": "Avatar 6", "resolutions": ["1080p", "2k"]},
+            {"id": "heygen-avatar-6-turbo", "label": "Avatar 6 Turbo", "resolutions": ["1080p", "2k"]},
+            {"id": "avatar_v", "label": "Avatar V", "resolutions": ["720p", "1080p"]},
+            {"id": "avatar_iv", "label": "Avatar IV", "resolutions": ["720p", "1080p"]},
+        ]
+
+        return {
+            "voice_backends": voice_backends,
+            "heygen_available": bool(hg.get("available")),
+            "heygen_error": hg.get("error"),
+            "heygen_looks": list(hg.get("looks") or []),
+            "heygen_engines": heygen_engines,
+            "heygen_resolutions": list(VALID_HEYGEN_RESOLUTIONS),
+            "heygen_voice": heygen_voice_info,
+            "defaults": {
+                "voice_backend": "auto",
+                "heygen_look_id": HEYGEN_LOOK_ID,
+                "heygen_engine": HEYGEN_ENGINE,
+                "heygen_resolution": "1080p",
+                "heygen_voice_id": HEYGEN_VOICE_ID,
+            },
+        }
+
     def _run_broadcast_tts_stage(
         self,
         *,
@@ -1859,6 +2085,8 @@ class RenderJobManager:
         studio_dir: Path,
         assets: dict[str, Path | None],
         takes_per_clause: int = 4,
+        voice_backend: str = "auto",
+        heygen_voice_id: str | None = None,
     ) -> dict[str, Any]:
         with self._tts_lock:
             if self._tts_studio_runner is not None:
@@ -1877,12 +2105,37 @@ class RenderJobManager:
                 sys.path.insert(0, daemon_dir)
             import render_broadcast_studio as rbs
 
+            norm_backend = (voice_backend or "auto").strip().lower()
+            if norm_backend not in VALID_VOICE_BACKENDS:
+                raise ValueError(
+                    f"Unsupported voice_backend {voice_backend!r}; must be one of {sorted(VALID_VOICE_BACKENDS)}"
+                )
+
             voice_endpoint = os.environ.get("AIRCHECK_VOICE_ENDPOINT", "http://127.0.0.1:8452").strip()
-            lambda_synth_fn = _build_lambda_voice_synthesizer_fn(voice_endpoint) if voice_endpoint else None
+            external_synth_fn: Callable[..., list[Any]] | None = None
+            strict_gates = True
+            if norm_backend == "s2pro_v002":
+                external_synth_fn = None
+                _report_async_progress(0.22, "Voicing with S2-Pro v002 LoRA on Mac Studio…")
+            elif norm_backend in ("chatterbox", "f5"):
+                external_synth_fn = _build_lambda_voice_synthesizer_fn(
+                    voice_endpoint,
+                    backend=norm_backend,
+                    strict_required=True,
+                )
+            elif norm_backend == "heygen_voice":
+                external_synth_fn = _build_heygen_voice_synthesizer_fn(heygen_voice_id)
+                strict_gates = False
+            else:
+                external_synth_fn = (
+                    _build_lambda_voice_synthesizer_fn(voice_endpoint, backend="chatterbox")
+                    if voice_endpoint
+                    else None
+                )
 
             eff_caller_clauses = caller_clauses
             orig_clauses_for_unmerge: list[dict[str, str]] | None = None
-            if lambda_synth_fn is not None:
+            if external_synth_fn is not None:
                 orig_c, merged_c, did_merge = _coalesce_clauses_for_lambda_tts(spoken_text, caller_clauses)
                 if merged_c:
                     eff_caller_clauses = merged_c
@@ -1894,14 +2147,14 @@ class RenderJobManager:
                 "caller_clauses": eff_caller_clauses,
                 "project_id": project_id,
                 "output_dir": studio_dir,
-                "takes_per_clause": 1 if lambda_synth_fn is not None else takes_per_clause,
+                "takes_per_clause": 1 if external_synth_fn is not None else takes_per_clause,
                 "skip_video": True,
-                "require_strict_gates": True,
+                "require_strict_gates": strict_gates,
                 "require_real_alignment": True,
-                "warm_engine": None if lambda_synth_fn is not None else self._get_warm_tts_engine(),
-                "synthesizer_fn": lambda_synth_fn,
+                "warm_engine": None if external_synth_fn is not None else self._get_warm_tts_engine(),
+                "synthesizer_fn": external_synth_fn,
                 "early_exit_on_pass": True,
-                "min_clause_words": 6 if lambda_synth_fn is not None else 0,
+                "min_clause_words": 6 if external_synth_fn is not None else 0,
                 "gate_max_cer": LIVE_TTS_GATE_MAX_CER,
                 "gate_min_speaker_cos": LIVE_TTS_GATE_MIN_SPEAKER_COS,
                 "gate_min_dnsmos_p808": LIVE_TTS_GATE_MIN_DNSMOS_P808,
@@ -2024,6 +2277,8 @@ class RenderJobManager:
                 caller_clauses=caller_clauses_arg,
                 studio_dir=studio_dir,
                 assets=assets,
+                voice_backend=str(spec.get("voice_backend") or "auto"),
+                heygen_voice_id=spec.get("heygen_voice_id"),
             )
             master_wav_raw = studio_report.get("master_wav_path")
             if not master_wav_raw:
@@ -2035,7 +2290,11 @@ class RenderJobManager:
                 _atomic_publish_file(master_wav, synth_wav)
 
             raw_metrics = studio_report.get("metrics")
-            _validate_strict_tts_metrics(raw_metrics, require_present=True)
+            _validate_strict_tts_metrics(
+                raw_metrics,
+                require_present=True,
+                allow_external_voice=(str(spec.get("voice_backend") or "") == "heygen_voice"),
+            )
             assert isinstance(raw_metrics, Mapping)
             metrics = dict(raw_metrics)
             if assets.get("lora_dir") and not metrics.get("lora_dir"):
@@ -2072,10 +2331,12 @@ class RenderJobManager:
         if not head_script.is_file():
             raise FileNotFoundError(f"generate_talking_head.py not found at {head_script}")
 
+        eff_hg_engine = str(spec.get("heygen_engine") or HEYGEN_ENGINE)
+        eff_hg_res = str(spec.get("heygen_resolution") or resolution)
         report_progress(
             status="LIPSYNC",
             progress_fraction=0.60,
-            stage_detail=f"Rendering {resolution} talking-head video (HeyGen Avatar 6)",
+            stage_detail=f"Rendering {eff_hg_res} talking-head video (HeyGen {eff_hg_engine})",
             metrics=metrics,
         )
 
@@ -2107,6 +2368,16 @@ class RenderJobManager:
             head_cmd.extend(["--transcript", spoken_text])
         if spec.get("custom_photo"):
             head_cmd.append("--custom-photo")
+        if spec.get("heygen_look_id"):
+            head_cmd.extend(["--heygen-look-id", str(spec["heygen_look_id"])])
+        if spec.get("heygen_engine"):
+            head_cmd.extend(["--heygen-engine", str(spec["heygen_engine"])])
+        if spec.get("heygen_resolution"):
+            head_cmd.extend(["--heygen-resolution", str(spec["heygen_resolution"])])
+        if spec.get("heygen_expressiveness"):
+            head_cmd.extend(["--heygen-expressiveness", str(spec["heygen_expressiveness"])])
+        if spec.get("heygen_motion_prompt"):
+            head_cmd.extend(["--heygen-motion-prompt", str(spec["heygen_motion_prompt"])])
 
         # B-roll overlap: warm the still cache concurrently with the (long) HeyGen render so the later
         # chop hits cache instead of regenerating. Gated by prefetch_broll (set only by the app) so
@@ -2301,6 +2572,12 @@ class RenderJobManager:
                 words = list(self._aligner_fn(staged_wav, joined_text))
             source_wav = staged_wav
         else:
+            raw_voice_backend = str(payload.get("voice_backend") or "auto").strip().lower()
+            if raw_voice_backend not in VALID_VOICE_BACKENDS:
+                raise ValueError(
+                    f"voice_backend must be one of {sorted(VALID_VOICE_BACKENDS)}, got {raw_voice_backend!r}"
+                )
+            heygen_voice_id = str(payload.get("heygen_voice_id") or "").strip() or None
             assets = resolve_latest_synthesis_assets(self.models_root, self.bundles_root)
             studio_report = self._run_broadcast_tts_stage(
                 project_id=str(payload.get("project_id") or tts_id),
@@ -2308,6 +2585,8 @@ class RenderJobManager:
                 caller_clauses=clauses_in,
                 studio_dir=work_dir / "studio",
                 assets=assets,
+                voice_backend=raw_voice_backend,
+                heygen_voice_id=heygen_voice_id,
             )
             master_wav_raw = studio_report.get("master_wav_path")
             if not master_wav_raw:
@@ -2317,7 +2596,11 @@ class RenderJobManager:
                 raise RuntimeError("TTS synthesis did not produce a valid WAV file.")
 
             raw_metrics = studio_report.get("metrics")
-            _validate_strict_tts_metrics(raw_metrics, require_present=True)
+            _validate_strict_tts_metrics(
+                raw_metrics,
+                require_present=True,
+                allow_external_voice=(raw_voice_backend == "heygen_voice"),
+            )
             assert isinstance(raw_metrics, Mapping)
             metrics = dict(raw_metrics)
             if assets.get("lora_dir") and not metrics.get("lora_dir"):
@@ -4192,6 +4475,10 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             self._handle_get_logs(head_only=head_only)
             return
 
+        if raw_path == "/v1/studio/options":
+            self._handle_studio_options(parsed.query, head_only=head_only)
+            return
+
         if raw_path.startswith("/v1/plates/") and raw_path.endswith(".png"):
             plate_id = raw_path[len("/v1/plates/") : -len(".png")]
             resolved_plate = studio_plate_path(self.server.render_manager.plates_dir, plate_id)
@@ -4289,6 +4576,20 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             {"error": "not_found", "detail": f"Unknown endpoint: {raw_path}"},
             head_only=head_only,
         )
+
+    def _handle_studio_options(self, query: str, *, head_only: bool) -> None:
+        qs = urllib.parse.parse_qs(query or "")
+        refresh = any(v.lower() in ("1", "true", "yes") for v in qs.get("refresh", []))
+        try:
+            payload = self.server.render_manager.get_studio_options(refresh=refresh)
+            self._send_json(HTTPStatus.OK, payload, head_only=head_only)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to build /v1/studio/options: %s", exc, exc_info=True)
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "studio_options_failed", "detail": str(exc)},
+                head_only=head_only,
+            )
 
     def _handle_health(self, *, head_only: bool) -> None:
         lora_version: int = 0

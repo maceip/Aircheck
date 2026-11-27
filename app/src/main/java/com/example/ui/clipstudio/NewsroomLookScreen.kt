@@ -702,8 +702,24 @@ private fun LookBackgroundTab(
                     )
                 }
             }
+            val activeHeygenLookName = remember(
+                state.settings.heygenLookId,
+                state.studioRigOptions
+            ) {
+                val id = state.settings.heygenLookId
+                val opts = state.studioRigOptions
+                if (id.isNotBlank() && opts != null) {
+                    opts.heygenLooks.firstOrNull { it.id == id }?.name
+                } else {
+                    null
+                }
+            }
             Text(
-                text = if (anchorPhotoFile != null) "Custom phone photo" else "Default studio portrait",
+                text = when {
+                    anchorPhotoFile != null -> "Custom phone photo"
+                    activeHeygenLookName != null -> "HeyGen: $activeHeygenLookName"
+                    else -> "Default studio portrait"
+                },
                 style = sans(13.5.sp, Cs.Ink, 18.sp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

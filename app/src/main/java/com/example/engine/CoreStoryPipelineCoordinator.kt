@@ -274,11 +274,16 @@ class CoreStoryPipelineCoordinator(
                 // voice isn't installed, the user gets a plain "Mac offline" message, not a raw stack error.
                 val health = rigHealth ?: runCatching { macRigGateway.resolveAndCheckHealth(rigBaseUrl) }.getOrNull()
                     ?: return@withContext Result.failure(MacStudioOfflineException())
+                val selectedVoiceBackend = runCatching { profileStore?.current()?.rigVoiceBackend }
+                    .getOrNull()
+                    ?.ifBlank { "auto" }
+                    ?: "auto"
                 val ttsRes = macRigGateway.synthesizeCoreStoryTts(
                     rigBaseUrl = health.resolvedUrl,
                     projectId = effectiveProjectId,
                     clauses = activeClauses,
-                    task = task
+                    task = task,
+                    voiceBackend = selectedVoiceBackend
                 )
                 val storedWav = macRigGateway.downloadAudioWavToCas(ttsRes.audioUrl)
                 val mergedClauses = activeClauses.mapIndexed { idx, existing ->
@@ -419,6 +424,12 @@ class CoreStoryPipelineCoordinator(
             val interval = pollIntervalMs.coerceAtLeast(25L)
             lateinit var snapshot: MacRigJobSnapshot
 
+            val profileSettings = runCatching { profileStore?.current() }.getOrNull()
+            val selectedHeygenLookId = profileSettings?.heygenLookId?.takeIf { it.isNotBlank() }
+            val selectedHeygenEngine = profileSettings?.heygenEngine?.takeIf { it.isNotBlank() }
+            val selectedHeygenRes = profileSettings?.heygenResolution?.takeIf { it.isNotBlank() }
+            val selectedHeygenMotion = profileSettings?.heygenMotionPrompt?.takeIf { it.isNotBlank() }
+
             while (true) {
                 if (headJobId == null) {
                     headJobId = macRigGateway.enqueueMacRigRender(
@@ -431,7 +442,11 @@ class CoreStoryPipelineCoordinator(
                         words = session.alignedWords,
                         alignUrl = session.alignUrl,
                         brollPlan = activeClauses,
-                        brollAspect = session.renderOptions.aspect
+                        brollAspect = session.renderOptions.aspect,
+                        heygenLookId = selectedHeygenLookId,
+                        heygenEngine = selectedHeygenEngine,
+                        heygenResolution = selectedHeygenRes,
+                        heygenMotionPrompt = selectedHeygenMotion
                     ).jobId
                     localRepo.saveCorePipelineSession(session.copy(pendingHeadJobId = headJobId))
                 }

@@ -368,3 +368,142 @@ def test_rybbit_shipping_gated_and_payload(monkeypatch: pytest.MonkeyPatch) -> N
         assert "boom" in h._queue[-1]["properties"]
     finally:
         logging.getLogger().removeHandler(h)
+
+
+def test_studio_options_endpoint_and_heygen_controls(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+    import generate_talking_head as gth
+    import ota_server
+
+    monkeypatch.setattr(
+        ota_server,
+        "list_heygen_account_options",
+        lambda: {
+            "available": True,
+            "error": None,
+            "group_id": "49475c7a39704a95bcba875769333c75",
+            "looks": [
+                {
+                    "id": "8445adef497a4fbabef51263b2d2bcef",
+                    "name": "Ryan MacArthur -- 1",
+                    "avatar_type": "digital_twin",
+                    "preferred_orientation": "landscape",
+                    "supported_api_engines": ["avatar_v", "avatar_iv", "heygen-avatar-6"],
+                    "preview_image_url": "https://example.com/twin.jpg",
+                    "default_voice_id": "bba48bed853342a7a063970cf9161bee",
+                }
+            ],
+            "voice": {
+                "voice_id": "bba48bed853342a7a063970cf9161bee",
+                "name": "Ryan Instant Clone",
+                "mode": "instant",
+                "language": "en",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        ota_server,
+        "_probe_lambda_voice_health",
+        lambda endpoint, timeout=2.0: {"ok": True, "backends": ["chatterbox", "f5"]},
+    )
+
+    bundles_dir = tmp_path / "bundles"
+    bundles_dir.mkdir(parents=True)
+    prefs_file = tmp_path / "preferences.jsonl"
+    renders_dir = tmp_path / "renders"
+    renders_dir.mkdir(parents=True)
+    server = create_ota_server(
+        host="127.0.0.1",
+        port=0,
+        bundles_root=bundles_dir,
+        preferences_path=prefs_file,
+        renders_dir=renders_dir,
+        quiet=True,
+    )
+    host, port = server.server_address[:2]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/studio/options?refresh=1") as resp:
+            assert resp.status == 200
+            body = json.loads(resp.read().decode("utf-8"))
+        assert body["heygen_available"] is True
+        assert body["heygen_looks"][0]["id"] == "8445adef497a4fbabef51263b2d2bcef"
+        assert body["heygen_looks"][0]["avatar_type"] == "digital_twin"
+        by_id = {v["id"]: v for v in body["voice_backends"]}
+        assert by_id["chatterbox"]["available"] is True
+        assert by_id["f5"]["available"] is True
+        assert by_id["heygen_voice"]["available"] is True
+
+        # Verify HeyGen engine/resolution/motion payload building in generate_talking_head.py
+        captured_bodies: list[dict] = []
+        fake_bin = tmp_path / "heygen"
+        fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setattr(gth, "HEYGEN_BIN", fake_bin)
+        monkeypatch.setattr(gth, "HEYGEN_POLL_SEC", 0)
+
+        def fake_heygen_json(args: list[str], timeout: int = 180) -> dict:
+            if args[:2] == ["asset", "create"]:
+                return {"data": {"asset_id": "ast_123"}}
+            if args[:2] == ["video", "create"]:
+                captured_bodies.append(json.loads(args[3]))
+                return {"data": {"video_id": "vid_999"}}
+            if args[:2] == ["video", "get"]:
+                return {"data": {"status": "completed"}}
+            raise AssertionError(f"unexpected args: {args}")
+
+        def fake_subproc(cmd: list[str], **kwargs):
+            out_idx = cmd.index("--output-path") + 1
+            pathlib.Path(cmd[out_idx]).write_bytes(b"MP4")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(gth, "_heygen_json", fake_heygen_json)
+        monkeypatch.setattr(gth.subprocess, "run", fake_subproc)
+
+        wav = tmp_path / "in.wav"
+        wav.write_bytes(b"RIFF" + b"\x00" * 64)
+        avatar = tmp_path / "av.jpg"
+        avatar.write_bytes(b"\xff\xd8\xff")
+        out_mp4 = tmp_path / "out.mp4"
+
+        meta_v = gth._invoke_heygen_avatar(
+            master_wav=wav,
+            avatar_path=avatar,
+            use_custom_photo=False,
+            output_mp4=out_mp4,
+            ratio="9:16",
+            resolution="1080P",
+            timeout_sec=30,
+            heygen_look_id="8445adef497a4fbabef51263b2d2bcef",
+            heygen_engine="avatar_v",
+            heygen_resolution="2k",  # clamped to 1080p for avatar_v
+            heygen_expressiveness="high",  # omitted for avatar_v
+            heygen_motion_prompt="calm anchor gestures",
+        )
+        assert meta_v["heygen_look_id"] == "8445adef497a4fbabef51263b2d2bcef"
+        assert meta_v["heygen_engine"] == "avatar_v"
+        assert meta_v["heygen_resolution"] == "1080p"
+        assert captured_bodies[0]["engine"] == {"type": "avatar_v", "more_blinking": True}
+        assert "expressiveness" not in captured_bodies[0]
+        assert captured_bodies[0]["motion_prompt"] == "calm anchor gestures"
+
+        meta_6 = gth._invoke_heygen_avatar(
+            master_wav=wav,
+            avatar_path=avatar,
+            use_custom_photo=False,
+            output_mp4=out_mp4,
+            ratio="9:16",
+            resolution="1080P",
+            timeout_sec=30,
+            heygen_look_id="28bbc1a0f7217675473054ab02d759d9",
+            heygen_engine="heygen-avatar-6",
+            heygen_resolution="2k",
+        )
+        assert meta_6["heygen_resolution"] == "2k"
+        assert captured_bodies[1]["resolution"] == "2k"
+        assert captured_bodies[1]["engine"] == {"type": "heygen-avatar-6"}
+    finally:
+        server.shutdown()
+        server.server_close()

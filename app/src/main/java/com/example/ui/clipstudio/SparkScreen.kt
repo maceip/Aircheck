@@ -105,6 +105,7 @@ fun SparkScreen(
     onOpenSettings: () -> Unit = {},
     modifier: Modifier = Modifier,
     onNavigate: (Int) -> Unit = {},
+    onNewIdea: () -> Unit = { vm.resetNewDraft() },
     lastCompletedVideo: LastVideoSummary? = null,
     renderGlobalOverlays: Boolean = true
 ) {
@@ -134,6 +135,29 @@ fun SparkScreen(
                 onNavigate = onNavigate
             ) {
                 if (!sparkEmpty) {
+                    CsKey(
+                        onClick = onNewIdea,
+                        role = KeyRole.STD,
+                        radius = 11.dp,
+                        horizontalPadding = 8.dp,
+                        contentAlignment = Arrangement.spacedBy(3.dp),
+                        modifier = Modifier
+                            .height(40.dp)
+                            .testTag("cs_spark_new_idea")
+                    ) { tint ->
+                        Icon(
+                            imageVector = Icons.Sharp.Add,
+                            contentDescription = "New idea",
+                            tint = tint,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "new",
+                            style = mono(11.5.sp, tint, FontWeight.Medium),
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                     AnchorsTopKey(
                         count = state.selectedAnchorCount,
                         open = state.anchorsSheetOpen,

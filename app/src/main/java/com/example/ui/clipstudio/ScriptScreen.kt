@@ -131,6 +131,10 @@ fun ScriptScreen(
     onRequestMic: (() -> Unit) -> Unit,
     onCreateVideo: (plainText: String) -> Unit,
     onNavigate: (Int) -> Unit = {},
+    onNewIdea: () -> Unit = {
+        vm.resetNewDraft()
+        onNavigate(1)
+    },
     modifier: Modifier = Modifier,
     renderGlobalOverlays: Boolean = true
 ) {
@@ -155,28 +159,54 @@ fun ScriptScreen(
                 activeStage = 2,
                 onNavigate = onNavigate
             ) {
+                // Instant restart with a brand-new idea from 02 SCRIPT
+                CsKey(
+                    onClick = onNewIdea,
+                    role = KeyRole.STD,
+                    radius = 11.dp,
+                    horizontalPadding = 7.dp,
+                    contentAlignment = Arrangement.spacedBy(3.dp),
+                    modifier = Modifier
+                        .height(40.dp)
+                        .testTag("cs_new_idea")
+                ) { tint ->
+                    Icon(
+                        imageVector = Icons.Sharp.Add,
+                        contentDescription = "New idea",
+                        tint = tint,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "new",
+                        style = mono(11.5.sp, tint, FontWeight.Medium),
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+
                 // Length key (`timer` + estimated runtime)
                 CsKey(
                     onClick = vm::toggleLengthRow,
                     role = if (state.lengthRowOpen) KeyRole.DOWN else KeyRole.STD,
                     enabled = candidate != null,
-                    radius = 12.dp,
-                    horizontalPadding = 12.dp,
-                    contentAlignment = Arrangement.spacedBy(6.dp),
+                    radius = 11.dp,
+                    horizontalPadding = 7.dp,
+                    contentAlignment = Arrangement.spacedBy(4.dp),
                     modifier = Modifier
-                        .height(44.dp)
+                        .height(40.dp)
                         .testTag("cs_length_toggle")
                 ) { tint ->
                     Icon(
                         imageVector = Icons.Sharp.Timer,
                         contentDescription = "Adjust script length",
                         tint = tint,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                     Text(
                         text = mmss(estimatedMs),
-                        style = mono(13.sp, tint, FontWeight.Medium),
-                        maxLines = 1
+                        style = mono(12.sp, tint, FontWeight.Medium),
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
 
@@ -187,6 +217,9 @@ fun ScriptScreen(
                     onClick = vm::toggleRawKeyboardMode,
                     active = state.rawKeyboardMode,
                     enabled = candidate != null || doc.seedTranscript.isNotBlank(),
+                    size = 40.dp,
+                    radius = 11.dp,
+                    iconSize = 20.dp,
                     modifier = Modifier.testTag("cs_keyboard")
                 )
 
@@ -196,6 +229,9 @@ fun ScriptScreen(
                     contentDescription = "Undo script change",
                     onClick = { vm.stepGlobalSnapshot(-1) },
                     enabled = candidate?.canUndoGlobal == true,
+                    size = 40.dp,
+                    radius = 11.dp,
+                    iconSize = 20.dp,
                     modifier = Modifier.testTag("cs_script_undo")
                 )
             }
@@ -318,15 +354,25 @@ fun ScriptScreen(
                         .sunkenPanel(radius = 18.dp)
                 ) {
                     if (candidate == null) {
-                        Box(
+                        Column(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(20.dp),
-                            contentAlignment = Alignment.Center
+                            verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterVertically),
+                            horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
                                 text = "No script yet. Go to 01 SPARK and tap write the script.",
                                 style = sans(16.sp, Cs.Muted, 23.sp)
+                            )
+                            CsKeyLabel(
+                                label = "start a new idea",
+                                onClick = onNewIdea,
+                                role = KeyRole.STD,
+                                radius = 14.dp,
+                                modifier = Modifier
+                                    .height(44.dp)
+                                    .testTag("cs_script_empty_new_idea")
                             )
                         }
                     } else {

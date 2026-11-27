@@ -174,6 +174,96 @@ class DirectMacRigGateway(
             }
         }
 
+    override suspend fun fetchStudioOptions(rigBaseUrl: String, refresh: Boolean): StudioRigOptions =
+        withContext(Dispatchers.IO) {
+            val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+            val suffix = if (refresh) "?refresh=1" else ""
+            val req = Request.Builder()
+                .url("$baseUrl/v1/studio/options$suffix")
+                .get()
+                .build()
+            val rawBody = okHttpClient.newCall(req).execute().use { resp ->
+                val bodyStr = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    val detail = extractErrorDetail(bodyStr)
+                    throw IllegalStateException(
+                        "Failed loading studio options (HTTP ${resp.code})${if (detail.isNotBlank()) ": $detail" else "."}"
+                    )
+                }
+                bodyStr
+            }
+            val json = JSONObject(rawBody.ifBlank { "{}" })
+            val voicesArr = json.optJSONArray("voice_backends") ?: JSONArray()
+            val voices = buildList {
+                for (i in 0 until voicesArr.length()) {
+                    val obj = voicesArr.optJSONObject(i) ?: continue
+                    val id = obj.optNullableString("id") ?: continue
+                    add(
+                        RigVoiceBackendOption(
+                            id = id,
+                            label = obj.optNullableString("label") ?: id,
+                            available = obj.optBoolean("available", false),
+                            detail = obj.optNullableString("detail").orEmpty()
+                        )
+                    )
+                }
+            }
+            val looksArr = json.optJSONArray("heygen_looks") ?: JSONArray()
+            val looks = buildList {
+                for (i in 0 until looksArr.length()) {
+                    val obj = looksArr.optJSONObject(i) ?: continue
+                    val id = obj.optNullableString("id") ?: continue
+                    val engArr = obj.optJSONArray("supported_api_engines") ?: JSONArray()
+                    val engines = buildList {
+                        for (j in 0 until engArr.length()) {
+                            engArr.optString(j).takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    }
+                    add(
+                        HeygenLookOption(
+                            id = id,
+                            name = obj.optNullableString("name") ?: id,
+                            avatarType = obj.optNullableString("avatar_type") ?: "photo_avatar",
+                            preferredOrientation = obj.optNullableString("preferred_orientation") ?: "portrait",
+                            supportedEngines = engines,
+                            previewImageUrl = obj.optNullableString("preview_image_url").orEmpty()
+                        )
+                    )
+                }
+            }
+            val enginesArr = json.optJSONArray("heygen_engines") ?: JSONArray()
+            val engines = buildList {
+                for (i in 0 until enginesArr.length()) {
+                    val obj = enginesArr.optJSONObject(i) ?: continue
+                    val id = obj.optNullableString("id") ?: continue
+                    val resArr = obj.optJSONArray("resolutions") ?: JSONArray()
+                    val resolutions = buildList {
+                        for (j in 0 until resArr.length()) {
+                            resArr.optString(j).takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    }.ifEmpty { listOf("1080p") }
+                    add(
+                        HeygenEngineOption(
+                            id = id,
+                            label = obj.optNullableString("label") ?: id,
+                            resolutions = resolutions
+                        )
+                    )
+                }
+            }
+            val defaultsObj = json.optJSONObject("defaults")
+            StudioRigOptions(
+                voiceBackends = voices,
+                heygenAvailable = json.optBoolean("heygen_available", false),
+                heygenError = json.optNullableString("heygen_error"),
+                heygenLooks = looks,
+                heygenEngines = engines,
+                defaultHeygenLookId = defaultsObj?.optNullableString("heygen_look_id").orEmpty(),
+                defaultHeygenEngine = defaultsObj?.optNullableString("heygen_engine") ?: "heygen-avatar-6",
+                defaultHeygenResolution = defaultsObj?.optNullableString("heygen_resolution") ?: "1080p"
+            )
+        }
+
     override suspend fun enqueueMacRigRender(
         rigBaseUrl: String,
         project: ScriptProject,
@@ -185,7 +275,11 @@ class DirectMacRigGateway(
         alignUrl: String?,
         useRemotion: Boolean?,
         brollPlan: List<CoreStoryClause>,
-        brollAspect: String
+        brollAspect: String,
+        heygenLookId: String?,
+        heygenEngine: String?,
+        heygenResolution: String?,
+        heygenMotionPrompt: String?
     ): EnqueuedRenderResult = withContext(Dispatchers.IO) {
         val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
         val spokenText = project.activeBeats.joinToString(" ") { it.spokenText.trim() }.trim()
@@ -225,7 +319,11 @@ class DirectMacRigGateway(
             append(project.masterAudioSha.orEmpty()).append('|')
             append(resolution).append('|')
             append(ratio).append('|')
-            append(clampedMaxDuration)
+            append(clampedMaxDuration).append('|')
+            append(heygenLookId.orEmpty()).append('|')
+            append(heygenEngine.orEmpty()).append('|')
+            append(heygenResolution.orEmpty()).append('|')
+            append(heygenMotionPrompt.orEmpty())
         }
         val inputHash = CasMediaStore.computeSha256Hex(canonicalInput.toByteArray(Charsets.UTF_8))
 
@@ -240,6 +338,18 @@ class DirectMacRigGateway(
             .put("chyron_headline", headline)
             .put("chyron_subline", subline)
             .put("show_brand_bug", showBug)
+        if (!heygenLookId.isNullOrBlank()) {
+            payload.put("heygen_look_id", heygenLookId.trim())
+        }
+        if (!heygenEngine.isNullOrBlank()) {
+            payload.put("heygen_engine", heygenEngine.trim())
+        }
+        if (!heygenResolution.isNullOrBlank()) {
+            payload.put("heygen_resolution", heygenResolution.trim())
+        }
+        if (!heygenMotionPrompt.isNullOrBlank()) {
+            payload.put("heygen_motion_prompt", heygenMotionPrompt.trim())
+        }
         if (!audioWavBase64.isNullOrBlank()) {
             payload.put("audio_wav_base64", audioWavBase64)
         }
@@ -441,7 +551,8 @@ class DirectMacRigGateway(
         rigBaseUrl: String,
         projectId: String,
         clauses: List<CoreStoryClause>,
-        task: RigTaskHandle?
+        task: RigTaskHandle?,
+        voiceBackend: String
     ): CoreTtsSynthesisResult = withContext(Dispatchers.IO) {
         val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
         val nonEmpty = clauses.filter { it.spokenText.isNotBlank() }
@@ -459,6 +570,7 @@ class DirectMacRigGateway(
             .put("project_id", projectId)
             .put("spoken_text", nonEmpty.joinToString(" ") { it.spokenText.trim() })
             .put("clauses", clausesArr)
+            .put("voice_backend", voiceBackend.trim().lowercase().ifBlank { "auto" })
 
         val json = runRigTask(baseUrl, "/v1/core/tts", payload, "TTS synthesis", task)
         val ttsId = json.optNullableString("tts_id")
