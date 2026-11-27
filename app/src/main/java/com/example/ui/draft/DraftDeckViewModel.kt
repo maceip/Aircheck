@@ -628,7 +628,12 @@ class DraftDeckViewModel internal constructor(
             try {
                 val response = draftApiClient.transcribe(wavFile)
                 val constraint = DraftStateReducer.sanitizeAscii(response.transcript).trim()
-                if (constraint.isNotEmpty()) {
+                // Drop placeholder/test speech that polluted Anchors as "test test test".
+                val looksLikeTest = constraint.length <= 32 &&
+                    constraint.lowercase().split(Regex("\\s+")).all { w ->
+                        w.isBlank() || w.all { it.isLetter() } && w.length <= 12
+                    } && constraint.lowercase().contains("test")
+                if (constraint.isNotEmpty() && !looksLikeTest) {
                     _uiState.update { state ->
                         val existing = state.document.steeringConstraints
                         val updated = if (existing.any { it.equals(constraint, ignoreCase = true) }) {
@@ -691,6 +696,7 @@ class DraftDeckViewModel internal constructor(
     fun addCustomAnchor(rawLabel: String) {
         val clean = DraftStateReducer.sanitizeAscii(rawLabel).trim().take(64)
         if (clean.isEmpty()) return
+        if (clean.lowercase().contains("test") && clean.split(Regex("\\s+")).size <= 4) return
         val sessionId = _uiState.value.document.id
         var added = false
         updateSession(sessionId) { state ->

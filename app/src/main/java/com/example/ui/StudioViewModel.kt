@@ -1177,7 +1177,11 @@ class StudioViewModel internal constructor(
                 coreStageProgress = 0f,
                 coreStageStatusLabel = CoreStageWorker.labelFor(op) + "…",
                 coreStageOp = op,
-                errorMessage = null
+                errorMessage = null,
+                // Clear sticky success/status lines so "Final video ready." cannot linger
+                // over the next render, and clear a stale toast from a prior action.
+                statusNotice = null,
+                toastMessage = null
             )
         }
         pipelineLogger.info("stage", "start $op")
@@ -1201,7 +1205,18 @@ class StudioViewModel internal constructor(
     suspend fun loadActivityLog(): List<String> {
         val rigUrl = _uiState.value.rigHealth.resolvedUrl
         val rigLines = macRigGateway.fetchRigLogs(rigUrl, 200)
-        return rigLines.ifEmpty { pipelineLogger.recentLocal(80) }
+        val raw = rigLines.ifEmpty { pipelineLogger.recentLocal(80) }
+        // Strip raw HTTP paths / hostnames from the settings Activity card — users saw
+        // full `GET /v1/...` lines and trycloudflare URLs and read them as errors.
+        return raw.map { sanitizeActivityLine(it) }.filter { it.isNotBlank() }.takeLast(80)
+    }
+
+    private fun sanitizeActivityLine(line: String): String {
+        var s = line
+        s = s.replace(Regex("""https?://[^\s"']+"""), "rig")
+        s = s.replace(Regex("""\b(?:GET|POST|PUT|DELETE|HEAD)\s+/\S+"""), "api")
+        s = s.replace(Regex("""\b/v1/[A-Za-z0-9_\-./?=&%]+"""), "api")
+        return s.trim()
     }
 
     /** Mirrors background pipeline jobs (WorkManager) into UI state; works across VM/process restarts. */
@@ -1230,6 +1245,9 @@ class StudioViewModel internal constructor(
                         info.state == WorkInfo.State.SUCCEEDED && notice != null -> it.copy(statusNotice = notice)
                         else -> it
                     }
+                }
+                if (info.state == WorkInfo.State.SUCCEEDED && notice != null) {
+                    showStatusNotice(notice)
                 }
             }
         }
@@ -2292,10 +2310,29 @@ class StudioViewModel internal constructor(
         _uiState.update { it.copy(statusNotice = null) }
     }
 
+    private fun showStatusNotice(message: String) {
+        val clean = message.trim()
+        if (clean.isEmpty()) return
+        _uiState.update { it.copy(statusNotice = clean) }
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(5_000L)
+            _uiState.update { st ->
+                if (st.statusNotice == clean) st.copy(statusNotice = null) else st
+            }
+        }
+    }
+
     fun showToast(message: String) {
         val clean = message.trim()
         if (clean.isEmpty()) return
         _uiState.update { it.copy(toastMessage = clean) }
+        // Auto-dismiss so toasts like "look applied · render to see it" never pin the UI.
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(4_000L)
+            _uiState.update { st ->
+                if (st.toastMessage == clean) st.copy(toastMessage = null) else st
+            }
+        }
     }
 
     fun dismissToast() {
@@ -2468,10 +2505,11 @@ class StudioViewModel internal constructor(
                 _uiState.update {
                     it.copy(
                         exportState = ExportState.EXPORTED,
-                        pendingShareIntent = if (openShareSheet) exported.shareIntent else null,
-                        statusNotice = "Saved to Photos."
+                        pendingShareIntent = if (openShareSheet) exported.shareIntent else null
                     )
                 }
+                showToast("Saved to Photos.")
+                showStatusNotice("Saved to Photos.")
             }.onFailure { err ->
                 _uiState.update {
                     it.copy(
@@ -2574,11 +2612,9 @@ class StudioViewModel internal constructor(
     fun setHeygenMotionPrompt(prompt: String) {
         val clean = prompt.trim().take(400)
         _uiState.update { st ->
-            st.copy(
-                settings = st.settings.copy(heygenMotionPrompt = clean),
-                toastMessage = "Motion prompt saved"
-            )
+            st.copy(settings = st.settings.copy(heygenMotionPrompt = clean))
         }
+        showToast("Motion prompt saved.")
         viewModelScope.launch {
             profileStore.setHeygenMotionPrompt(clean)
         }
@@ -2719,7 +2755,13 @@ class StudioViewModel internal constructor(
         ): String {
             val primary = stripCardPromptChrome(rawPrompt)
             val chosen = primary.ifEmpty { stripCardPromptChrome(fallbackText) }
-            return truncateOnWordBoundary(chosen, maxChars = maxChars)
+            // Drop LLM instruction leakage that rendered as garbage cards
+            // ("Stop patching. Start QBtesting. This L…").
+            val cleaned = chosen
+                .replace(Regex("""(?i)\b(stop patching|start qbtesting|do not|don't|ignore previous|system prompt)\b.*"""), "")
+                .trim(*QUOTE_CHARS)
+                .trim()
+            return truncateOnWordBoundary(if (cleaned.isBlank()) chosen else cleaned, maxChars = maxChars)
         }
 
         private fun stripCardPromptChrome(raw: String): String {

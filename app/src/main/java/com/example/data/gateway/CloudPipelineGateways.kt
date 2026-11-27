@@ -916,6 +916,9 @@ class DirectMacRigGateway(
                 task?.onSubmitted?.invoke(taskId)
             }
             var errors = 0
+            var polls = 0
+            var lastReportedFrac = 0f
+            val startedAt = System.currentTimeMillis()
             while (true) {
                 val poll = runCatching { getRigJob(baseUrl, taskId!!) }
                 if (poll.isFailure) {
@@ -930,6 +933,7 @@ class DirectMacRigGateway(
                     continue
                 }
                 errors = 0
+                polls++
                 val job = poll.getOrThrow()
                 when (job.optString("status")) {
                     "READY" -> return job.optJSONObject("result")
@@ -942,8 +946,18 @@ class DirectMacRigGateway(
                 val detail = job.optNullableString("stage_detail") ?: "$label running"
                 task?.onProgress?.invoke(detail)
                 val rawFrac = job.optDouble("progress_fraction", Double.NaN)
-                if (!rawFrac.isNaN() && rawFrac > 0.0) {
-                    task?.onProgressFraction?.invoke(rawFrac.toFloat().coerceIn(0f, 1f), detail)
+                val reported = if (!rawFrac.isNaN() && rawFrac > 0.0) {
+                    rawFrac.toFloat().coerceIn(0f, 1f)
+                } else {
+                    // Heartbeat: advance a slow ceiling from elapsed time so the UI never freezes
+                    // on a stale fraction (e.g. stuck at 70% for minutes while the rig works).
+                    val elapsedSec = (System.currentTimeMillis() - startedAt) / 1000.0
+                    val heartbeat = (0.08 + elapsedSec / 90.0).toFloat().coerceAtMost(0.96f)
+                    maxOf(lastReportedFrac, heartbeat)
+                }
+                if (reported > lastReportedFrac || polls == 1) {
+                    lastReportedFrac = reported
+                    task?.onProgressFraction?.invoke(reported, detail)
                 }
                 kotlinx.coroutines.delay(RIG_TASK_POLL_MS)
             }

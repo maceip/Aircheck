@@ -7,7 +7,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
-import androidx.core.content.FileProvider
 import com.example.data.local.CasMediaStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -71,17 +70,16 @@ class ClipExporter(
             values.put(MediaStore.Video.Media.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
 
-            val shareUri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                mp4File
-            )
+            // Share the MediaStore entry (human display name) rather than the CAS cache path,
+            // which otherwise surfaces as a raw sha hash in the Android share sheet.
             val label = projectTitle.ifBlank { "Aircheck Video" }
+            val shareUri = uri
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
                 type = "video/mp4"
                 clipData = ClipData.newRawUri(label, shareUri)
                 putExtra(Intent.EXTRA_STREAM, shareUri)
                 putExtra(Intent.EXTRA_SUBJECT, label)
+                putExtra(Intent.EXTRA_TITLE, fileName)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
 

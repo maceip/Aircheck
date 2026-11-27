@@ -881,7 +881,7 @@ fun CsBusyBox(
             Text(
                 text = label,
                 style = mono(14.sp, Cs.White, FontWeight.Medium),
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
