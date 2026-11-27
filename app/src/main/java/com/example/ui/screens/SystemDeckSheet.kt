@@ -1,7 +1,7 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,21 +23,16 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.ui.layout.ContentScale
-import coil3.compose.AsyncImage
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.sharp.ChevronRight
+import androidx.compose.material.icons.sharp.Layers
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -48,34 +43,42 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
 import com.example.R
 import com.example.data.BrandChannel
 import com.example.ui.RigConnectionStatus
 import com.example.ui.StudioUiState
+import com.example.ui.clipstudio.Cs
+import com.example.ui.clipstudio.CsIconKey
+import com.example.ui.clipstudio.CsKey
+import com.example.ui.clipstudio.CsKeyLabel
+import com.example.ui.clipstudio.CsLedDot
+import com.example.ui.clipstudio.CsToastOverlay
+import com.example.ui.clipstudio.KeyRole
+import com.example.ui.clipstudio.SectionLabelStyle
+import com.example.ui.clipstudio.mono
+import com.example.ui.clipstudio.ndot
+import com.example.ui.clipstudio.neumorphicSurface
+import com.example.ui.clipstudio.sans
+import com.example.ui.clipstudio.sunkenPanel
 import com.example.ui.components.AircheckBrandMark
-import com.example.ui.components.StudioCard
-import com.example.ui.components.studioFieldColors
 import com.example.ui.theme.AcidVoltLime
 import com.example.ui.theme.BroadcastCobalt
-import com.example.ui.theme.ConsoleElevated
-import com.example.ui.theme.LiveTallyGreen
-import com.example.ui.theme.LocalAircheckTokens
-import com.example.ui.theme.OledVoid
-import com.example.ui.theme.OnAirCrimson
-import com.example.ui.theme.StudioCrisp
-import com.example.ui.theme.TelemetryCyan
-import com.example.ui.theme.TelemetryMuted
-import com.example.ui.theme.TelemetryTimecodeStyle
 
 /**
- * Clean Studio Settings sheet: Mac Studio connection, channel accent color, and local cache.
- * Zero developer jargon, zero mandatory 3 GB OTA walls.
+ * Tactile Studio Settings sheet aligned to the Clip Studio hardware design system:
+ * sculpted neumorphic keys, sunken matte black panels, glowing LED status dots, live
+ * HeyGen look & voice/video provider controls with immediate feedback, and zero flat Material cards.
  */
 @Composable
 fun SystemDeckSheet(
@@ -95,9 +98,10 @@ fun SystemDeckSheet(
     onSelectHeygenEngine: ((String) -> Unit)? = null,
     onSelectHeygenResolution: ((String) -> Unit)? = null,
     onSaveHeygenMotionPrompt: ((String) -> Unit)? = null,
+    onShowToast: ((String) -> Unit)? = null,
+    onDismissToast: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val tokens = LocalAircheckTokens.current
     val activeChannel = uiState.settings.brandChannel
     val rigHealth = uiState.rigHealth
 
@@ -112,110 +116,154 @@ fun SystemDeckSheet(
         RigConnectionStatus.ERROR -> "Offline"
     }
 
-    Column(
+    Box(
         modifier = modifier
             .fillMaxSize()
-            .background(OledVoid)
-            .windowInsetsPadding(WindowInsets.systemBars),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .background(Cs.Body)
+            .windowInsetsPadding(WindowInsets.systemBars)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            AircheckBrandMark(size = 24.dp)
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = "Studio Settings",
-                style = MaterialTheme.typography.titleMedium,
-                color = StudioCrisp,
-                modifier = Modifier.weight(1f)
-            )
-            IconButton(
-                onClick = onClose,
+            Row(
                 modifier = Modifier
-                    .size(48.dp)
-                    .testTag("close_system_deck_button")
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Filled.Close,
+                AircheckBrandMark(size = 24.dp)
+                Text(
+                    text = "STUDIO SETTINGS",
+                    style = ndot(15.sp, Cs.White),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                CsIconKey(
+                    icon = Icons.Filled.Close,
                     contentDescription = stringResource(R.string.cd_close_sheet),
-                    tint = StudioCrisp
+                    onClick = onClose,
+                    size = 42.dp,
+                    radius = 12.dp,
+                    iconSize = 20.dp,
+                    modifier = Modifier.testTag("close_system_deck_button")
                 )
             }
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(tokens.hairline)
-        )
 
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .widthIn(max = 640.dp)
-                .testTag("system_deck_lazy_list"),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            // Optional Savable Newsroom Overlays Page
-            item(key = "newsroom_studio_entry") {
-                StudioCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onOpenNewsroomStudio)
-                        .testTag("open_newsroom_studio_button")
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            text = "Create Newsroom Overlays (Optional)",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = StudioCrisp
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .widthIn(max = 640.dp)
+                    .testTag("system_deck_lazy_list"),
+                contentPadding = PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Direct jump to revamped Newsroom Overlays Editor
+                item(key = "newsroom_studio_entry") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .neumorphicSurface(
+                                role = KeyRole.STD,
+                                pressed = false,
+                                radius = 16.dp,
+                                enabled = true,
+                                accentBarColor = Cs.Red
+                            )
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable(role = Role.Button, onClick = onOpenNewsroomStudio)
+                            .padding(start = 16.dp, top = 14.dp, end = 12.dp, bottom = 14.dp)
+                            .testTag("open_newsroom_studio_button"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Sharp.Layers,
+                            contentDescription = null,
+                            tint = Cs.Ink,
+                            modifier = Modifier.size(20.dp)
                         )
-                        Text(
-                            text = "Savable AI A2UI overlays for news briefs & Remotion setup",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TelemetryMuted
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = "Newsroom Overlays Editor",
+                                style = sans(15.sp, Cs.White, 20.sp, FontWeight.Medium)
+                            )
+                            Text(
+                                text = "Edit broadcast labels, chyrons, cards & live studio look",
+                                style = sans(12.5.sp, Cs.Muted, 17.sp)
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Sharp.ChevronRight,
+                            contentDescription = null,
+                            tint = Cs.Muted,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
-            }
 
-            // 0. Activity — what's happening on the phone + rig, in one durable log.
-            if (onLoadActivity != null) {
-                item(key = "activity_card") {
-                    ActivityLogCard(loadLogs = onLoadActivity)
+                // Voice engine & HeyGen avatar/engine/quality controls (live from Mac Studio rig)
+                if (onLoadStudioOptions != null &&
+                    onSelectVoiceBackend != null &&
+                    onSelectHeygenLook != null &&
+                    onSelectHeygenEngine != null &&
+                    onSelectHeygenResolution != null &&
+                    onSaveHeygenMotionPrompt != null
+                ) {
+                    item(key = "voice_heygen_card") {
+                        VoiceAndHeygenCard(
+                            uiState = uiState,
+                            onLoadOptions = onLoadStudioOptions,
+                            onSelectVoiceBackend = onSelectVoiceBackend,
+                            onSelectVideoBackend = onSelectVideoBackend ?: {},
+                            onSelectHeygenLook = onSelectHeygenLook,
+                            onSelectHeygenEngine = onSelectHeygenEngine,
+                            onSelectHeygenResolution = onSelectHeygenResolution,
+                            onSaveMotionPrompt = onSaveHeygenMotionPrompt,
+                            onUnavailableClick = { msg -> onShowToast?.invoke(msg) }
+                        )
+                    }
                 }
-            }
 
-            // 1. Studio Server Connection
-            item(key = "studio_server_card") {
-                StudioCard(modifier = Modifier.fillMaxWidth()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // On-device drafting models (AICore system model + downloadable Gemma fallback)
+                if (onDeviceModels != null) {
+                    item(key = "on_device_models_card") { onDeviceModels() }
+                }
+
+                // Studio Server Connection
+                item(key = "studio_server_card") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .sunkenPanel(radius = 18.dp)
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "Mac Studio server",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = StudioCrisp
-                            )
+                            Text("MAC STUDIO SERVER", style = SectionLabelStyle)
                             Text(
                                 text = rigStatusLabel,
-                                style = TelemetryTimecodeStyle,
-                                color = when (rigHealth.status) {
-                                    RigConnectionStatus.ONLINE -> LiveTallyGreen
-                                    RigConnectionStatus.CHECKING -> TelemetryCyan
-                                    RigConnectionStatus.ERROR -> OnAirCrimson
-                                    RigConnectionStatus.IDLE -> TelemetryMuted
-                                },
+                                style = mono(
+                                    11.5.sp,
+                                    when (rigHealth.status) {
+                                        RigConnectionStatus.ONLINE -> Cs.Mint
+                                        RigConnectionStatus.CHECKING -> Cs.Amber
+                                        RigConnectionStatus.ERROR -> Cs.Red
+                                        RigConnectionStatus.IDLE -> Cs.Muted
+                                    },
+                                    FontWeight.Medium
+                                ),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.testTag("rig_connection_status_label")
@@ -227,55 +275,66 @@ fun SystemDeckSheet(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            OutlinedTextField(
+                            BasicTextField(
                                 value = rigUrlDraft,
                                 onValueChange = { rigUrlDraft = it },
-                                placeholder = {
-                                    Text("http://10.0.0.242:8443", color = TelemetryMuted)
-                                },
                                 singleLine = true,
-                                textStyle = MaterialTheme.typography.bodyMedium.copy(color = StudioCrisp),
-                                colors = studioFieldColors(),
+                                textStyle = mono(13.sp, Cs.White),
+                                cursorBrush = SolidColor(Cs.White),
                                 modifier = Modifier
                                     .weight(1f)
-                                    .testTag("tailscale_rig_url_input")
+                                    .height(46.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Cs.Body)
+                                    .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 12.dp, vertical = 13.dp)
+                                    .testTag("tailscale_rig_url_input"),
+                                decorationBox = { inner ->
+                                    Box(contentAlignment = Alignment.CenterStart) {
+                                        if (rigUrlDraft.isEmpty()) {
+                                            Text("http://10.0.0.242:8443", style = mono(13.sp, Cs.Dim))
+                                        }
+                                        inner()
+                                    }
+                                }
                             )
-                            OutlinedButton(
+                            CsKeyLabel(
+                                label = "Save",
                                 onClick = { onSaveTailscaleRigUrl(rigUrlDraft) },
-                                shape = RoundedCornerShape(8.dp),
-                                border = BorderStroke(1.dp, tokens.hairline),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                                role = KeyRole.ACTIVE,
+                                radius = 12.dp,
+                                size = 12.5.sp,
+                                weight = FontWeight.SemiBold,
                                 modifier = Modifier
-                                    .height(52.dp)
+                                    .height(46.dp)
                                     .testTag("save_tailscale_url_button")
-                            ) {
-                                Text("Save")
-                            }
+                            )
                         }
 
-                        OutlinedButton(
+                        CsKey(
                             onClick = { onTestRigConnection(rigUrlDraft) },
                             enabled = rigHealth.status != RigConnectionStatus.CHECKING,
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, tokens.hairline),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                            role = KeyRole.STD,
+                            radius = 12.dp,
+                            contentAlignment = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(46.dp)
+                                .height(44.dp)
                                 .testTag("test_rig_connection_button")
-                        ) {
+                        ) { tint ->
                             Icon(
                                 imageVector = Icons.Filled.NetworkCheck,
                                 contentDescription = null,
-                                modifier = Modifier.size(18.dp)
+                                tint = tint,
+                                modifier = Modifier.size(17.dp)
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = if (rigHealth.status == RigConnectionStatus.CHECKING) {
                                     "Checking connection…"
                                 } else {
                                     "Test connection"
-                                }
+                                },
+                                style = mono(12.5.sp, tint, FontWeight.Medium)
                             )
                         }
 
@@ -283,24 +342,30 @@ fun SystemDeckSheet(
                         if (rigHealth.status == RigConnectionStatus.ERROR && !rigError.isNullOrBlank()) {
                             Text(
                                 text = rigError,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = OnAirCrimson,
+                                style = sans(12.5.sp, Cs.Red, 17.sp),
                                 modifier = Modifier.testTag("rig_connection_error_label")
                             )
                         }
                     }
                 }
-            }
 
-            // 2. Broadcast Channel Accent
-            item(key = "channel_switcher") {
-                StudioCard(modifier = Modifier.fillMaxWidth()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            text = "Broadcast accent",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = StudioCrisp
-                        )
+                // Activity log
+                if (onLoadActivity != null) {
+                    item(key = "activity_card") {
+                        ActivityLogCard(loadLogs = onLoadActivity)
+                    }
+                }
+
+                // Broadcast Channel Accent
+                item(key = "channel_switcher") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .sunkenPanel(radius = 18.dp)
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("BROADCAST ACCENT", style = SectionLabelStyle)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -308,119 +373,85 @@ fun SystemDeckSheet(
                             BrandChannel.entries.forEach { channel ->
                                 val selected = activeChannel == channel
                                 val color = if (channel == BrandChannel.VOLT_LIME) AcidVoltLime else BroadcastCobalt
-                                Surface(
-                                    color = if (selected) color.copy(alpha = 0.16f) else ConsoleElevated,
-                                    shape = RoundedCornerShape(8.dp),
-                                    border = BorderStroke(1.dp, if (selected) color else tokens.hairline),
+                                CsKey(
+                                    onClick = { onSelectChannel(channel) },
+                                    role = if (selected) KeyRole.ACTIVE else KeyRole.STD,
+                                    radius = 12.dp,
+                                    horizontalPadding = 12.dp,
+                                    contentAlignment = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(52.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .clickable { onSelectChannel(channel) }
+                                        .height(46.dp)
                                         .testTag("channel_toggle_${channel.name.lowercase()}")
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(12.dp)
-                                                .clip(RoundedCornerShape(3.dp))
-                                                .background(color)
-                                        )
-                                        Text(
-                                            text = channel.label,
-                                            style = MaterialTheme.typography.labelLarge,
-                                            color = if (selected) color else StudioCrisp
-                                        )
-                                    }
+                                ) { tint ->
+                                    Box(
+                                        modifier = Modifier
+                                            .size(10.dp)
+                                            .clip(RoundedCornerShape(3.dp))
+                                            .background(color)
+                                    )
+                                    Text(
+                                        text = channel.label,
+                                        style = mono(12.sp, if (selected) Cs.White else tint, FontWeight.Medium)
+                                    )
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            // On-device drafting models (AICore system model + downloadable Gemma fallback)
-            if (onDeviceModels != null) {
-                item(key = "on_device_models_card") { onDeviceModels() }
-            }
-
-            // Voice engine & HeyGen avatar/engine/quality controls (live from Mac Studio rig)
-            if (onLoadStudioOptions != null &&
-                onSelectVoiceBackend != null &&
-                onSelectHeygenLook != null &&
-                onSelectHeygenEngine != null &&
-                onSelectHeygenResolution != null &&
-                onSaveHeygenMotionPrompt != null
-            ) {
-                item(key = "voice_heygen_card") {
-                    VoiceAndHeygenCard(
-                        uiState = uiState,
-                        onLoadOptions = onLoadStudioOptions,
-                        onSelectVoiceBackend = onSelectVoiceBackend,
-                        onSelectVideoBackend = onSelectVideoBackend ?: {},
-                        onSelectHeygenLook = onSelectHeygenLook,
-                        onSelectHeygenEngine = onSelectHeygenEngine,
-                        onSelectHeygenResolution = onSelectHeygenResolution,
-                        onSaveMotionPrompt = onSaveHeygenMotionPrompt
-                    )
-                }
-            }
-
-            // 3. Storage & Reset
-            item(key = "storage_card") {
-                val mbUsed = uiState.casTotalBytes / (1024.0 * 1024.0)
-                StudioCard(modifier = Modifier.fillMaxWidth()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // Storage & Reset
+                item(key = "storage_card") {
+                    val mbUsed = uiState.casTotalBytes / (1024.0 * 1024.0)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .sunkenPanel(radius = 18.dp)
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "Local video cache",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = StudioCrisp
-                            )
+                            Text("LOCAL VIDEO CACHE", style = SectionLabelStyle)
                             Text(
                                 text = "${"%.1f".format(mbUsed)} MB",
-                                style = TelemetryTimecodeStyle,
-                                color = tokens.channelAccent,
+                                style = mono(12.sp, Cs.InkSub, FontWeight.Medium),
                                 modifier = Modifier.testTag("cas_cache_size_label")
                             )
                         }
-                        OutlinedButton(
+                        CsKey(
                             onClick = onClearCasCache,
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, tokens.hairline),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                            role = KeyRole.STD,
+                            radius = 12.dp,
+                            contentAlignment = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(46.dp)
+                                .height(44.dp)
                                 .testTag("clear_cas_cache_button")
-                        ) {
+                        ) { tint ->
                             Icon(
                                 imageVector = Icons.Filled.DeleteSweep,
                                 contentDescription = null,
-                                modifier = Modifier.size(18.dp)
+                                tint = tint,
+                                modifier = Modifier.size(17.dp)
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Clear cached files")
+                            Text("Clear cached files", style = mono(12.5.sp, tint, FontWeight.Medium))
                         }
                     }
                 }
             }
         }
+
+        CsToastOverlay(
+            message = uiState.toastMessage,
+            onDismiss = onDismissToast
+        )
     }
 }
 
-/**
- * "What's happening" panel: tails the durable generation log (rig + shipped phone events). The log
- * is auto-rotating on both ends, so there is nothing for the user to manage or clean up.
- */
 @Composable
 private fun ActivityLogCard(loadLogs: suspend () -> List<String>) {
     var lines by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -431,86 +462,72 @@ private fun ActivityLogCard(loadLogs: suspend () -> List<String>) {
         lines = runCatching { loadLogs() }.getOrDefault(emptyList())
         loading = false
     }
-    StudioCard(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("activity_log_card")
+            .sunkenPanel(radius = 18.dp)
+            .padding(14.dp)
+            .testTag("activity_log_card"),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Activity",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = StudioCrisp
-                )
-                Text(
-                    text = if (loading) "loading…" else "${lines.size} events",
-                    style = TelemetryTimecodeStyle,
-                    color = TelemetryMuted,
-                    modifier = Modifier.testTag("activity_log_count")
-                )
-            }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("ACTIVITY LOG", style = SectionLabelStyle)
             Text(
-                text = "Phone + Mac rig pipeline log. Auto-rotating — nothing to manage.",
-                style = MaterialTheme.typography.bodySmall,
-                color = TelemetryMuted
+                text = if (loading) "loading…" else "${lines.size} events",
+                style = mono(11.sp, Cs.Muted),
+                modifier = Modifier.testTag("activity_log_count")
             )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 220.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(OledVoid)
-                    .verticalScroll(rememberScrollState())
-                    .padding(10.dp)
-                    .testTag("activity_log_scroll")
-            ) {
-                if (lines.isEmpty()) {
-                    Text(
-                        text = if (loading) "Loading…" else "No activity yet.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TelemetryMuted
-                    )
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        lines.takeLast(120).forEach { line ->
-                            Text(
-                                text = line,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 10.sp
-                                ),
-                                color = StudioCrisp
-                            )
-                        }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 200.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Cs.Body)
+                .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
+                .verticalScroll(rememberScrollState())
+                .padding(10.dp)
+                .testTag("activity_log_scroll")
+        ) {
+            if (lines.isEmpty()) {
+                Text(
+                    text = if (loading) "Loading…" else "No activity yet.",
+                    style = sans(12.5.sp, Cs.Muted, 17.sp)
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    lines.takeLast(120).forEach { line ->
+                        Text(
+                            text = line,
+                            style = mono(10.sp, Cs.InkSub)
+                        )
                     }
                 }
             }
-            OutlinedButton(
-                onClick = { refreshKey++ },
-                enabled = !loading,
-                shape = RoundedCornerShape(8.dp),
-                border = BorderStroke(1.dp, LocalAircheckTokens.current.hairline),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(46.dp)
-                    .testTag("activity_refresh_button")
-            ) {
-                Text(if (loading) "Refreshing…" else "Refresh")
-            }
         }
+        CsKeyLabel(
+            label = if (loading) "Refreshing…" else "Refresh",
+            onClick = { refreshKey++ },
+            enabled = !loading,
+            role = KeyRole.STD,
+            radius = 12.dp,
+            size = 12.sp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(42.dp)
+                .testTag("activity_refresh_button")
+        )
     }
 }
 
 /**
- * Real, rig-backed Voice & Video provider controls.
- * Fetches available voice/video engines and live HeyGen avatar looks from `GET /v1/media/providers`
- * and persists selections in `AircheckProfileStore`.
+ * Tactile rig-backed Voice & HeyGen Video controls.
+ * Every selectable button uses sculpted neumorphic keys with glowing LED status dots,
+ * and unavailable backends explain why they are unavailable on tap instead of feeling dead.
  */
 @Composable
 private fun VoiceAndHeygenCard(
@@ -521,9 +538,9 @@ private fun VoiceAndHeygenCard(
     onSelectHeygenLook: (String) -> Unit,
     onSelectHeygenEngine: (String) -> Unit,
     onSelectHeygenResolution: (String) -> Unit,
-    onSaveMotionPrompt: (String) -> Unit
+    onSaveMotionPrompt: (String) -> Unit,
+    onUnavailableClick: (String) -> Unit
 ) {
-    val tokens = LocalAircheckTokens.current
     val settings = uiState.settings
     val options = uiState.studioRigOptions
     var motionDraft by remember(settings.heygenMotionPrompt) {
@@ -536,191 +553,149 @@ private fun VoiceAndHeygenCard(
         }
     }
 
-    StudioCard(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("voice_heygen_card")
+            .sunkenPanel(radius = 18.dp)
+            .padding(14.dp)
+            .testTag("voice_heygen_card"),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("VOICE & HEYGEN VIDEO", style = SectionLabelStyle)
+            CsKey(
+                onClick = { onLoadOptions(true) },
+                enabled = !uiState.isLoadingStudioOptions,
+                role = KeyRole.STD,
+                radius = 10.dp,
+                horizontalPadding = 10.dp,
+                contentAlignment = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
+                modifier = Modifier
+                    .height(34.dp)
+                    .testTag("studio_options_refresh_button")
+            ) { tint ->
+                Icon(
+                    imageVector = Icons.Filled.Refresh,
+                    contentDescription = "Refresh options",
+                    tint = tint,
+                    modifier = Modifier.size(14.dp)
+                )
+                Text(
+                    text = if (uiState.isLoadingStudioOptions) "Loading…" else "Refresh",
+                    style = mono(11.sp, tint, FontWeight.Medium)
+                )
+            }
+        }
+
+        val err = uiState.studioOptionsError
+        if (!err.isNullOrBlank()) {
+            Text(
+                text = err,
+                style = sans(12.5.sp, Cs.Red, 17.sp),
+                modifier = Modifier.testTag("studio_options_error")
+            )
+        }
+
+        if (options == null) {
+            Text(
+                text = if (uiState.isLoadingStudioOptions) {
+                    "Loading live voice & HeyGen options from Mac Studio…"
+                } else {
+                    "Connect to Mac Studio and tap Refresh to load voice engines & HeyGen looks."
+                },
+                style = sans(13.sp, Cs.Muted, 18.sp)
+            )
+        } else {
+            // 1. Mac Studio Voice Engine
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Text("Mac voice engine", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
                 Text(
-                    text = "Voice & HeyGen video",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = StudioCrisp
+                    text = options.voiceBackends.firstOrNull { it.id == settings.rigVoiceBackend }?.label
+                        ?: settings.rigVoiceBackend,
+                    style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
+                    modifier = Modifier.testTag("voice_backend_active_label")
                 )
-                OutlinedButton(
-                    onClick = { onLoadOptions(true) },
-                    enabled = !uiState.isLoadingStudioOptions,
-                    shape = RoundedCornerShape(8.dp),
-                    border = BorderStroke(1.dp, tokens.hairline),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
-                    modifier = Modifier
-                        .height(34.dp)
-                        .testTag("studio_options_refresh_button")
+            }
+            options.voiceBackends.chunked(2).forEach { pair ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = "Refresh options",
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = if (uiState.isLoadingStudioOptions) "Loading…" else "Refresh",
-                        style = MaterialTheme.typography.labelSmall
-                    )
+                    pair.forEach { opt ->
+                        val selected = settings.rigVoiceBackend.equals(opt.id, ignoreCase = true)
+                        TactileOptionTile(
+                            label = opt.label,
+                            selected = selected,
+                            available = opt.available,
+                            onClick = {
+                                if (!opt.available) {
+                                    onUnavailableClick("${opt.label} unavailable: ${opt.detail.ifBlank { "not configured on rig" }}")
+                                } else {
+                                    onSelectVoiceBackend(opt.id)
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("voice_backend_${opt.id}")
+                        )
+                    }
+                    if (pair.size == 1) {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
                 }
             }
 
-            val err = uiState.studioOptionsError
-            if (!err.isNullOrBlank()) {
-                Text(
-                    text = err,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = OnAirCrimson,
-                    modifier = Modifier.testTag("studio_options_error")
-                )
-            }
-
-            if (options == null) {
-                Text(
-                    text = if (uiState.isLoadingStudioOptions) {
-                        "Loading live voice & HeyGen options from Mac Studio…"
-                    } else {
-                        "Connect to Mac Studio and tap Refresh to load voice engines & HeyGen looks."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TelemetryMuted
-                )
-            } else {
-                // 1. Mac Studio Voice Engine
+            // 2. Video Provider (HeyGen Avatar / local MuseTalk CUDA worker)
+            val activeVideoBackend = settings.rigVideoBackend.ifBlank { options.defaultVideoBackend }
+            if (options.videoBackends.isNotEmpty()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Mac voice engine", style = MaterialTheme.typography.bodyMedium, color = StudioCrisp)
+                    Text("Video provider", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
                     Text(
-                        text = options.voiceBackends.firstOrNull { it.id == settings.rigVoiceBackend }?.label
-                            ?: settings.rigVoiceBackend,
-                        style = TelemetryTimecodeStyle,
-                        color = tokens.channelAccent,
-                        modifier = Modifier.testTag("voice_backend_active_label")
+                        text = options.videoBackends.firstOrNull { it.id == activeVideoBackend }?.label
+                            ?: activeVideoBackend,
+                        style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
+                        modifier = Modifier.testTag("video_backend_active_label")
                     )
                 }
-                options.voiceBackends.chunked(2).forEach { pair ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        pair.forEach { opt ->
-                            val selected = settings.rigVoiceBackend.equals(opt.id, ignoreCase = true)
-                            Surface(
-                                color = if (selected) tokens.channelAccent.copy(alpha = 0.16f) else ConsoleElevated,
-                                shape = RoundedCornerShape(8.dp),
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (selected) tokens.channelAccent else tokens.hairline
-                                ),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .heightIn(min = 44.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable(enabled = opt.available && !selected) {
-                                        onSelectVoiceBackend(opt.id)
-                                    }
-                                    .testTag("voice_backend_${opt.id}")
-                            ) {
-                                Box(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = opt.label,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = when {
-                                            !opt.available -> TelemetryMuted.copy(alpha = 0.5f)
-                                            selected -> tokens.channelAccent
-                                            else -> StudioCrisp
-                                        },
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    options.videoBackends.forEach { vOpt ->
+                        val selected = activeVideoBackend.equals(vOpt.id, ignoreCase = true)
+                        TactileOptionTile(
+                            label = vOpt.label,
+                            selected = selected,
+                            available = vOpt.available,
+                            onClick = {
+                                if (!vOpt.available) {
+                                    onUnavailableClick("${vOpt.label} unavailable: ${vOpt.detail.ifBlank { "not configured on rig" }}")
+                                } else {
+                                    onSelectVideoBackend(vOpt.id)
                                 }
-                            }
-                        }
-                        if (pair.size == 1) {
-                            Spacer(modifier = Modifier.weight(1f))
-                        }
-                    }
-                }
-
-                // 2. Video Provider (HeyGen Avatar / local MuseTalk CUDA worker)
-                val activeVideoBackend = settings.rigVideoBackend.ifBlank { options.defaultVideoBackend }
-                if (options.videoBackends.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Video provider", style = MaterialTheme.typography.bodyMedium, color = StudioCrisp)
-                        Text(
-                            text = options.videoBackends.firstOrNull { it.id == activeVideoBackend }?.label
-                                ?: activeVideoBackend,
-                            style = TelemetryTimecodeStyle,
-                            color = tokens.channelAccent,
-                            modifier = Modifier.testTag("video_backend_active_label")
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("video_backend_${vOpt.id}")
                         )
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        options.videoBackends.forEach { vOpt ->
-                            val selected = activeVideoBackend.equals(vOpt.id, ignoreCase = true)
-                            Surface(
-                                color = if (selected) tokens.channelAccent.copy(alpha = 0.16f) else ConsoleElevated,
-                                shape = RoundedCornerShape(8.dp),
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (selected) tokens.channelAccent else tokens.hairline
-                                ),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .heightIn(min = 44.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable(enabled = vOpt.available && !selected) {
-                                        onSelectVideoBackend(vOpt.id)
-                                    }
-                                    .testTag("video_backend_${vOpt.id}")
-                            ) {
-                                Box(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = vOpt.label,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = when {
-                                            !vOpt.available -> TelemetryMuted.copy(alpha = 0.5f)
-                                            selected -> tokens.channelAccent
-                                            else -> StudioCrisp
-                                        },
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-                    }
                 }
+            }
 
-                // 3. HeyGen Avatar Look, Engine, Quality, Motion Prompt (only when HeyGen video backend is active)
-                if (activeVideoBackend.equals("heygen", ignoreCase = true)) {
+            // 3. HeyGen Avatar Look, Engine, Quality, Motion Prompt
+            if (activeVideoBackend.equals("heygen", ignoreCase = true)) {
                 val activeLookId = settings.heygenLookId.ifBlank { options.defaultHeygenLookId }
                 val activeLook = options.heygenLooks.firstOrNull { it.id == activeLookId }
                 Row(
@@ -728,80 +703,82 @@ private fun VoiceAndHeygenCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("HeyGen look", style = MaterialTheme.typography.bodyMedium, color = StudioCrisp)
+                    Text("HeyGen look", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
                     Text(
                         text = activeLook?.name ?: if (activeLookId.isBlank()) "Default" else activeLookId.take(8),
-                        style = TelemetryTimecodeStyle,
-                        color = tokens.channelAccent,
+                        style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
-                            .widthIn(max = 180.dp)
+                            .widthIn(max = 190.dp)
                             .testTag("heygen_look_active_label")
                     )
                 }
                 if (options.heygenLooks.isEmpty()) {
                     Text(
                         text = "No HeyGen looks returned from your account.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TelemetryMuted
+                        style = sans(12.5.sp, Cs.Muted, 17.sp)
                     )
                 } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         options.heygenLooks.forEach { look ->
                             val selected = look.id == activeLookId
                             val typeLabel = if (look.avatarType == "digital_twin") "digital twin" else "photo look"
-                            Surface(
-                                color = if (selected) tokens.channelAccent.copy(alpha = 0.14f) else ConsoleElevated,
-                                shape = RoundedCornerShape(8.dp),
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (selected) tokens.channelAccent else tokens.hairline
-                                ),
+                            Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable(enabled = !selected) { onSelectHeygenLook(look.id) }
-                                    .testTag("heygen_look_${look.id}")
+                                    .neumorphicSurface(
+                                        role = if (selected) KeyRole.ACTIVE else KeyRole.STD,
+                                        pressed = false,
+                                        radius = 14.dp,
+                                        enabled = true,
+                                        accentBarColor = if (selected) Cs.Mint else null
+                                    )
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable(role = Role.RadioButton) { onSelectHeygenLook(look.id) }
+                                    .padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 8.dp)
+                                    .testTag("heygen_look_${look.id}"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    if (look.previewImageUrl.isNotBlank()) {
-                                        AsyncImage(
-                                            model = look.previewImageUrl,
-                                            contentDescription = look.name,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier
-                                                .size(36.dp)
-                                                .clip(RoundedCornerShape(6.dp))
-                                                .background(OledVoid)
-                                        )
-                                    }
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = look.name,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = if (selected) tokens.channelAccent else StudioCrisp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            text = "$typeLabel · ${look.preferredOrientation}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = TelemetryMuted,
-                                            maxLines = 1
-                                        )
-                                    }
+                                if (look.previewImageUrl.isNotBlank()) {
+                                    AsyncImage(
+                                        model = look.previewImageUrl,
+                                        contentDescription = look.name,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Cs.Body)
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = look.name,
+                                        style = sans(
+                                            14.sp,
+                                            if (selected) Cs.White else Cs.Ink,
+                                            19.sp,
+                                            if (selected) FontWeight.SemiBold else FontWeight.Medium
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "$typeLabel · ${look.preferredOrientation}",
+                                        style = mono(11.sp, if (selected) Cs.InkSub else Cs.Muted),
+                                        maxLines = 1
+                                    )
+                                }
+                                if (selected) {
+                                    CsLedDot(color = Cs.Mint, size = 7.dp)
                                 }
                             }
                         }
                     }
                 }
 
-                // 3. HeyGen Engine
+                // 4. HeyGen Engine
                 val activeEngine = settings.heygenEngine.ifBlank { options.defaultHeygenEngine }
                 val supportedForLook = activeLook?.supportedEngines.orEmpty()
                 Row(
@@ -809,11 +786,10 @@ private fun VoiceAndHeygenCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("HeyGen engine", style = MaterialTheme.typography.bodyMedium, color = StudioCrisp)
+                    Text("HeyGen engine", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
                     Text(
                         text = options.heygenEngines.firstOrNull { it.id == activeEngine }?.label ?: activeEngine,
-                        style = TelemetryTimecodeStyle,
-                        color = tokens.channelAccent,
+                        style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
                         modifier = Modifier.testTag("heygen_engine_active_label")
                     )
                 }
@@ -825,37 +801,21 @@ private fun VoiceAndHeygenCard(
                         pair.forEach { eng ->
                             val selected = activeEngine.equals(eng.id, ignoreCase = true)
                             val eligible = supportedForLook.isEmpty() || supportedForLook.contains(eng.id)
-                            Surface(
-                                color = if (selected) tokens.channelAccent.copy(alpha = 0.16f) else ConsoleElevated,
-                                shape = RoundedCornerShape(8.dp),
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (selected) tokens.channelAccent else tokens.hairline
-                                ),
+                            TactileOptionTile(
+                                label = eng.label,
+                                selected = selected,
+                                available = eligible,
+                                onClick = {
+                                    if (!eligible) {
+                                        onUnavailableClick("${eng.label} is not supported by the selected look")
+                                    } else {
+                                        onSelectHeygenEngine(eng.id)
+                                    }
+                                },
                                 modifier = Modifier
                                     .weight(1f)
-                                    .heightIn(min = 42.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable(enabled = eligible && !selected) { onSelectHeygenEngine(eng.id) }
                                     .testTag("heygen_engine_${eng.id}")
-                            ) {
-                                Box(
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = eng.label,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = when {
-                                            !eligible -> TelemetryMuted.copy(alpha = 0.5f)
-                                            selected -> tokens.channelAccent
-                                            else -> StudioCrisp
-                                        },
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
+                            )
                         }
                         if (pair.size == 1) {
                             Spacer(modifier = Modifier.weight(1f))
@@ -863,7 +823,7 @@ private fun VoiceAndHeygenCard(
                     }
                 }
 
-                // 4. HeyGen Resolution (filtered to engine's real supported resolutions)
+                // 5. HeyGen Resolution
                 val engineResolutions = options.heygenEngines
                     .firstOrNull { it.id.equals(activeEngine, ignoreCase = true) }
                     ?.resolutions
@@ -875,11 +835,10 @@ private fun VoiceAndHeygenCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Video quality", style = MaterialTheme.typography.bodyMedium, color = StudioCrisp)
+                    Text("Video quality", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
                     Text(
-                        text = activeRes,
-                        style = TelemetryTimecodeStyle,
-                        color = tokens.channelAccent,
+                        text = activeRes.uppercase(),
+                        style = mono(11.5.sp, Cs.Mint, FontWeight.Medium),
                         modifier = Modifier.testTag("heygen_resolution_active_label")
                     )
                 }
@@ -889,65 +848,105 @@ private fun VoiceAndHeygenCard(
                 ) {
                     engineResolutions.forEach { res ->
                         val selected = activeRes.equals(res, ignoreCase = true)
-                        Surface(
-                            color = if (selected) tokens.channelAccent.copy(alpha = 0.16f) else ConsoleElevated,
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(
-                                1.dp,
-                                if (selected) tokens.channelAccent else tokens.hairline
-                            ),
+                        TactileOptionTile(
+                            label = res.uppercase(),
+                            selected = selected,
+                            available = true,
+                            onClick = { onSelectHeygenResolution(res) },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(42.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable(enabled = !selected) { onSelectHeygenResolution(res) }
                                 .testTag("heygen_res_$res")
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = res.uppercase(),
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = if (selected) tokens.channelAccent else StudioCrisp
-                                )
-                            }
-                        }
+                        )
                     }
                 }
 
-                // 5. Optional HeyGen Motion Prompt
-                Text("Motion prompt (optional)", style = MaterialTheme.typography.bodyMedium, color = StudioCrisp)
+                // 6. Optional HeyGen Motion Prompt
+                Text("Motion prompt (optional)", style = sans(14.sp, Cs.Ink, 19.sp, FontWeight.Medium))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedTextField(
+                    BasicTextField(
                         value = motionDraft,
                         onValueChange = { motionDraft = it },
-                        placeholder = {
-                            Text("e.g. calm news anchor gestures, eye contact", color = TelemetryMuted)
-                        },
                         singleLine = true,
-                        textStyle = MaterialTheme.typography.bodySmall.copy(color = StudioCrisp),
-                        colors = studioFieldColors(),
+                        textStyle = sans(13.5.sp, Cs.White, 18.sp),
+                        cursorBrush = SolidColor(Cs.White),
                         modifier = Modifier
                             .weight(1f)
-                            .testTag("heygen_motion_prompt_input")
+                            .height(46.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Cs.Body)
+                            .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 12.dp, vertical = 13.dp)
+                            .testTag("heygen_motion_prompt_input"),
+                        decorationBox = { inner ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (motionDraft.isEmpty()) {
+                                    Text("e.g. calm news anchor gestures", style = sans(13.sp, Cs.Dim, 18.sp))
+                                }
+                                inner()
+                            }
+                        }
                     )
-                    OutlinedButton(
+                    CsKeyLabel(
+                        label = "Save",
                         onClick = { onSaveMotionPrompt(motionDraft) },
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, tokens.hairline),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = StudioCrisp),
+                        role = KeyRole.ACTIVE,
+                        radius = 12.dp,
+                        size = 12.5.sp,
+                        weight = FontWeight.SemiBold,
                         modifier = Modifier
-                            .height(52.dp)
+                            .height(46.dp)
                             .testTag("heygen_motion_prompt_save")
-                    ) {
-                        Text("Save")
-                    }
-                }
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TactileOptionTile(
+    label: String,
+    selected: Boolean,
+    available: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .heightIn(min = 44.dp)
+            .neumorphicSurface(
+                role = if (selected) KeyRole.ACTIVE else KeyRole.STD,
+                pressed = false,
+                radius = 12.dp,
+                enabled = available,
+                accentBarColor = if (selected) Cs.Mint else null
+            )
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(role = Role.RadioButton, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (selected) {
+            CsLedDot(color = Cs.Mint, size = 6.dp)
+        }
+        Text(
+            text = label,
+            style = mono(
+                11.5.sp,
+                when {
+                    !available -> Cs.Dim
+                    selected -> Cs.White
+                    else -> Cs.Ink
+                },
+                if (selected) FontWeight.SemiBold else FontWeight.Medium
+            ),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }

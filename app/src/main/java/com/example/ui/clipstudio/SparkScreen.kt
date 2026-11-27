@@ -54,6 +54,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -107,6 +108,7 @@ fun SparkScreen(
     modifier: Modifier = Modifier,
     onNavigate: (Int) -> Unit = {},
     onNewIdea: () -> Unit = { vm.resetNewDraft() },
+    onCreateVideo: ((String) -> Unit)? = null,
     lastCompletedVideo: LastVideoSummary? = null,
     renderGlobalOverlays: Boolean = true
 ) {
@@ -205,6 +207,7 @@ fun SparkScreen(
                     vm = vm,
                     onRequestMic = onRequestMic,
                     onOpenNoteEdit = { noteEditSheetOpen = true },
+                    onCreateVideo = onCreateVideo,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -320,7 +323,7 @@ private fun SparkEmptyContent(
                 modifier = Modifier.padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("STEP 1 OF 3 · YOUR IDEA", style = SectionLabelStyle)
+                Text("STEP 1 OF 2 · YOUR IDEA", style = SectionLabelStyle)
                 Text(
                     text = "What's the clip about?",
                     style = sans(26.sp, Cs.Ink, 32.sp, FontWeight.Medium)
@@ -509,18 +512,25 @@ private fun ContinueLastVideoBlock(
                         modifier = Modifier
                             .weight(1f)
                             .height(94.dp)
-                            .raisedCard(radius = 20.dp)
+                            .neumorphicSurface(
+                                role = KeyRole.STD,
+                                pressed = false,
+                                radius = 18.dp,
+                                enabled = true,
+                                accentBarColor = if (dir.id == "shitpost") Cs.Amber else Cs.Mint
+                            )
+                            .clip(RoundedCornerShape(18.dp))
                             .clickable(role = Role.Button) {
                                 vm.selectFollowupDirection(dir.id)
                             }
-                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                            .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp)
                             .testTag("cs_continue_dir_${dir.id}"),
-                        verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterVertically)
+                        verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically)
                     ) {
                         Text(dir.theme, style = SectionLabelStyle, maxLines = 1)
                         Text(
                             text = dir.words,
-                            style = sans(15.sp, Cs.Ink, 20.sp, FontWeight.Medium),
+                            style = sans(14.5.sp, Cs.Ink, 19.sp, FontWeight.Medium),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -532,19 +542,26 @@ private fun ContinueLastVideoBlock(
                         modifier = Modifier
                             .weight(1f)
                             .height(94.dp)
-                            .raisedCard(radius = 20.dp)
+                            .neumorphicSurface(
+                                role = KeyRole.STD,
+                                pressed = false,
+                                radius = 18.dp,
+                                enabled = true,
+                                accentBarColor = if (id == "shitpost") Cs.Amber else Cs.Mint
+                            )
+                            .clip(RoundedCornerShape(18.dp))
                             .clickable(role = Role.Button) {
                                 vm.openContinueSheet(video)
                                 vm.selectFollowupDirection(id)
                             }
-                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                            .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp)
                             .testTag("cs_continue_dir_$id"),
-                        verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterVertically)
+                        verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically)
                     ) {
                         Text(theme, style = SectionLabelStyle, maxLines = 1)
                         Text(
                             text = if (state.isDraftingFollowup) "drafting…" else "draft $id angle",
-                            style = sans(15.sp, if (state.isDraftingFollowup) Cs.Muted else Cs.Ink, 20.sp, FontWeight.Medium),
+                            style = sans(14.5.sp, if (state.isDraftingFollowup) Cs.Muted else Cs.Ink, 19.sp, FontWeight.Medium),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -558,7 +575,13 @@ private fun ContinueLastVideoBlock(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = 10.dp, end = 10.dp, bottom = 6.dp)
-            .raisedCard(radius = 20.dp)
+            .neumorphicSurface(
+                role = KeyRole.STD,
+                pressed = false,
+                radius = 18.dp,
+                enabled = true
+            )
+            .clip(RoundedCornerShape(18.dp))
             .clickable(role = Role.Button) { vm.toggleDirectionsPanel(video) }
             .padding(12.dp)
             .testTag("cs_continue_card"),
@@ -657,6 +680,7 @@ private fun SparkOutlineContent(
     vm: DraftDeckViewModel,
     onRequestMic: (() -> Unit) -> Unit,
     onOpenNoteEdit: () -> Unit,
+    onCreateVideo: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val doc = state.document
@@ -820,8 +844,6 @@ private fun SparkOutlineContent(
                         beat = beat,
                         isRerolling = isRerolling,
                         isEditing = isEditing,
-                        shotPreviews = state.shotPreviews,
-                        inFlightShotIds = state.inFlightShotIds,
                         isWholeArcBusy = state.isBusy,
                         onStartEdit = { editingBeatIndex = i },
                         onSaveEdit = { updated ->
@@ -829,24 +851,19 @@ private fun SparkOutlineContent(
                             editingBeatIndex = null
                         },
                         onCancelEdit = { editingBeatIndex = null },
-                        onCycleShot = { shotIdx -> vm.cycleBeatShot(i, shotIdx) },
-                        onAddShot = { vm.addBeatBrollShot(i) },
                         onReroll = {
                             if (editingBeatIndex == i) editingBeatIndex = null
                             vm.rerollArcBeat(i)
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Cs.SunkenPanel)
-                            .border(
-                                width = 1.dp,
-                                color = when {
-                                    isEditing -> Cs.Amber
-                                    isRerolling -> Cs.Cobalt
-                                    else -> Color(0xFF26262E)
-                                },
-                                shape = RoundedCornerShape(16.dp)
+                            .sunkenPanel(radius = 16.dp)
+                            .then(
+                                when {
+                                    isEditing -> Modifier.border(1.5.dp, Cs.Amber, RoundedCornerShape(16.dp))
+                                    isRerolling -> Modifier.border(1.5.dp, Cs.Cobalt, RoundedCornerShape(16.dp))
+                                    else -> Modifier
+                                }
                             )
                     )
                 }
@@ -882,7 +899,15 @@ private fun SparkOutlineContent(
             }
         }
 
-        // Soft-Neumorphic Extruded 2-Key Dock: horizontal [Mic HOLD] + dark-slate [write the script ->]
+        // Streamlined 2-Key Dock: [Mic HOLD] to steer beats + [make the video ->] straight into Cut!
+        val beatsScriptText = remember(doc.arcBeats, doc.seedTranscript) {
+            if (doc.arcBeats.isNotEmpty()) {
+                doc.arcBeats.map { it.text.trim() }.filter { it.isNotEmpty() }.joinToString("\n\n")
+            } else {
+                doc.seedTranscript.trim()
+            }
+        }
+        val directToVideo = onCreateVideo != null
         CsDock(
             leading = {
                 CsVoiceDockKey(
@@ -895,18 +920,20 @@ private fun SparkOutlineContent(
                     modifier = Modifier.testTag("cs_hold_direction")
                 )
             },
-            primaryLabel = if (doc.candidates.isNotEmpty() && state.outlineChangedSinceScript) {
-                "rewrite script"
-            } else {
-                "write the script"
-            },
+            primaryLabel = if (directToVideo) "make the video" else "write the script",
             primaryTrailingIcon = Icons.AutoMirrored.Sharp.ArrowForward,
             primaryRole = KeyRole.COMMIT,
-            primaryEnabled = doc.seedTranscript.isNotBlank() && !state.isBusy && state.rerollingBeatIndices.isEmpty(),
-            primaryTag = "cs_write_script",
-            onPrimaryClick = vm::writeVideoScript,
+            primaryEnabled = beatsScriptText.isNotBlank() && !state.isBusy && state.rerollingBeatIndices.isEmpty(),
+            primaryTag = if (directToVideo) "cs_create_video" else "cs_write_script",
+            onPrimaryClick = {
+                if (onCreateVideo != null) {
+                    onCreateVideo(beatsScriptText)
+                } else {
+                    vm.writeVideoScript()
+                }
+            },
             isBusy = state.isBusy,
-            busyLabel = state.busyLabel ?: "writing 3 versions…"
+            busyLabel = state.busyLabel ?: "outlining beats…"
         )
     }
 }
@@ -917,196 +944,131 @@ private fun OutlineBeatRow(
     beat: ArcBeat,
     isRerolling: Boolean,
     isEditing: Boolean,
-    shotPreviews: Map<String, String>,
-    inFlightShotIds: Set<String>,
     isWholeArcBusy: Boolean,
     onStartEdit: () -> Unit,
     onSaveEdit: (String) -> Unit,
     onCancelEdit: () -> Unit,
-    onCycleShot: (Int) -> Unit,
-    onAddShot: () -> Unit,
     onReroll: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val beatInteractive = !isWholeArcBusy && !isRerolling
-    Row(
+    Column(
         modifier = modifier
-            .padding(start = 14.dp, top = 10.dp, end = 8.dp, bottom = 10.dp)
+            .padding(start = 14.dp, top = 12.dp, end = 12.dp, bottom = 14.dp)
             .testTag("cs_arc_beat_$index"),
-        verticalAlignment = Alignment.Top,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Column(
-            modifier = Modifier.width(56.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+        // Enlarged beat name header (zero tiny pen icon, zero clipped sidebar, single calm rewrite key
+        // that ONLY sparkles while THIS tapped beat is actively rewriting!).
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text(beat.label, style = mono(11.sp, Cs.Ink, FontWeight.SemiBold), maxLines = 1)
+            Text(
+                text = beat.label,
+                style = ndot(16.sp, Cs.White),
+                maxLines = 1,
+                softWrap = false
+            )
             Text(
                 text = beat.window.ifBlank { "${beat.startSec}–${beat.endSec}s" },
-                style = mono(10.5.sp, Cs.Muted),
-                maxLines = 1
+                style = mono(11.5.sp, Cs.Muted),
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier.weight(1f)
             )
-            if (!isEditing && !isRerolling) {
-                Row(
-                    modifier = Modifier
-                        .padding(top = 2.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Cs.Track)
-                        .clickable(enabled = beatInteractive, role = Role.Button, onClick = onStartEdit)
-                        .padding(horizontal = 6.dp, vertical = 4.dp)
-                        .testTag("cs_edit_beat_$index"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Sharp.Edit,
-                        contentDescription = "Edit beat ${index + 1}",
-                        tint = Cs.InkSub,
-                        modifier = Modifier.size(12.dp)
+            // Only sparkle when actively tapped/rerolling THIS beat; calm static icon otherwise!
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .neumorphicSurface(
+                        role = if (isRerolling) KeyRole.ACTIVE else KeyRole.STD,
+                        pressed = false,
+                        radius = 11.dp,
+                        enabled = beatInteractive || isRerolling
                     )
-                    Text("edit", style = mono(10.sp, Cs.InkSub), maxLines = 1)
-                }
-            }
-        }
-
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (isEditing) {
-                val fieldState = rememberTextFieldState(initialText = beat.text)
-                BasicTextField(
-                    state = fieldState,
-                    textStyle = sans(15.5.sp, Cs.White, 22.sp),
-                    cursorBrush = SolidColor(Cs.White),
-                    lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 2, maxHeightInLines = 6),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Cs.Body)
-                        .border(1.dp, Cs.Amber, RoundedCornerShape(10.dp))
-                        .padding(horizontal = 10.dp, vertical = 8.dp)
-                        .testTag("cs_beat_editor_$index")
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CsKeyLabel(
-                        label = "save",
-                        onClick = { onSaveEdit(fieldState.text.toString()) },
-                        role = KeyRole.ACTIVE,
-                        radius = 10.dp,
-                        size = 12.sp,
-                        weight = FontWeight.SemiBold,
-                        enabled = fieldState.text.toString().isNotBlank(),
-                        modifier = Modifier
-                            .height(38.dp)
-                            .testTag("cs_beat_save_$index")
-                    )
-                    CsKeyLabel(
-                        label = "clear",
-                        onClick = { fieldState.setTextAndPlaceCursorAtEnd("") },
-                        role = KeyRole.STD,
-                        radius = 10.dp,
-                        size = 12.sp,
-                        modifier = Modifier
-                            .height(38.dp)
-                            .testTag("cs_beat_clear_$index")
-                    )
-                    CsKeyLabel(
-                        label = "cancel",
-                        onClick = onCancelEdit,
-                        role = KeyRole.STD,
-                        radius = 10.dp,
-                        size = 12.sp,
-                        modifier = Modifier
-                            .height(38.dp)
-                            .testTag("cs_beat_cancel_$index")
-                    )
-                }
-            } else {
-                Text(
-                    text = if (isRerolling) "rewriting ${beat.label.lowercase()}…" else beat.text,
-                    style = sans(15.5.sp, if (isRerolling) Cs.Cobalt else Cs.Ink, 22.sp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(enabled = beatInteractive, role = Role.Button, onClick = onStartEdit)
-                        .testTag("cs_beat_text_$index")
-                )
-            }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .clickable(enabled = beatInteractive, role = Role.Button, onClick = onReroll)
+                    .testTag("cs_reroll_beat_$index"),
+                contentAlignment = Alignment.Center
             ) {
-                beat.shots.forEachIndexed { sIdx, shot ->
-                    ShotThumbnailKey(
-                        shot = shot,
-                        previewPath = shotPreviews[shot.id],
-                        isLoading = shot.id in inFlightShotIds,
-                        onClick = { if (beatInteractive) onCycleShot(sIdx) },
-                        modifier = Modifier.testTag("cs_shot_${index}_$sIdx")
+                if (isRerolling) {
+                    ShimmerSparkleIcon(
+                        contentDescription = "Rewriting beat ${index + 1}",
+                        enabled = true,
+                        size = 22.dp,
+                        phaseOffsetDeg = index * 75f
                     )
-                }
-
-                // Dashed 30x42 "+" key that adds a b-roll shot
-                Box(
-                    modifier = Modifier
-                        .width(30.dp)
-                        .height(42.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .drawBehind {
-                            drawRoundRect(
-                                color = Cs.Dim,
-                                cornerRadius = CornerRadius(6.dp.toPx(), 6.dp.toPx()),
-                                style = Stroke(
-                                    width = 1.dp.toPx(),
-                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 5f), 0f)
-                                )
-                            )
-                        }
-                        .clickable(enabled = beatInteractive, role = Role.Button, onClick = onAddShot)
-                        .testTag("cs_add_shot_$index"),
-                    contentAlignment = Alignment.Center
-                ) {
+                } else {
                     Icon(
-                        imageVector = Icons.Sharp.Add,
-                        contentDescription = "Add b-roll shot",
-                        tint = Cs.Muted,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-
-                if (beat.shotSummaryLabel.isNotBlank()) {
-                    Text(
-                        text = beat.shotSummaryLabel,
-                        style = mono(11.sp, Cs.Muted),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .weight(1f, fill = false)
-                            .padding(start = 4.dp)
+                        imageVector = Icons.Outlined.AutoAwesome,
+                        contentDescription = "Rewrite beat ${index + 1}",
+                        tint = if (beatInteractive) Cs.InkSub else Cs.Dim,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
         }
 
-        // Per-beat non-blocking sparkle rewrite: rewrites THIS entire beat (text + shots) while other beats stay interactive.
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clickable(enabled = beatInteractive, role = Role.Button, onClick = onReroll)
-                .testTag("cs_reroll_beat_$index"),
-            contentAlignment = Alignment.Center
-        ) {
-            if (isRerolling) {
-                ThinkingOrbSolving(size = 28.dp, tint = Cs.White)
-            } else {
-                ShimmerSparkleIcon(
-                    contentDescription = "Rewrite beat ${index + 1}",
-                    enabled = beatInteractive,
-                    size = 24.dp,
-                    phaseOffsetDeg = index * 75f
+        if (isEditing) {
+            val fieldState = rememberTextFieldState(initialText = beat.text)
+            BasicTextField(
+                state = fieldState,
+                textStyle = sans(16.sp, Cs.White, 23.sp),
+                cursorBrush = SolidColor(Cs.White),
+                lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 2, maxHeightInLines = 6),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Cs.Body)
+                    .border(1.dp, Cs.Amber, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .testTag("cs_beat_editor_$index")
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CsKeyLabel(
+                    label = "save",
+                    onClick = { onSaveEdit(fieldState.text.toString()) },
+                    role = KeyRole.ACTIVE,
+                    radius = 10.dp,
+                    size = 12.sp,
+                    weight = FontWeight.SemiBold,
+                    enabled = fieldState.text.toString().isNotBlank(),
+                    modifier = Modifier
+                        .height(38.dp)
+                        .testTag("cs_beat_save_$index")
+                )
+                CsKeyLabel(
+                    label = "clear",
+                    onClick = { fieldState.setTextAndPlaceCursorAtEnd("") },
+                    role = KeyRole.STD,
+                    radius = 10.dp,
+                    size = 12.sp,
+                    modifier = Modifier
+                        .height(38.dp)
+                        .testTag("cs_beat_clear_$index")
+                )
+                CsKeyLabel(
+                    label = "cancel",
+                    onClick = onCancelEdit,
+                    role = KeyRole.STD,
+                    radius = 10.dp,
+                    size = 12.sp,
+                    modifier = Modifier
+                        .height(38.dp)
+                        .testTag("cs_beat_cancel_$index")
                 )
             }
+        } else {
+            Text(
+                text = if (isRerolling) "Rewriting ${beat.label.lowercase()}…" else beat.text,
+                style = sans(16.sp, if (isRerolling) Cs.Cobalt else Cs.Ink, 23.sp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = beatInteractive, role = Role.Button, onClick = onStartEdit)
+                    .testTag("cs_beat_text_$index")
+            )
         }
     }
 }

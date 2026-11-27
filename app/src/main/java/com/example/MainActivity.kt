@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.PersistableBundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -167,6 +168,13 @@ fun AircheckApp(
     }
 
     AircheckTheme(channel = studioState.settings.brandChannel) {
+        // Never allow system Back to exit Aircheck while inside Settings, Overlays, or Clip Review.
+        BackHandler(enabled = showNewsroomStudioModal) { showNewsroomStudioModal = false }
+        BackHandler(enabled = !showNewsroomStudioModal && showSettingsModal) { showSettingsModal = false }
+        BackHandler(enabled = !showNewsroomStudioModal && !showSettingsModal && !activeReviewClipId.isNullOrBlank()) {
+            activeReviewClipId = null
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -198,7 +206,8 @@ fun AircheckApp(
                             draftViewModel.probeRigHealth()
                         },
                         onOpenNewsroomStudio = {
-                            showNewsroomStudioModal = true
+                            showSettingsModal = false
+                            clipStudioScreen = ClipStudioScreen.NEWSROOM
                         },
                         onLoadActivity = { studioViewModel.loadActivityLog() },
                         onLoadStudioOptions = { refresh -> studioViewModel.loadStudioRigOptions(refresh) },
@@ -208,6 +217,8 @@ fun AircheckApp(
                         onSelectHeygenEngine = studioViewModel::setHeygenEngine,
                         onSelectHeygenResolution = studioViewModel::setHeygenResolution,
                         onSaveHeygenMotionPrompt = studioViewModel::setHeygenMotionPrompt,
+                        onShowToast = studioViewModel::showToast,
+                        onDismissToast = studioViewModel::dismissToast,
                         onDeviceModels = {
                             val appCtx = androidx.compose.ui.platform.LocalContext.current.applicationContext
                             val container = (appCtx as AircheckApplication).container

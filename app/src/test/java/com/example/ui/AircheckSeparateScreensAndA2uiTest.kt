@@ -549,41 +549,47 @@ class AircheckSeparateScreensAndA2uiTest {
         val studioVm = checkNotNull(studioVmRef)
         val initialCount = runBlocking { app.container.localRepo.newsroomLooksOnce().size }
 
+        // Tab 2 (`Look`) hosts look presets, blur/brightness rulers, and lighting controls
+        onNodeWithTag("cs_newsroom_tab_2").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("cs_look_new").fetchSemanticsNodes().isNotEmpty()
+        }
+
         onNodeWithTag("cs_look_new").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.newsroomLooksOnce().size } == initialCount + 1
         }
 
-        // Duplicate look from header icon key
-        onNodeWithTag("cs_look_duplicate").performClick()
+        // Duplicate look from preset header key
+        onNodeWithTag("cs_look_duplicate").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.newsroomLooksOnce().size } == initialCount + 2
         }
 
-        // Adjust v5 BLUR (±5%) + BRIGHTNESS (±0.2 EV) + 3-way LIGHT (`warm`)
+        // Adjust BLUR (±5%) + BRIGHTNESS (±0.2 EV) + 3-way LIGHT (`warm`)
         onNodeWithTag("cs_scrub_blur_inc").performScrollTo().performClick()
         onNodeWithTag("cs_scrub_blur_inc").performClick()
         onNodeWithTag("cs_scrub_ev_inc").performScrollTo().performClick()
         onNodeWithTag("cs_light_warm").performScrollTo().performClick()
 
-        // Switch to `cards` tab and verify honest empty cards summary + builder button
-        onNodeWithTag("cs_newsroom_tab_2").performClick()
+        // Switch to `Overlays` tab (`cs_newsroom_tab_1`) and verify custom overlay creator key
+        onNodeWithTag("cs_newsroom_tab_1").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_open_overlay_builder").fetchSemanticsNodes().isNotEmpty()
+            onAllNodesWithTag("cs_new_overlay_toggle").fetchSemanticsNodes().isNotEmpty()
         }
-        onNodeWithText("0 cards attached").assertIsDisplayed()
 
-        // Primary dock key "use this look" saves edits, sets default in Room, posts toast, and navigates back
+        // Primary dock key saves edits, sets default in Room, posts toast, and navigates back
         onNodeWithTag("cs_use_look").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             val def = runBlocking { app.container.localRepo.getDefaultNewsroomLook() }
             returnedToCut && def != null && def.blurPercent == 10 && def.brightnessEv == 0.2 &&
                 def.light == com.example.data.NewsroomLook.LIGHT_WARM &&
-                studioVm.uiState.value.toastMessage == "look applied · render to see it"
+                studioVm.uiState.value.toastMessage?.contains("Overlays saved") == true
         }
     }
 
@@ -658,22 +664,21 @@ class AircheckSeparateScreensAndA2uiTest {
             studioVm.uiState.value.corePipelineSession.clauses.isNotEmpty()
         }
 
-        // Switch to v5 `title` tab (`cs_newsroom_tab_1`)
-        onNodeWithTag("cs_newsroom_tab_1").performClick()
+        // Tab 0 (`Labels`) opens directly with lower-third style chips & AI title polish
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             onAllNodesWithTag("cs_tag_breaking").fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Cycle TAG ABOVE TITLE pills (`explainer`, `none`, `developing`) and assert real Room persistence
-        onNodeWithTag("cs_tag_explainer").performScrollTo().performClick()
+        // Cycle TAG ABOVE TITLE pills (`exclusive`, `clean`, `developing`) and assert real Room persistence
+        onNodeWithTag("cs_tag_exclusive").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
                 ?.renderOptions?.breakingStyle == com.example.data.BreakingNewsStyle.EXCLUSIVE
         }
 
-        onNodeWithTag("cs_tag_none").performScrollTo().performClick()
+        onNodeWithTag("cs_tag_clean").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.getLatestCorePipelineSession() }

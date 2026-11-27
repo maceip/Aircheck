@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,13 +32,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.sharp.Notes
 import androidx.compose.material.icons.automirrored.sharp.Undo
 import androidx.compose.material.icons.sharp.Add
+import androidx.compose.material.icons.sharp.CheckCircle
+import androidx.compose.material.icons.sharp.ChevronRight
 import androidx.compose.material.icons.sharp.ClosedCaption
 import androidx.compose.material.icons.sharp.ContentCut
 import androidx.compose.material.icons.sharp.CropLandscape
 import androidx.compose.material.icons.sharp.CropPortrait
 import androidx.compose.material.icons.sharp.Edit
+import androidx.compose.material.icons.sharp.Layers
 import androidx.compose.material.icons.sharp.Movie
-import androidx.compose.material.icons.sharp.OpenInFull
 import androidx.compose.material.icons.sharp.Pause
 import androidx.compose.material.icons.sharp.Person
 import androidx.compose.material.icons.sharp.PlayArrow
@@ -46,7 +49,7 @@ import androidx.compose.material.icons.sharp.Settings
 import androidx.compose.material.icons.sharp.Share
 import androidx.compose.material.icons.sharp.Sync
 import androidx.compose.material.icons.sharp.SyncProblem
-import androidx.compose.material.icons.sharp.Tune
+import androidx.compose.material.icons.sharp.ZoomIn
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -61,6 +64,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -88,27 +92,28 @@ import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import com.example.R
 import com.example.data.AlignedWord
-import java.io.File
 import com.example.data.BrollSegmentMode
 import com.example.data.ClipRecord
+import com.example.data.ClipTransitionType
 import com.example.data.CoreRenderOptions
 import com.example.data.CoreStoryClause
 import com.example.data.ExportState
 import com.example.ui.StudioUiState
 import com.example.ui.StudioViewModel
+import java.io.File
 import kotlinx.coroutines.delay
 
 /**
- * 03 CUT (Clip Studio v5):
- * - 56dp top bar: `01 · 02 · 03 CUT`, amber Ndot 11sp `"N LINE(S) NEED RE-VOICE"` badge when dirty, `undo`, `settings`.
- * - 218dp sunken `#000` ExoPlayer video monitor (`m:ss / m:ss` top-left, centered 64dp circular Play/Pause,
- *   live caption bottom, 3dp `#D71921` progress bar).
- * - 44dp horizontal tool pill row (`captions`, `trim pauses`, `punch-in`, `9:16`/`16:9`, `look`).
- * - Sunken 2-way `words` · `b-roll` mode switch.
- * - Tap-to-expand transcript clauses (seeks & expands `edit words` + `b-roll here` / `back to face`;
- *   amber 2dp left edge + `"edited · voice not synced"` when dirty; `B-ROLL` tag when cutaway).
- * - Single sequential primary dock key (`voice the script` -> amber `re-voice N edited line(s)` ->
- *   `render talking head` -> `render the video` -> `export & share` -> `share again`).
+ * 03 CUT:
+ * - 56dp top bar (`01 · 02 · 03 CUT`, New, Undo, Settings).
+ * - Compact 4-stage pipeline progress strip (`1.Voice · 2.Head · 3.Cut · 4.Export`) + explicit
+ *   re-voice / re-render status banner whenever edits require a refresh.
+ * - 218dp sunken `#000` ExoPlayer monitor that visibly reshapes between `9:16` portrait and
+ *   `16:9` widescreen frames and previews `Auto Zoom` & `Captions` live.
+ * - Clean dark-graphite 2-row controls deck (zero gray OP-1 bar, zero cryptic LEDs):
+ *   - Row 1 toggles: `Captions`, `Trim` (with real detected silence gap count), `Auto Zoom`, `9:16` / `16:9`.
+ *   - Row 2 studio editors: `Overlays` (Newsroom Overlays Editor) and `B-Roll & Cuts` (B-Roll & Transition Studio).
+ * - Sunken `words` · `b-roll` workspace + single sequential primary pipeline dock key.
  */
 @Composable
 fun CutScreen(
@@ -117,6 +122,7 @@ fun CutScreen(
     onOpenSettings: () -> Unit,
     onOpenNewsroom: () -> Unit,
     modifier: Modifier = Modifier,
+    onOpenBrollStudio: () -> Unit = {},
     onNavigate: (Int) -> Unit = {},
     onNewIdea: () -> Unit = { onNavigate(1) },
     renderGlobalOverlays: Boolean = true
@@ -204,7 +210,7 @@ fun CutScreen(
     ) {
         Column(Modifier.fillMaxSize()) {
             CsTopBar(
-                activeStage = 3,
+                activeStage = 2,
                 onNavigate = onNavigate,
                 leds = com.example.ui.pipelineLedStateFor(state)
             ) {
@@ -280,7 +286,68 @@ fun CutScreen(
                 onDismissNotice = vm::dismissNotice
             )
 
-            // 218dp sunken #000 ExoPlayer TextureView video monitor + Stage 1 voice waveform preview
+            // Real signature check including overlay content, B-roll media, and transitions
+            val signature = session.cutSignature(defaultLook, state.savedOverlays)
+            val cutCurrent = session.hasFinalVideo && session.lastCutSignature == signature
+
+            // Pipeline progress strip + explicit stale/re-render guidance
+            CutPipelineProgressStrip(
+                hasTtsAudio = session.hasTtsAudio,
+                hasTalkingHead = session.hasTalkingHead,
+                hasFinalVideo = session.hasFinalVideo,
+                cutCurrent = cutCurrent,
+                unsyncedCount = unsynced.size,
+                exported = state.exportState == ExportState.EXPORTED && cutCurrent
+            )
+
+            val dirtyReason: String? = when {
+                unsynced.isNotEmpty() -> {
+                    val unit = if (unsynced.size == 1) "line" else "lines"
+                    "${unsynced.size} $unit edited — tap re-voice below to sync voice & video"
+                }
+                session.hasFinalVideo && !cutCurrent -> {
+                    "Overlays, B-roll, or cut settings changed — tap render the video to apply"
+                }
+                session.hasTalkingHead && !session.hasFinalVideo -> {
+                    "Talking head ready — customize overlays or B-roll, then tap render the video"
+                }
+                else -> null
+            }
+            if (dirtyReason != null) {
+                val isWarning = unsynced.isNotEmpty() || (session.hasFinalVideo && !cutCurrent)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 10.dp, end = 10.dp, bottom = 6.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isWarning) Cs.Amber.copy(alpha = 0.14f) else Cs.Raised)
+                        .border(
+                            1.dp,
+                            if (isWarning) Cs.Amber.copy(alpha = 0.45f) else Cs.Hairline,
+                            RoundedCornerShape(10.dp)
+                        )
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("cs_cut_dirty_banner"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isWarning) Icons.Sharp.SyncProblem else Icons.Sharp.Movie,
+                        contentDescription = null,
+                        tint = if (isWarning) Cs.Amber else Cs.Ink,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = dirtyReason,
+                        style = sans(12.sp, if (isWarning) Cs.Amber else Cs.Ink, 16.sp, FontWeight.Medium),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            // 206dp sunken #000 ExoPlayer monitor that visibly reshapes for 9:16 vs 16:9
             VideoMonitorPanel(
                 player = player,
                 sourceUri = sourceUri,
@@ -290,6 +357,7 @@ fun CutScreen(
                 isPlaying = isPlaying,
                 positionMs = positionMs,
                 durationMs = effectiveDurationMs,
+                aspect = opts.aspect,
                 punchIn = opts.punchIn,
                 liveCaption = if (opts.captions && session.clauses.isNotEmpty()) {
                     session.clauses.getOrNull(activeClause)?.spokenText.orEmpty()
@@ -302,77 +370,102 @@ fun CutScreen(
                 }
             )
 
-            // Machined brushed-silver OP-1 hardware console bar for direct video-modifying controls:
-            // recessed black OLED icon display + sculpted 3D silver pill keycap + functional colored LED below.
+            // Clean dark-graphite 2-row Cut Controls Deck (every button backed by real persisted state)
             val isVertical = opts.aspect == CoreRenderOptions.ASPECT_VERTICAL
+            val gapCount = if (session.silenceGapsJobId == session.talkingHeadJobId) session.silenceGaps.size else 0
+            val activeOverlayCount = (if (opts.showLowerThird) 1 else 0) +
+                (if (opts.showBrandBug && opts.cornerBugText.isNotBlank()) 1 else 0) +
+                session.selectedOverlayIds.size
+            val brollCutawayCount = session.clauses.count { it.segmentMode == BrollSegmentMode.BROLL_CUTAWAY }
             val lookAccentColor = remember(defaultLook?.accentHex) { parseAccentHex(defaultLook?.accentHex) }
-            VideoEditConsoleBar(
-                moduleCount = 5,
-                modifier = Modifier.padding(start = 10.dp, top = 10.dp, end = 10.dp, bottom = 2.dp)
-            ) { moduleW ->
-                VideoEditConsoleModule(
-                    label = "captions",
-                    contentDesc = "Toggle captions",
-                    icon = Icons.Sharp.ClosedCaption,
-                    active = opts.captions,
-                    ledColor = HwLed.Blue,
-                    width = moduleW,
-                    onClick = { vm.setCoreCaptions(!opts.captions) },
-                    modifier = Modifier.testTag("cs_cut_captions")
-                )
-                VideoEditConsoleModule(
-                    label = "trim",
-                    contentDesc = "Trim pauses",
-                    icon = Icons.Sharp.ContentCut,
-                    active = opts.stripSilence,
-                    ledColor = HwLed.Orange,
-                    width = moduleW,
-                    onClick = { vm.setCoreStripSilence(!opts.stripSilence) },
-                    modifier = Modifier.testTag("cs_cut_strip_silence")
-                )
-                VideoEditConsoleModule(
-                    label = "punch-in",
-                    contentDesc = "Toggle punch-in zoom",
-                    icon = Icons.Sharp.OpenInFull,
-                    active = opts.punchIn,
-                    ledColor = HwLed.Green,
-                    width = moduleW,
-                    onClick = { vm.setCorePunchIn(!opts.punchIn) },
-                    modifier = Modifier.testTag("cs_cut_punch_in")
-                )
-                VideoEditConsoleModule(
-                    label = if (isVertical) "9:16" else "16:9",
-                    contentDesc = if (isVertical) "Aspect 9 by 16" else "Aspect 16 by 9",
-                    icon = if (isVertical) Icons.Sharp.CropPortrait else Icons.Sharp.CropLandscape,
-                    active = true,
-                    ledColor = if (isVertical) HwLed.Orange else HwLed.Blue,
-                    width = moduleW,
-                    onClick = {
-                        vm.setCoreAspect(
-                            if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL
-                        )
-                    },
-                    modifier = Modifier.testTag("cs_cut_aspect")
-                )
-                VideoEditConsoleModule(
-                    label = "look",
-                    contentDesc = "Edit video look",
-                    icon = Icons.Sharp.Tune,
-                    active = true,
-                    ledColor = lookAccentColor,
-                    width = moduleW,
-                    onClick = onOpenNewsroom,
-                    modifier = Modifier.testTag("cs_cut_look")
-                )
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 10.dp, top = 8.dp, end = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    CutToggleKey(
+                        label = "Captions",
+                        icon = Icons.Sharp.ClosedCaption,
+                        active = opts.captions,
+                        accent = HwLed.Blue,
+                        onClick = { vm.setCoreCaptions(!opts.captions) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_captions")
+                    )
+                    CutToggleKey(
+                        label = if (gapCount > 0) "Trim ($gapCount)" else "Trim",
+                        icon = Icons.Sharp.ContentCut,
+                        active = opts.stripSilence,
+                        accent = HwLed.Orange,
+                        onClick = { vm.setCoreStripSilence(!opts.stripSilence) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_strip_silence")
+                    )
+                    CutToggleKey(
+                        label = "Auto Zoom",
+                        icon = Icons.Sharp.ZoomIn,
+                        active = opts.punchIn,
+                        accent = HwLed.Green,
+                        onClick = { vm.setCorePunchIn(!opts.punchIn) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_punch_in")
+                    )
+                    CutToggleKey(
+                        label = if (isVertical) "9:16" else "16:9",
+                        icon = if (isVertical) Icons.Sharp.CropPortrait else Icons.Sharp.CropLandscape,
+                        active = true,
+                        accent = if (isVertical) HwLed.Orange else HwLed.Blue,
+                        onClick = {
+                            vm.setCoreAspect(
+                                if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL
+                            )
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_aspect")
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    CutStudioActionKey(
+                        label = if (activeOverlayCount > 0) "Overlays ($activeOverlayCount)" else "Overlays",
+                        icon = Icons.Sharp.Layers,
+                        accent = lookAccentColor,
+                        onClick = onOpenNewsroom,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_look")
+                    )
+                    CutStudioActionKey(
+                        label = if (brollCutawayCount > 0) "B-Roll ($brollCutawayCount)" else "B-Roll & Cuts",
+                        icon = Icons.Sharp.Movie,
+                        accent = HwLed.Green,
+                        onClick = onOpenBrollStudio,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_broll_studio")
+                    )
+                }
             }
 
-            // Unified Sunken #000 Transcript / B-roll Workspace with minimal flush flat header
-            // (`words` | `b-roll`) — keeps the bright silver console deck above as the sole silver focal strip.
+            // Unified Sunken #000 Transcript / B-roll Workspace
             Column(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(start = 10.dp, top = 10.dp, end = 10.dp)
+                    .padding(start = 10.dp, top = 8.dp, end = 10.dp)
                     .sunkenPanel(radius = 18.dp)
             ) {
                 Row(
@@ -422,7 +515,7 @@ fun CutScreen(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "No story loaded yet. Go to 02 SCRIPT and tap make the video.",
+                                text = "No story loaded yet. Go to 01 SPARK and tap make the video.",
                                 style = sans(15.sp, Cs.Muted, 21.sp)
                             )
                         }
@@ -440,6 +533,7 @@ fun CutScreen(
                         BrollModePane(
                             clauses = session.clauses,
                             vm = vm,
+                            onOpenBrollStudio = onOpenBrollStudio,
                             onSeekLocal = { ms -> positionMs = ms }
                         )
                     }
@@ -447,8 +541,6 @@ fun CutScreen(
             }
 
             // Single sequential primary pipeline dock key
-            val signature = session.cutSignature(defaultLook)
-            val cutCurrent = session.hasFinalVideo && session.lastCutSignature == signature
             val isCutBusy = state.isCoreStageBusy || state.exportState == ExportState.EXPORTING
             val busyLabel = when {
                 state.exportState == ExportState.EXPORTING -> "exporting…"
@@ -599,6 +691,160 @@ private fun resolveCutPrimarySpec(
 }
 
 @Composable
+private fun CutPipelineProgressStrip(
+    hasTtsAudio: Boolean,
+    hasTalkingHead: Boolean,
+    hasFinalVideo: Boolean,
+    cutCurrent: Boolean,
+    unsyncedCount: Int,
+    exported: Boolean
+) {
+    val steps = listOf(
+        Triple("1.Voice", hasTtsAudio && unsyncedCount == 0, unsyncedCount > 0),
+        Triple("2.Head", hasTalkingHead && unsyncedCount == 0, hasTalkingHead && unsyncedCount > 0),
+        Triple("3.Cut", cutCurrent, hasFinalVideo && !cutCurrent),
+        Triple("4.Export", exported, false)
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 10.dp, end = 10.dp, bottom = 6.dp)
+            .sunkenPanel(radius = 12.dp, fill = Cs.SunkenTrack)
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .testTag("cs_cut_pipeline_strip"),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        steps.forEach { (label, done, stale) ->
+            val tint = when {
+                stale -> Cs.Amber
+                done -> HwLed.Green
+                else -> Cs.Dim
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = when {
+                        stale -> Icons.Sharp.SyncProblem
+                        done -> Icons.Sharp.CheckCircle
+                        else -> Icons.Sharp.ChevronRight
+                    },
+                    contentDescription = null,
+                    tint = tint,
+                    modifier = Modifier.size(13.dp)
+                )
+                Text(
+                    text = label,
+                    style = mono(10.5.sp, tint, if (done || stale) FontWeight.SemiBold else FontWeight.Normal),
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CutToggleKey(
+    label: String,
+    icon: ImageVector,
+    active: Boolean,
+    accent: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val role = if (active) KeyRole.ACTIVE else KeyRole.STD
+    val tint = if (active) Cs.White else Cs.Muted
+    Column(
+        modifier = modifier
+            .height(52.dp)
+            .neumorphicSurface(
+                role = role,
+                pressed = false,
+                radius = 13.dp,
+                enabled = true,
+                accentBarColor = if (active) accent else null
+            )
+            .clip(RoundedCornerShape(13.dp))
+            .clickable(role = Role.Switch, onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterVertically)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            if (active) {
+                CsLedDot(color = accent, size = 5.dp)
+            }
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = if (active) Cs.White else Cs.Muted,
+                modifier = Modifier.size(17.dp)
+            )
+        }
+        Text(
+            text = label,
+            style = mono(10.5.sp, tint, if (active) FontWeight.SemiBold else FontWeight.Normal),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun CutStudioActionKey(
+    label: String,
+    icon: ImageVector,
+    accent: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .height(44.dp)
+            .neumorphicSurface(
+                role = KeyRole.STD,
+                pressed = false,
+                radius = 13.dp,
+                enabled = true,
+                accentBarColor = accent
+            )
+            .clip(RoundedCornerShape(13.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(start = 12.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(17.dp)
+        )
+        Text(
+            text = label,
+            style = mono(11.5.sp, Cs.Ink, FontWeight.SemiBold),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Icon(
+            imageVector = Icons.Sharp.ChevronRight,
+            contentDescription = null,
+            tint = Cs.Muted,
+            modifier = Modifier.size(16.dp)
+        )
+    }
+}
+
+@Composable
 private fun VideoMonitorPanel(
     player: androidx.media3.common.Player,
     sourceUri: Uri?,
@@ -608,6 +854,7 @@ private fun VideoMonitorPanel(
     isPlaying: Boolean,
     positionMs: Long,
     durationMs: Long,
+    aspect: String,
     punchIn: Boolean,
     liveCaption: String,
     onTogglePlay: () -> Unit
@@ -615,79 +862,125 @@ private fun VideoMonitorPanel(
     val progressFraction = remember(positionMs, durationMs) {
         if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
     }
+    val isVertical = aspect == CoreRenderOptions.ASPECT_VERTICAL
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 10.dp)
-            .height(218.dp)
+            .height(206.dp)
             .sunkenPanel(radius = 18.dp)
             .clickable(enabled = sourceUri != null, role = Role.Button, onClick = onTogglePlay)
             .testTag("cs_cut_monitor"),
         contentAlignment = Alignment.Center
     ) {
-        if (sourceUri != null && sourceHasVideo) {
-            val punchScale = if (punchIn) 1.06f else 1.0f
-            AndroidView(
-                factory = { ctx ->
-                    (LayoutInflater.from(ctx).inflate(R.layout.cut_texture_player_view, null) as PlayerView).apply {
-                        this.player = player
-                        useController = false
-                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        setKeepContentOnPlayerReset(false)
-                    }
-                },
-                update = { view ->
-                    if (view.player !== player) {
-                        view.player = player
-                    }
-                },
-                onRelease = { view ->
-                    view.player = null
-                },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = punchScale
-                        scaleY = punchScale
-                    }
-            )
-        } else if (sourceUri != null) {
-            // Stage 1 voice audio ready (before talking-head MP4): show optional presenter portrait
-            // backdrop + real 64-bar audio waveform so the monitor clearly shows voiced audio is ready.
-            if (anchorPhotoFile != null && anchorPhotoFile.isFile) {
-                AsyncImage(
-                    model = anchorPhotoFile,
-                    contentDescription = "Presenter photo preview",
-                    contentScale = ContentScale.Crop,
-                    alpha = 0.28f,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-            if (waveformPeaks.isNotEmpty()) {
-                Canvas(
+        // Aspect-accurate inner frame so switching 9:16 <-> 16:9 visibly reshapes the preview immediately.
+        val frameModifier = if (isVertical) {
+            Modifier
+                .padding(vertical = 8.dp)
+                .fillMaxHeight()
+                .aspectRatio(9f / 16f, matchHeightConstraintsFirst = true)
+        } else {
+            Modifier
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .fillMaxHeight()
+                .aspectRatio(16f / 9f, matchHeightConstraintsFirst = true)
+        }
+
+        Box(
+            modifier = frameModifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF0A0A0F))
+                .border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(8.dp))
+                .clipToBounds()
+                .testTag(if (isVertical) "cs_cut_frame_vertical" else "cs_cut_frame_horizontal"),
+            contentAlignment = Alignment.Center
+        ) {
+            if (sourceUri != null && sourceHasVideo) {
+                val punchScale = if (punchIn) 1.12f else 1.0f
+                AndroidView(
+                    factory = { ctx ->
+                        (LayoutInflater.from(ctx).inflate(R.layout.cut_texture_player_view, null) as PlayerView).apply {
+                            this.player = player
+                            useController = false
+                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                            setKeepContentOnPlayerReset(false)
+                        }
+                    },
+                    update = { view ->
+                        if (view.player !== player) {
+                            view.player = player
+                        }
+                    },
+                    onRelease = { view ->
+                        view.player = null
+                    },
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(84.dp)
-                        .padding(horizontal = 24.dp)
-                ) {
-                    val count = waveformPeaks.size
-                    val step = size.width / count.coerceAtLeast(1).toFloat()
-                    val strokeW = (step * 0.56f).coerceIn(2.dp.toPx(), 5.dp.toPx())
-                    val centerY = size.height / 2f
-                    waveformPeaks.forEachIndexed { idx, rawPeak ->
-                        val frac = idx.toFloat() / count.coerceAtLeast(1).toFloat()
-                        val barH = (size.height * (0.14f + 0.82f * rawPeak.coerceIn(0f, 1f)))
-                        val x = idx * step + step / 2f
-                        drawLine(
-                            color = if (frac <= progressFraction) Cs.Red else Color.White.copy(alpha = 0.34f),
-                            start = Offset(x, centerY - barH / 2f),
-                            end = Offset(x, centerY + barH / 2f),
-                            strokeWidth = strokeW,
-                            cap = StrokeCap.Round
-                        )
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = punchScale
+                            scaleY = punchScale
+                        }
+                )
+            } else if (sourceUri != null) {
+                if (anchorPhotoFile != null && anchorPhotoFile.isFile) {
+                    val punchScale = if (punchIn) 1.12f else 1.0f
+                    AsyncImage(
+                        model = anchorPhotoFile,
+                        contentDescription = "Presenter photo preview",
+                        contentScale = ContentScale.Crop,
+                        alpha = 0.32f,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = punchScale
+                                scaleY = punchScale
+                            }
+                    )
+                }
+                if (waveformPeaks.isNotEmpty()) {
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(72.dp)
+                            .padding(horizontal = 12.dp)
+                    ) {
+                        val count = waveformPeaks.size
+                        val step = size.width / count.coerceAtLeast(1).toFloat()
+                        val strokeW = (step * 0.56f).coerceIn(1.5.dp.toPx(), 4.dp.toPx())
+                        val centerY = size.height / 2f
+                        waveformPeaks.forEachIndexed { idx, rawPeak ->
+                            val frac = idx.toFloat() / count.coerceAtLeast(1).toFloat()
+                            val barH = (size.height * (0.14f + 0.82f * rawPeak.coerceIn(0f, 1f)))
+                            val x = idx * step + step / 2f
+                            drawLine(
+                                color = if (frac <= progressFraction) Cs.Red else Color.White.copy(alpha = 0.34f),
+                                start = Offset(x, centerY - barH / 2f),
+                                end = Offset(x, centerY + barH / 2f),
+                                strokeWidth = strokeW,
+                                cap = StrokeCap.Round
+                            )
+                        }
                     }
                 }
+            }
+
+            // Live caption positioned cleanly inside the active aspect frame
+            if (liveCaption.isNotBlank()) {
+                Text(
+                    text = liveCaption,
+                    style = sans(12.5.sp, Cs.White, 17.sp, FontWeight.Medium),
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 8.dp, end = 8.dp, bottom = 10.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color.Black.copy(alpha = 0.62f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("cs_cut_live_caption")
+                )
             }
         }
 
@@ -698,29 +991,34 @@ private fun VideoMonitorPanel(
             maxLines = 1,
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 14.dp, top = 12.dp)
+                .padding(start = 14.dp, top = 10.dp)
                 .testTag("cs_cut_timecode")
         )
 
-        if (sourceUri != null && !sourceHasVideo) {
-            Text(
-                text = "VOICE READY",
-                style = mono(10.sp, HwLed.Green, FontWeight.Medium),
-                maxLines = 1,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(end = 14.dp, top = 12.dp)
-            )
+        // Top-right single status label (aspect + voice readiness)
+        val topRightLabel = buildString {
+            if (sourceUri != null && !sourceHasVideo) append("VOICE · ")
+            append(if (isVertical) "9:16" else "16:9")
+            if (punchIn) append(" · ZOOM")
         }
+        Text(
+            text = topRightLabel,
+            style = mono(10.sp, if (sourceUri != null && !sourceHasVideo) HwLed.Green else Cs.Muted, FontWeight.Medium),
+            maxLines = 1,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(end = 14.dp, top = 10.dp)
+                .testTag("cs_cut_monitor_mode")
+        )
 
-        // Centered 64dp circular Play/Pause button (auto-hides during active video playback so face stays clear)
+        // Centered 56dp circular Play/Pause button (auto-hides during active video playback so face stays clear)
         if (!isPlaying || !sourceHasVideo) {
             Box(
                 modifier = Modifier
-                    .size(64.dp)
+                    .size(56.dp)
                     .clip(CircleShape)
                     .background(Cs.Raised.copy(alpha = 0.88f))
-                    .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape)
+                    .border(1.dp, Color.White.copy(alpha = 0.12f), CircleShape)
                     .clickable(
                         enabled = sourceUri != null,
                         role = Role.Button,
@@ -733,31 +1031,16 @@ private fun VideoMonitorPanel(
                     imageVector = if (isPlaying) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
                     contentDescription = if (isPlaying) "Pause" else "Play",
                     tint = if (sourceUri != null) Cs.Ink else Cs.Dim,
-                    modifier = Modifier.size(36.dp)
+                    modifier = Modifier.size(32.dp)
                 )
             }
-        }
-
-        // Live caption at bottom (Geist 500 14/19, white)
-        if (liveCaption.isNotBlank()) {
-            Text(
-                text = liveCaption,
-                style = sans(14.sp, Cs.White, 19.sp, FontWeight.Medium),
-                textAlign = TextAlign.Center,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(start = 12.dp, end = 12.dp, bottom = 16.dp)
-                    .testTag("cs_cut_live_caption")
-            )
         }
 
         // 3dp progress bar (#D71921 over #2C2C32)
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(start = 18.dp, end = 18.dp, bottom = 6.dp)
+                .padding(start = 18.dp, end = 18.dp, bottom = 5.dp)
                 .fillMaxWidth()
                 .height(3.dp)
                 .clip(RoundedCornerShape(2.dp))
@@ -1078,6 +1361,7 @@ private fun InlineClauseWordsEditor(
 private fun BrollModePane(
     clauses: List<CoreStoryClause>,
     vm: StudioViewModel,
+    onOpenBrollStudio: () -> Unit,
     onSeekLocal: (Long) -> Unit
 ) {
     LazyColumn(
@@ -1087,8 +1371,42 @@ private fun BrollModePane(
             .testTag("cs_timeline"),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
+        item(key = "broll_studio_banner") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(HwLed.Green.copy(alpha = 0.12f))
+                    .border(1.dp, HwLed.Green.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                    .clickable(role = Role.Button, onClick = onOpenBrollStudio)
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .testTag("cs_open_broll_studio_inline"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Sharp.Movie,
+                    contentDescription = null,
+                    tint = HwLed.Green,
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(
+                    text = "Open B-Roll & Transition Studio",
+                    style = sans(13.5.sp, Cs.Ink, 18.sp, FontWeight.Medium),
+                    modifier = Modifier.weight(1f)
+                )
+                Icon(
+                    imageVector = Icons.Sharp.ChevronRight,
+                    contentDescription = null,
+                    tint = HwLed.Green,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+
         itemsIndexed(clauses, key = { _, c -> c.id }) { idx, clause ->
             val broll = clause.segmentMode == BrollSegmentMode.BROLL_CUTAWAY
+            val transition = ClipTransitionType.fromWire(clause.transitionType)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1109,13 +1427,24 @@ private fun BrollModePane(
                     maxLines = 1,
                     modifier = Modifier.width(40.dp)
                 )
-                Text(
-                    text = clause.spokenText,
-                    style = sans(14.sp, Cs.Ink, 19.sp),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text(
+                        text = clause.spokenText,
+                        style = sans(14.sp, Cs.Ink, 19.sp),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (idx > 0 && transition != ClipTransitionType.CUT) {
+                        Text(
+                            text = "Transition: ${transition.label} (${clause.transitionDurationMs}ms)",
+                            style = mono(10.5.sp, HwLed.Blue),
+                            maxLines = 1
+                        )
+                    }
+                }
                 VideoEditOledKey(
                     label = if (broll) "b-roll" else "face",
                     icon = if (broll) Icons.Sharp.Movie else Icons.Sharp.Person,

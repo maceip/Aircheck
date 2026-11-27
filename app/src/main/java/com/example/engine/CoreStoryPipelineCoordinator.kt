@@ -431,12 +431,20 @@ class CoreStoryPipelineCoordinator(
             val selectedHeygenRes = profileSettings?.heygenResolution?.takeIf { it.isNotBlank() }
             val selectedHeygenMotion = profileSettings?.heygenMotionPrompt?.takeIf { it.isNotBlank() }
 
+            val effectivePhotoSha = if (
+                selectedVideoBackend != "musetalk" && !selectedHeygenLookId.isNullOrBlank()
+            ) {
+                null
+            } else {
+                photoSha
+            }
+
             while (true) {
                 if (headJobId == null) {
                     headJobId = macRigGateway.enqueueMacRigRender(
                         rigBaseUrl = health.resolvedUrl,
                         project = cleanHeadProject,
-                        photoSha = photoSha,
+                        photoSha = effectivePhotoSha,
                         resolution = "1080P",
                         ratio = "9:16",
                         maxDurationSec = targetMaxSec,

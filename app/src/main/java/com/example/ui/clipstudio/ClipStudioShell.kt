@@ -1,12 +1,12 @@
 package com.example.ui.clipstudio
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,13 +15,14 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.draft.XAttachment
@@ -32,13 +33,15 @@ import com.example.ui.draft.DraftDeckUiState
 import com.example.ui.draft.DraftDeckViewModel
 import kotlinx.coroutines.flow.StateFlow
 
-/** Clip Studio v5 screens (`01 SPARK`, `02 SCRIPT`, `03 CUT`, and `Video look`). */
-enum class ClipStudioScreen { SPARK, SCRIPT, CUT, NEWSROOM }
+/** Clip Studio screens: `01 SPARK`, `02 SCRIPT`, `03 CUT`, `Newsroom Overlays`, `B-Roll & Transitions`. */
+enum class ClipStudioScreen { SPARK, SCRIPT, CUT, NEWSROOM, BROLL_STUDIO }
+
+private const val DOUBLE_BACK_EXIT_WINDOW_MS = 2_500L
 
 /**
- * Default Aircheck surface (Clip Studio v5): `01 SPARK` -> `02 SCRIPT` -> `03 CUT`, with
- * `Video look` reachable from `03 CUT` and System Settings / Voice Care / LLM Router reachable
- * via the top-bar settings key.
+ * Default Aircheck surface: `01 SPARK` -> `02 SCRIPT` -> `03 CUT`, with dedicated full-view
+ * `Newsroom Overlays` and `B-Roll & Transitions` studios reachable from `03 CUT`, real Back
+ * navigation history, and a double-back-to-exit guard on root `01 SPARK`.
  */
 @Composable
 fun ClipStudioShell(
@@ -82,40 +85,79 @@ fun ClipStudioShell(
         }
     }
 
-    // A freshly written script opens 02 SCRIPT once.
-    val doc = draftState.document
-    val scriptKey = if (doc.isVideoScript) doc.candidates.firstOrNull()?.globalSnapshots?.firstOrNull()?.hashCode() else null
-    var lastOpenedScript by rememberSaveable { mutableStateOf<Int?>(null) }
-    LaunchedEffect(scriptKey) {
-        if (scriptKey != null && scriptKey != lastOpenedScript) {
-            lastOpenedScript = scriptKey
-            if (screen == ClipStudioScreen.SPARK) onScreen(ClipStudioScreen.SCRIPT)
+    // Navigation history stack + double-back-to-exit guard so Back never accidentally dumps the user out.
+    var navHistory by remember { mutableStateOf<List<ClipStudioScreen>>(emptyList()) }
+    var lastRootBackAtMs by remember { mutableLongStateOf(0L) }
+
+    val navigateTo: (ClipStudioScreen) -> Unit = { target ->
+        if (target != screen) {
+            navHistory = (navHistory + screen).takeLast(12)
+            onScreen(target)
         }
     }
 
-    BackHandler(enabled = screen != ClipStudioScreen.SPARK) {
-        onScreen(
-            when (screen) {
-                ClipStudioScreen.NEWSROOM -> ClipStudioScreen.CUT
-                ClipStudioScreen.CUT -> ClipStudioScreen.SCRIPT
-                else -> ClipStudioScreen.SPARK
+    val hasActiveIdea = draftState.document.seedTranscript.isNotBlank() || draftState.document.arcBeats.isNotEmpty()
+
+    val startNewIdea: () -> Unit = {
+        navHistory = emptyList()
+        draftVm.resetNewDraft()
+        onScreen(ClipStudioScreen.SPARK)
+    }
+
+    val navigateBack: () -> Unit = {
+        when {
+            screen == ClipStudioScreen.NEWSROOM || screen == ClipStudioScreen.BROLL_STUDIO -> {
+                val prev = navHistory.lastOrNull()
+                navHistory = if (navHistory.isNotEmpty()) navHistory.dropLast(1) else emptyList()
+                onScreen(prev ?: ClipStudioScreen.CUT)
             }
-        )
+            screen == ClipStudioScreen.SPARK && hasActiveIdea -> {
+                // Back from the 4-beat outline returns to the "+ new" empty idea view instead of exiting.
+                startNewIdea()
+            }
+            navHistory.isNotEmpty() -> {
+                val prev = navHistory.last()
+                navHistory = navHistory.dropLast(1)
+                onScreen(prev)
+            }
+            screen == ClipStudioScreen.CUT -> onScreen(ClipStudioScreen.SPARK)
+            screen == ClipStudioScreen.SCRIPT -> onScreen(ClipStudioScreen.SPARK)
+            else -> {
+                val now = System.currentTimeMillis()
+                if (now - lastRootBackAtMs <= DOUBLE_BACK_EXIT_WINDOW_MS) {
+                    (context as? Activity)?.finish()
+                } else {
+                    lastRootBackAtMs = now
+                    draftVm.showToast("Press back again to exit Aircheck")
+                }
+            }
+        }
+    }
+
+    // Always intercept Back so 4-beat SPARK returns to "+ new" and empty SPARK gets double-back protection.
+    BackHandler(enabled = true) {
+        navigateBack()
     }
 
     val navigate: (Int) -> Unit = { n ->
         when (n) {
-            1 -> onScreen(ClipStudioScreen.SPARK)
-            2 -> onScreen(ClipStudioScreen.SCRIPT)
-            3 -> onScreen(ClipStudioScreen.CUT)
+            1 -> navigateTo(ClipStudioScreen.SPARK)
+            2, 3 -> navigateTo(ClipStudioScreen.CUT)
         }
     }
 
-    val startNewIdea: () -> Unit = {
-        lastOpenedScript = null
-        draftVm.resetNewDraft()
-        draftVm.showToast("Ready for a new idea")
-        onScreen(ClipStudioScreen.SPARK)
+    val createVideoFromText: (String) -> Unit = { text ->
+        val quote = draftState.document.attachment as? XAttachment.QuotePost
+        // Persist the new CorePipelineSession to Room BEFORE auto-starting Stage 1 TTS
+        // so CoreStageWorker never races against an old or empty session.
+        studioVm.openStoryInCorePipeline(
+            plainText = text,
+            headline = draftState.document.arcBeats.firstOrNull()?.text.orEmpty().take(40),
+            postCard = quote?.let { PostCardSource(it.handle, it.tweetId, it.snippet) },
+            shotPlan = draftState.document.shotPlan,
+            autoStartTts = true
+        )
+        navigateTo(ClipStudioScreen.CUT)
     }
 
     val activeToast = draftState.toastMessage ?: studioState.toastMessage
@@ -139,6 +181,7 @@ fun ClipStudioShell(
                     onOpenSettings = onOpenSettings,
                     onNavigate = navigate,
                     onNewIdea = startNewIdea,
+                    onCreateVideo = createVideoFromText,
                     lastCompletedVideo = studioState.lastCompletedVideo,
                     renderGlobalOverlays = false
                 )
@@ -148,26 +191,15 @@ fun ClipStudioShell(
                     onRequestMic = requestMic,
                     onNavigate = navigate,
                     onNewIdea = startNewIdea,
-                    onCreateVideo = { text ->
-                        val quote = draftState.document.attachment as? XAttachment.QuotePost
-                        // Persist the new CorePipelineSession to Room BEFORE auto-starting Stage 1 TTS
-                        // so CoreStageWorker never races against an old or empty session.
-                        studioVm.openStoryInCorePipeline(
-                            plainText = text,
-                            headline = draftState.document.arcBeats.firstOrNull()?.text.orEmpty().take(40),
-                            postCard = quote?.let { PostCardSource(it.handle, it.tweetId, it.snippet) },
-                            shotPlan = draftState.document.shotPlan,
-                            autoStartTts = true
-                        )
-                        onScreen(ClipStudioScreen.CUT)
-                    },
+                    onCreateVideo = createVideoFromText,
                     renderGlobalOverlays = false
                 )
                 ClipStudioScreen.CUT -> CutScreen(
                     state = studioState,
                     vm = studioVm,
                     onOpenSettings = onOpenSettings,
-                    onOpenNewsroom = { onScreen(ClipStudioScreen.NEWSROOM) },
+                    onOpenNewsroom = { navigateTo(ClipStudioScreen.NEWSROOM) },
+                    onOpenBrollStudio = { navigateTo(ClipStudioScreen.BROLL_STUDIO) },
                     onNavigate = navigate,
                     onNewIdea = startNewIdea,
                     renderGlobalOverlays = false
@@ -175,12 +207,23 @@ fun ClipStudioShell(
                 ClipStudioScreen.NEWSROOM -> NewsroomLookScreen(
                     state = studioState,
                     vm = studioVm,
-                    onBack = { onScreen(ClipStudioScreen.CUT) },
+                    onBack = navigateBack,
                     onTestOnClip = { lookId ->
                         studioVm.runCoreStage4ChopBroll(lookIdOverride = lookId)
+                        navHistory = navHistory.filterNot { it == ClipStudioScreen.NEWSROOM }
                         onScreen(ClipStudioScreen.CUT)
                     },
                     onOpenOverlayBuilder = onOpenOverlayBuilder,
+                    renderGlobalOverlays = false
+                )
+                ClipStudioScreen.BROLL_STUDIO -> BrollStudioScreen(
+                    state = studioState,
+                    vm = studioVm,
+                    onBack = navigateBack,
+                    onRenderStarted = {
+                        navHistory = navHistory.filterNot { it == ClipStudioScreen.BROLL_STUDIO }
+                        onScreen(ClipStudioScreen.CUT)
+                    },
                     renderGlobalOverlays = false
                 )
             }

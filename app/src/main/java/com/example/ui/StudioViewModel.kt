@@ -1130,6 +1130,7 @@ class StudioViewModel internal constructor(
                 if (jpegBytes.isEmpty()) throw IllegalStateException("Selected photo could not be encoded.")
                 val stored = casStore.putBytes(jpegBytes, "jpg")
                 profileStore.setDefaultPhotoSha(stored.sha256)
+                profileStore.setHeygenLookId("")
                 val curProj = _uiState.value.activeProject
                 persistProject(
                     curProj.copy(
@@ -1168,6 +1169,8 @@ class StudioViewModel internal constructor(
 
     private fun startCoreStage(op: String, extras: Map<String, String?> = emptyMap()) {
         CoreStageWorker.ensureChannel(getApplication())
+        val snapshotSession = _uiState.value.corePipelineSession
+        val snapshotDefaultLook = _uiState.value.newsroomLooks.firstOrNull { it.isDefault }
         _uiState.update {
             it.copy(
                 isCoreStageBusy = true,
@@ -1178,7 +1181,20 @@ class StudioViewModel internal constructor(
             )
         }
         pipelineLogger.info("stage", "start $op")
-        CoreStageWorker.enqueue(getApplication(), op, extras)
+        // Flush any in-flight Room writes (clauses, renderOptions, overlays, default look)
+        // before enqueuing WorkManager so CoreStageWorker never reads stale state.
+        viewModelScope.launch {
+            lookSaveMutex.withLock {
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    localRepo.saveCorePipelineSession(snapshotSession)
+                    if (op == CoreStageWorker.OP_CUT && snapshotDefaultLook != null) {
+                        localRepo.saveNewsroomLook(snapshotDefaultLook)
+                        localRepo.setDefaultNewsroomLook(snapshotDefaultLook.id)
+                    }
+                }
+            }
+            CoreStageWorker.enqueue(getApplication(), op, extras)
+        }
     }
 
     /** Tails the durable generation log for the Activity panel: rig log first, on-phone fallback. */
@@ -2472,44 +2488,99 @@ class StudioViewModel internal constructor(
     }
 
     fun setRigVoiceBackend(backend: String) {
+        val clean = backend.trim().lowercase().ifBlank { "auto" }
+        val label = _uiState.value.studioRigOptions?.voiceBackends?.firstOrNull { it.id == clean }?.label ?: clean
+        _uiState.update { st ->
+            st.copy(
+                settings = st.settings.copy(rigVoiceBackend = clean),
+                toastMessage = "Voice engine: $label"
+            )
+        }
         viewModelScope.launch {
-            profileStore.setRigVoiceBackend(backend)
-            _uiState.update { it.copy(toastMessage = "Voice engine updated") }
+            profileStore.setRigVoiceBackend(clean)
         }
     }
 
     fun setRigVideoBackend(backend: String) {
+        val clean = backend.trim().lowercase().ifBlank { "heygen" }
+        val label = _uiState.value.studioRigOptions?.videoBackends?.firstOrNull { it.id == clean }?.label ?: clean
+        _uiState.update { st ->
+            st.copy(
+                settings = st.settings.copy(rigVideoBackend = clean),
+                toastMessage = "Video provider: $label"
+            )
+        }
         viewModelScope.launch {
-            profileStore.setRigVideoBackend(backend)
-            _uiState.update { it.copy(toastMessage = "Video provider updated") }
+            profileStore.setRigVideoBackend(clean)
         }
     }
 
     fun setHeygenLookId(lookId: String) {
+        val clean = lookId.trim()
+        val lookName = _uiState.value.studioRigOptions?.heygenLooks?.firstOrNull { it.id == clean }?.name
+            ?: clean.take(10)
+        val curProj = _uiState.value.activeProject
+        val clearedProj = curProj.copy(stageConfig = curProj.stageConfig.copy(photoSha = null))
+        _uiState.update { st ->
+            st.copy(
+                activeProject = clearedProj,
+                settings = st.settings.copy(
+                    heygenLookId = clean,
+                    persona = st.settings.persona.copy(defaultPhotoSha = "")
+                ),
+                toastMessage = "HeyGen look: $lookName"
+            )
+        }
         viewModelScope.launch {
-            profileStore.setHeygenLookId(lookId)
-            _uiState.update { it.copy(toastMessage = "HeyGen look updated") }
+            profileStore.setHeygenLookId(clean)
+            // Clear stale custom-photo override so HeyGen renders the chosen avatar look instead of an old photo.
+            profileStore.setDefaultPhotoSha("")
+            persistProject(clearedProj)
         }
     }
 
     fun setHeygenEngine(engine: String) {
+        val clean = engine.trim().lowercase().ifBlank { "heygen-avatar-6" }
+        val label = _uiState.value.studioRigOptions?.heygenEngines?.firstOrNull { it.id == clean }?.label ?: clean
+        _uiState.update { st ->
+            val adjustedRes = when {
+                clean.startsWith("heygen-avatar-6") && st.settings.heygenResolution == "720p" -> "1080p"
+                !clean.startsWith("heygen-avatar-6") && st.settings.heygenResolution == "2k" -> "1080p"
+                else -> st.settings.heygenResolution.ifBlank { "1080p" }
+            }
+            st.copy(
+                settings = st.settings.copy(heygenEngine = clean, heygenResolution = adjustedRes),
+                toastMessage = "HeyGen engine: $label"
+            )
+        }
         viewModelScope.launch {
-            profileStore.setHeygenEngine(engine)
-            _uiState.update { it.copy(toastMessage = "HeyGen engine updated") }
+            profileStore.setHeygenEngine(clean)
         }
     }
 
     fun setHeygenResolution(resolution: String) {
+        val clean = resolution.trim().lowercase().ifBlank { "1080p" }
+        _uiState.update { st ->
+            st.copy(
+                settings = st.settings.copy(heygenResolution = clean),
+                toastMessage = "Video quality: ${clean.uppercase()}"
+            )
+        }
         viewModelScope.launch {
-            profileStore.setHeygenResolution(resolution)
-            _uiState.update { it.copy(toastMessage = "HeyGen quality updated") }
+            profileStore.setHeygenResolution(clean)
         }
     }
 
     fun setHeygenMotionPrompt(prompt: String) {
+        val clean = prompt.trim().take(400)
+        _uiState.update { st ->
+            st.copy(
+                settings = st.settings.copy(heygenMotionPrompt = clean),
+                toastMessage = "Motion prompt saved"
+            )
+        }
         viewModelScope.launch {
-            profileStore.setHeygenMotionPrompt(prompt)
-            _uiState.update { it.copy(toastMessage = "Motion prompt saved") }
+            profileStore.setHeygenMotionPrompt(clean)
         }
     }
 

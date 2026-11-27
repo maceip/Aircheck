@@ -1898,7 +1898,9 @@ class RenderJobManager:
             "heygen_motion_prompt": heygen_motion_prompt,
             "audio_wav_path": audio_wav_path,
             "avatar_path": avatar_path,
-            "custom_photo": photo_bytes is not None,
+            "custom_photo": (photo_bytes is not None) and not (
+                (raw_video_backend in (None, "heygen")) and bool(heygen_look_id)
+            ),
             "resolution": resolution,
             "ratio": ratio,
             "max_duration": max_duration_raw,

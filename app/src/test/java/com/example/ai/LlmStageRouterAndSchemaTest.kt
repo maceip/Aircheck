@@ -445,7 +445,7 @@ class LlmStageRouterAndSchemaTest {
             modelProvider = { availableModel },
             completionOverride = { prompt ->
                 when {
-                    prompt.contains("Extract 3 sharp editorial angles") ->
+                    prompt.contains("extracted_angles") ->
                         """```json
                         {"extracted_angles":[{"id":"a1","label":"Power surge \u2014 evening","preview":"Demand hit 42%."}],"blindspots":[{"id":"b1","label":"Storage cost","preview":"Costs rose."}]}
                         ```"""

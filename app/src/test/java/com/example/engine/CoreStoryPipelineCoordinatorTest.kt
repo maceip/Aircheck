@@ -385,9 +385,21 @@ class CoreStoryPipelineCoordinatorTest {
             look = null
         )
         assertTrue(chopRes.isSuccess)
-        assertEquals(true, fakeGateway.lastChopUseRemotion)
+        // Default Stage 4 cut uses unified FFmpeg studio_cut (useRemotion = false) so trim,
+        // punch-in, captions, looks, and per-cut transitions always apply reliably.
+        assertEquals(false, fakeGateway.lastChopUseRemotion)
         assertEquals("http://127.0.0.1:8443/v1/align.json", fakeGateway.lastChopAlignUrl)
         assertEquals(2, fakeGateway.lastChopWords.size)
+
+        // Explicit opt-in renderOptions.useRemotion == true still routes to Remotion when requested.
+        val remotionRes = coordinator.chopTalkingHeadIntoBrollStage4(
+            session = stage4Session.copy(renderOptions = stage4Session.renderOptions.copy(useRemotion = true)),
+            rigBaseUrl = "http://127.0.0.1:8443",
+            allSavedOverlays = emptyList(),
+            look = null
+        )
+        assertTrue(remotionRes.isSuccess)
+        assertEquals(true, fakeGateway.lastChopUseRemotion)
 
         // CoreStageRunner.tts duration formatting (< 1000ms -> ms, >= 1000ms -> %.1fs)
         val runner = CoreStageRunner(localRepo, profileStore, coordinator, fakeGateway)

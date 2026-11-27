@@ -358,76 +358,25 @@ class ClipStudioV5ComposeTest {
         }
         assertTrue(recordedArcBodies.first().contains("\"tone\":\"solarpunk\""))
 
-        // Cycle beat 0 shot 0 (`face -> pip`), add a b-roll shot, and reroll beat 1
-        onNodeWithTag("cs_shot_0_0").performClick()
-        assertEquals(ShotType.PIP, draftVm.uiState.value.document.arcBeats[0].shots[0].type)
-        val shotsBeforeAdd = draftVm.uiState.value.document.arcBeats[0].shots.size
-        onNodeWithTag("cs_add_shot_0").performClick()
-        assertEquals(shotsBeforeAdd + 1, draftVm.uiState.value.document.arcBeats[0].shots.size)
-
-        onNodeWithTag("cs_reroll_beat_1").performClick()
+        // Reroll beat 1 directly on 01 SPARK (thumbnails removed from Spark; B-roll lives in B-Roll Studio)
+        onNodeWithTag("cs_reroll_beat_1").performScrollTo().performClick()
         waitUntil(timeoutMillis = 8_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            draftVm.uiState.value.document.lastRerolledBeat == 1 && !draftVm.uiState.value.isBusy
+            draftVm.uiState.value.document.lastRerolledBeat == 1 && draftVm.uiState.value.rerollingBeatIndices.isEmpty()
         }
 
-        // Open Anchors sheet, toggle an extracted anchor, and close with "keep N anchors"
+        // Open Anchors sheet, toggle an extracted anchor, and apply
         onNodeWithTag("cs_anchors_button").performClick()
         onNodeWithTag("cs_anchors_sheet").assertIsDisplayed()
         onNodeWithTag("cs_keep_a_cost").performClick()
         onNodeWithTag("cs_anchors_done").performClick()
         assertTrue(onAllNodesWithTag("cs_anchors_sheet").fetchSemanticsNodes().isEmpty())
-
-        // Tap "write the script" -> auto-navigates to 02 SCRIPT
-        onNodeWithTag("cs_write_script").performClick()
         waitUntil(timeoutMillis = 8_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_script_root").fetchSemanticsNodes().isNotEmpty() &&
-                draftVm.uiState.value.document.candidates.size == 3 &&
-                !draftVm.uiState.value.isBusy
-        }
-        assertTrue(recordedScriptBodies.first().contains("\"tone\":\"solarpunk\""))
-
-        // 2. 02 SCRIPT: switch postures, toggle length row + shorter (-12w), single-tap phrase swap + nudge + pin + keep
-        onNodeWithTag("cs_version_1").performClick()
-        assertEquals(1, draftVm.uiState.value.document.activeCandidateIndex)
-        onNodeWithTag("cs_version_0").performClick()
-        assertEquals(0, draftVm.uiState.value.document.activeCandidateIndex)
-
-        onNodeWithTag("cs_length_toggle").performClick()
-        onNodeWithTag("cs_length_row").assertIsDisplayed()
-        onNodeWithTag("cs_length_shorter").performClick()
-        waitUntil(timeoutMillis = 8_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            !draftVm.uiState.value.isBusy
+            !draftVm.uiState.value.isBusy && draftVm.uiState.value.document.arcBeats.size == 4
         }
 
-        // Single tap on paragraph 0 opens SWAP THIS PHRASE sheet (no two-tap required)
-        onNodeWithTag("cs_para_0").performTouchInput {
-            click(center)
-        }
-        waitUntil(timeoutMillis = 8_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            draftVm.uiState.value.selectedPhrase != null &&
-                draftVm.uiState.value.brushAlternatives.isNotEmpty() &&
-                !draftVm.uiState.value.isBusy
-        }
-        onNodeWithTag("cs_phrase_sheet").assertIsDisplayed()
-
-        onNodeWithTag("cs_nudge_sharper").performClick()
-        waitUntil(timeoutMillis = 8_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            draftVm.uiState.value.activeBrushNudge == BrushNudge.SHARPER && !draftVm.uiState.value.isBusy
-        }
-
-        val selRange = checkNotNull(draftVm.uiState.value.selectedPhrase)
-        onNodeWithTag("cs_pin_phrase").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            draftVm.isRangeLocked(selRange)
-        }
-
-        // Tap "make the video" -> maps shotPlan (including CARD quote overlay) into 03 CUT
+        // Streamlined 2-step flow: tap "make the video" directly on 01 SPARK -> maps beats & shotPlan into 02 CUT!
         onNodeWithTag("cs_create_video").performClick()
         waitUntil(timeoutMillis = 8_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
@@ -442,47 +391,40 @@ class ClipStudioV5ComposeTest {
             studioVm.uiState.value.savedOverlays.any { it.kind == OverlayObjectKind.QUOTE_BRIEF }
         }
 
-        // 3. 03 CUT -> Video look -> test accent swatch, logo bug, inline card edit, B-Roll framing, and Tweak AI
+        // 3. 03 CUT -> Newsroom Overlays Editor -> test Labels (bug), Overlays (inline edit), Look (accent/blur), Tweak AI
         onNodeWithTag("cs_cut_look").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             onAllNodesWithTag("cs_newsroom_root").fetchSemanticsNodes().isNotEmpty()
         }
-        onNodeWithTag("cs_accent_amber").performClick()
-        onNodeWithTag("cs_scrub_blur_inc").performClick()
 
-        // Tab 1 (Style): toggle News Logo Bug ON & edit bug text
-        onNodeWithTag("cs_newsroom_tab_1").performClick()
-        onNodeWithTag("cs_bug_toggle").performClick()
+        // Tab 0 (`Labels`): toggle Top-Left Corner Bug ON & edit bug text
+        onNodeWithTag("cs_bug_toggle").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             studioVm.uiState.value.corePipelineSession.renderOptions.showBrandBug
         }
-        onNodeWithTag("cs_bug_input").performTextReplacement("RYAN DESK")
+        onNodeWithTag("cs_bug_input").performScrollTo().performTextReplacement("RYAN DESK")
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             studioVm.uiState.value.corePipelineSession.renderOptions.cornerBugText == "RYAN DESK"
         }
 
-        // Tab 2 (Cards): verify attached quote card & edit its headline inline
-        onNodeWithTag("cs_newsroom_tab_2").performClick()
-        onNodeWithText("1 quote card attached").assertIsDisplayed()
+        // Tab 1 (`Overlays`): verify attached quote card & edit its headline inline
+        onNodeWithTag("cs_newsroom_tab_1").performClick()
         val firstQuoteId = studioVm.uiState.value.savedOverlays.first { it.kind == OverlayObjectKind.QUOTE_BRIEF }.id
         onNodeWithTag("cs_overlay_edit_$firstQuoteId").performScrollTo().performClick()
-        onNodeWithTag("cs_card_headline_field_$firstQuoteId").performTextReplacement("Own silicon once forever")
-        onNodeWithTag("cs_card_save_$firstQuoteId").performClick()
+        onNodeWithTag("cs_card_headline_field_$firstQuoteId").performScrollTo().performTextReplacement("Own silicon once forever")
+        onNodeWithTag("cs_card_save_$firstQuoteId").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             studioVm.uiState.value.savedOverlays.first { it.id == firstQuoteId }.headline == "Own silicon once forever"
         }
 
-        // Tab 3 (B-Roll): switch framing to Full Cutaway
-        onNodeWithTag("cs_newsroom_tab_3").performClick()
-        onNodeWithTag("cs_broll_framing_full").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            studioVm.uiState.value.corePipelineSession.renderOptions.brollFraming == "full"
-        }
+        // Tab 2 (`Look`): adjust accent swatch & blur ruler
+        onNodeWithTag("cs_newsroom_tab_2").performClick()
+        onNodeWithTag("cs_accent_amber").performScrollTo().performClick()
+        onNodeWithTag("cs_scrub_blur_inc").performScrollTo().performClick()
 
         // Tweak AI button -> opens sheet -> sends POST /v1/ai-assist (mode=tweak_video_look) -> updates state
         onNodeWithTag("cs_tweak_ai_button").performClick()
@@ -503,9 +445,26 @@ class ClipStudioV5ComposeTest {
             onAllNodesWithTag("cs_cut_root").fetchSemanticsNodes().isNotEmpty() &&
                 onAllNodesWithTag("cs_toast").fetchSemanticsNodes().isNotEmpty()
         }
-        onNodeWithText("look applied · render to see it").assertIsDisplayed()
+        onNodeWithText("Overlays saved · will apply when rendered").assertIsDisplayed()
         onNodeWithTag("cs_toast_ok").performClick()
         assertTrue(onAllNodesWithTag("cs_toast").fetchSemanticsNodes().isEmpty())
+
+        // 4. 03 CUT -> B-Roll & Transition Studio -> switch framing to Full Cutaway & return
+        onNodeWithTag("cs_cut_broll_studio").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("cs_broll_studio_root").fetchSemanticsNodes().isNotEmpty()
+        }
+        onNodeWithTag("cs_broll_framing_full").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.renderOptions.brollFraming == "full"
+        }
+        onNodeWithTag("cs_broll_studio_back").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("cs_cut_root").fetchSemanticsNodes().isNotEmpty()
+        }
     }
 
     @Test
@@ -765,7 +724,7 @@ class ClipStudioV5ComposeTest {
         }
         val draftVm = checkNotNull(draftVmRef)
 
-        // Seed first idea -> write script -> land on 02 SCRIPT
+        // Seed first idea -> make the video directly -> land on 02 CUT -> tap "+ new" -> returns cleanly to empty 01 SPARK
         draftVm.submitTypedNote("My first rough idea about edge AI.")
         waitUntil(timeoutMillis = 8_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
@@ -774,16 +733,15 @@ class ClipStudioV5ComposeTest {
         // Verify populated 01 SPARK also shows the quick "+ new" button
         onNodeWithTag("cs_spark_new_idea").assertIsDisplayed()
 
-        onNodeWithTag("cs_write_script").performClick()
+        onNodeWithTag("cs_create_video").performClick()
         waitUntil(timeoutMillis = 8_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            activeScreen == ClipStudioScreen.SCRIPT &&
-                onAllNodesWithTag("cs_script_root").fetchSemanticsNodes().isNotEmpty() &&
-                !draftVm.uiState.value.isBusy
+            activeScreen == ClipStudioScreen.CUT &&
+                onAllNodesWithTag("cs_cut_root").fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Tap "+ new" right on 02 SCRIPT -> resets draft and navigates directly to empty 01 SPARK
-        onNodeWithTag("cs_new_idea").assertIsDisplayed().performClick()
+        // Tap "+ new" right on 02 CUT -> resets draft and navigates directly to empty 01 SPARK (no noisy toast!)
+        onNodeWithTag("cs_cut_new_idea").assertIsDisplayed().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             activeScreen == ClipStudioScreen.SPARK &&
@@ -792,6 +750,7 @@ class ClipStudioV5ComposeTest {
                 draftVm.uiState.value.document.candidates.isEmpty()
         }
         onNodeWithText("What's the clip about?").assertIsDisplayed()
+        assertTrue(onAllNodesWithTag("cs_toast").fetchSemanticsNodes().isEmpty())
     }
 
     @Test

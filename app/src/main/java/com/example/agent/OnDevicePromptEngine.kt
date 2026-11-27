@@ -967,15 +967,10 @@ class OnDevicePromptEngine internal constructor(
         } else {
             trimmed
         }
-        if (unwrapped.startsWith("{") && unwrapped.endsWith("}")) {
-            return unwrapped
+        if (!unwrapped.startsWith("{") || !unwrapped.endsWith("}")) {
+            throw OnDeviceLlmException("Gemini Nano response is not a valid JSON object.")
         }
-        val firstBrace = unwrapped.indexOf('{')
-        val lastBrace = unwrapped.lastIndexOf('}')
-        if (firstBrace >= 0 && lastBrace > firstBrace) {
-            return unwrapped.substring(firstBrace, lastBrace + 1).trim()
-        }
-        throw OnDeviceLlmException("Gemini Nano response is not a valid JSON object.")
+        return unwrapped
     }
 
     private fun enforceLockParityAndSanitize(

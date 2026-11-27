@@ -151,9 +151,10 @@ class CoreStageRunner(
             clearTask(KEY_CUT)
             throw StageFailure(userFacingStageError(it, "Studio cut failed."))
         }
+        val isDefaultOrNoOverride = lookIdOverride == null || look?.isDefault == true
         localRepo.saveCorePipelineSession(
             chopped.copy(
-                lastCutSignature = if (lookIdOverride == null) signature else null,
+                lastCutSignature = if (isDefaultOrNoOverride) signature else null,
                 pendingRigTasks = chopped.pendingRigTasks - KEY_CUT
             )
         )

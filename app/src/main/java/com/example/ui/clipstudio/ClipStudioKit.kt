@@ -37,6 +37,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1056,8 +1057,8 @@ private fun LedPip(label: String, state: LedState) {
 }
 
 /**
- * Consistent 56dp v5 top bar across 01 SPARK, 02 SCRIPT, and 03 CUT:
- * active stage is a 44dp sunken segment in Ndot 13sp; other stages are bare 40dp targets in Geist Mono 500 13sp.
+ * Consistent 56dp top bar across the streamlined 2-stage flow (`01 SPARK` · `02 CUT`):
+ * active stage is a 44dp sunken segment in Ndot 13sp; other stage is a 40dp target in Geist Mono.
  */
 @Composable
 fun CsTopBar(
@@ -1067,7 +1068,8 @@ fun CsTopBar(
     leds: PipelineLedState? = null,
     trailing: @Composable RowScope.() -> Unit = {}
 ) {
-    val stageNames = listOf("SPARK", "SCRIPT", "CUT")
+    val normalizedActive = if (activeStage >= 2) 2 else 1
+    val stageNames = listOf("SPARK", "CUT")
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -1078,7 +1080,7 @@ fun CsTopBar(
     ) {
         stageNames.forEachIndexed { idx, name ->
             val stageNum = idx + 1
-            val isActive = stageNum == activeStage
+            val isActive = stageNum == normalizedActive
             if (isActive) {
                 Box(
                     modifier = Modifier
@@ -1098,7 +1100,7 @@ fun CsTopBar(
                     )
                 }
             } else {
-                val color = if (stageNum < activeStage) Cs.Ink else Cs.Dim
+                val color = if (stageNum < normalizedActive) Cs.Ink else Cs.Dim
                 Box(
                     modifier = Modifier
                         .height(44.dp)
@@ -1130,7 +1132,10 @@ fun CsTopBar(
     }
 }
 
-/** Global 48dp machined dark hardware toast sitting 112dp above the bottom edge with an "ok" dismiss key. */
+/**
+ * Floating high-contrast top notification banner (distinct frosted ivory surface anchored below
+ * the top bar so it never blends in with dark charcoal buttons) with auto-dismiss + tap-to-close.
+ */
 @Composable
 fun BoxScope.CsToastOverlay(
     message: String?,
@@ -1138,39 +1143,50 @@ fun BoxScope.CsToastOverlay(
     modifier: Modifier = Modifier
 ) {
     if (message.isNullOrBlank()) return
+    val currentDismiss by rememberUpdatedState(onDismiss)
+    LaunchedEffect(message) {
+        kotlinx.coroutines.delay(3_000L)
+        currentDismiss()
+    }
     Row(
         modifier = modifier
-            .align(Alignment.BottomCenter)
-            .padding(start = 12.dp, end = 12.dp, bottom = 112.dp)
+            .align(Alignment.TopCenter)
+            .padding(start = 14.dp, top = 60.dp, end = 14.dp)
             .fillMaxWidth()
-            .height(48.dp)
-            .neumorphicSurface(role = KeyRole.ACTIVE, pressed = false, radius = 14.dp, enabled = true)
+            .defaultMinSize(minHeight = 44.dp)
             .clip(RoundedCornerShape(14.dp))
-            .padding(start = 14.dp, end = 6.dp)
+            .background(Color(0xFFF3F4F8))
+            .border(1.dp, Color(0xFFD0D4DE), RoundedCornerShape(14.dp))
+            .clickable(role = Role.Button, onClick = onDismiss)
+            .padding(start = 14.dp, top = 8.dp, end = 8.dp, bottom = 8.dp)
             .testTag("cs_toast"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        CsLedDot(color = Cs.Mint, size = 7.dp)
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFF10B981))
+        )
         Text(
             text = message,
-            style = mono(13.sp, Cs.White, FontWeight.Medium),
-            maxLines = 1,
+            style = sans(13.5.sp, Color(0xFF111218), 18.sp, FontWeight.SemiBold),
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
         Box(
             modifier = Modifier
-                .height(34.dp)
-                .clip(RoundedCornerShape(9.dp))
-                .background(Cs.SunkenTrack)
-                .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(9.dp))
+                .height(30.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF191B24))
                 .clickable(role = Role.Button, onClick = onDismiss)
-                .padding(horizontal = 12.dp)
+                .padding(horizontal = 10.dp)
                 .testTag("cs_toast_ok"),
             contentAlignment = Alignment.Center
         ) {
-            Text("ok", style = mono(12.5.sp, Cs.Ink, FontWeight.SemiBold), maxLines = 1)
+            Text("ok", style = mono(11.5.sp, Color(0xFFF3F4F8), FontWeight.SemiBold), maxLines = 1)
         }
     }
 }

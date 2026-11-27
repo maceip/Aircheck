@@ -406,7 +406,10 @@ class ClipStudioV5ViewModelTest {
         assertTrue(vm.uiState.value.canUndo)
         vm.stepGlobalSnapshot(-1)
         assertEquals(1, vm.uiState.value.document.arcBeats[2].shots.size)
-        assertEquals("undid last change", vm.uiState.value.toastMessage)
+        assertTrue(
+            "Expected descriptive undo toast, got ${vm.uiState.value.toastMessage}",
+            vm.uiState.value.toastMessage?.startsWith("Undid:") == true
+        )
     }
 
     @Test
@@ -779,7 +782,7 @@ class ClipStudioV5ViewModelTest {
             light = NewsroomLook.LIGHT_COOL
         )
         studioVm.useLookAndReturn(lookId, draftOverride = editedLook)
-        assertEquals("look applied · render to see it", studioVm.uiState.value.toastMessage)
+        assertEquals("Overlays saved · will apply when rendered", studioVm.uiState.value.toastMessage)
 
         waitFor {
             runBlocking {
