@@ -68,12 +68,16 @@ from generate_talking_head import (
     normalize_talking_head_resolution,
 )
 from studio_cut import (
+    ASPECT_SIZES as STUDIO_ASPECT_SIZES,
     StudioRenderOptions,
+    broll_media_dir as studio_broll_media_dir,
+    broll_media_path as studio_broll_media_path,
     compose_studio_cut,
     detect_silence_gaps,
     generate_backdrop_plate,
     generate_broll_images,
     plate_path as studio_plate_path,
+    save_broll_media_bytes,
 )
 from drafting_passes import (
     MAX_DRAFT_AUDIO_BODY_BYTES,
@@ -3071,6 +3075,51 @@ class RenderJobManager:
             "removable_ms": sum(e - s for s, e in gaps),
         }
 
+    def generate_broll_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Generates a real B-roll cutaway still for the B-Roll Studio and returns its servable URL."""
+        if not isinstance(payload, dict):
+            raise ValueError("B-roll preview request body must be a JSON object")
+        prompt = " ".join(str(payload.get("prompt") or "").split())
+        if not prompt:
+            raise ValueError("prompt must be a non-empty string.")
+        aspect = str(payload.get("aspect") or "9:16").strip()
+        if aspect not in STUDIO_ASPECT_SIZES:
+            aspect = "9:16"
+        produced = generate_broll_images(
+            [prompt],
+            aspect,
+            self.plates_dir / "broll_cache",
+            bl_bin=DEFAULT_BL_BIN,
+            runner=self._plate_runner,
+        )
+        src_img = produced.get(prompt)
+        if src_img is None or not src_img.is_file():
+            raise RuntimeError("B-roll generator did not produce an image.")
+        media_id = src_img.name
+        dst = studio_broll_media_dir(self.plates_dir) / media_id
+        if not dst.is_file():
+            shutil.copy2(src_img, dst)
+        return {
+            "media_id": media_id,
+            "url": f"/v1/broll-media/{media_id}",
+            "prompt": prompt,
+            "aspect": aspect,
+            "is_video": False,
+        }
+
+    def upload_broll_media(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Accepts a real user-picked photo or video clip (base64) for B-roll cutaway composition."""
+        if not isinstance(payload, dict):
+            raise ValueError("B-roll media upload body must be a JSON object")
+        raw_b64 = payload.get("media_base64")
+        if raw_b64 is None:
+            raise ValueError("media_base64 is required.")
+        raw_bytes = _decode_strict_base64(raw_b64, "media_base64")
+        if len(raw_bytes) > 40 * 1024 * 1024:
+            raise ValueError("B-roll media exceeds 40 MiB limit.")
+        ext = str(payload.get("ext") or "jpg").strip().lower().lstrip(".")
+        return save_broll_media_bytes(self.plates_dir, raw_bytes, ext)
+
     def generate_backdrop(self, payload: dict[str, Any], *, bl_bin: Path = DEFAULT_BL_BIN) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Backdrop request body must be a JSON object")
@@ -4496,6 +4545,28 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             self._serve_file_with_range(resolved_plate, "image/png", head_only=head_only)
             return
 
+        if raw_path.startswith("/v1/broll-media/"):
+            filename = raw_path[len("/v1/broll-media/") :]
+            resolved_media = studio_broll_media_path(self.server.render_manager.plates_dir, filename)
+            if resolved_media is None:
+                self._send_json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": "not_found", "detail": f"B-roll media '{filename}' not found"},
+                    head_only=head_only,
+                )
+                return
+            ext = resolved_media.suffix.lower().lstrip(".")
+            mime = {
+                "png": "image/png",
+                "jpg": "image/jpeg",
+                "jpeg": "image/jpeg",
+                "webp": "image/webp",
+                "mp4": "video/mp4",
+                "mov": "video/quicktime",
+            }.get(ext, "application/octet-stream")
+            self._serve_file_with_range(resolved_media, mime, head_only=head_only)
+            return
+
         if raw_path.startswith("/v1/render-thumbs/"):
             remainder = raw_path[len("/v1/render-thumbs/") :]
             parts = remainder.split("/")
@@ -4979,6 +5050,19 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
                 error_code="silence_gaps_failed",
             )
             return
+        if parsed.path == "/v1/core/broll-preview":
+            self._handle_post_render_json(
+                lambda body: self.server.render_manager.generate_broll_preview(body),
+                error_code="broll_preview_failed",
+            )
+            return
+        if parsed.path == "/v1/core/broll-media":
+            self._handle_post_render_json(
+                lambda body: self.server.render_manager.upload_broll_media(body),
+                error_code="broll_media_upload_failed",
+                max_bytes=56 * 1024 * 1024,
+            )
+            return
         if parsed.path == "/v1/newsroom/backdrop":
             self._handle_post_render_json(
                 lambda body: self.server.render_manager.generate_backdrop(body),
@@ -5305,8 +5389,14 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(HTTPStatus.ACCEPTED, accepted)
 
-    def _handle_post_render_json(self, fn: Callable[[dict[str, Any]], dict[str, Any]], *, error_code: str) -> None:
-        text_body = self._read_post_utf8_body(max_bytes=64 * 1024, empty_detail="Empty request payload")
+    def _handle_post_render_json(
+        self,
+        fn: Callable[[dict[str, Any]], dict[str, Any]],
+        *,
+        error_code: str,
+        max_bytes: int = 64 * 1024,
+    ) -> None:
+        text_body = self._read_post_utf8_body(max_bytes=max_bytes, empty_detail="Empty request payload")
         if text_body is None:
             return
         try:

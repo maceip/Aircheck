@@ -243,6 +243,40 @@ fun ScriptScreen(
                 onDismissNotice = vm::dismissNotice
             )
 
+            if (state.outlineChangedSinceScript && candidate != null && !state.rawKeyboardMode) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 10.dp, end = 10.dp, bottom = 8.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Cs.RepairFill)
+                        .border(1.dp, Cs.RepairHi, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("cs_script_outline_stale"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Outline changed in 01 SPARK",
+                        style = mono(11.5.sp, Cs.AmberBright, FontWeight.Medium),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    CsKeyLabel(
+                        label = "regenerate",
+                        onClick = vm::writeVideoScript,
+                        enabled = !state.isBusy,
+                        role = KeyRole.REPAIR,
+                        radius = 8.dp,
+                        size = 11.sp,
+                        modifier = Modifier
+                            .height(34.dp)
+                            .testTag("cs_script_regen_from_outline")
+                    )
+                }
+            }
+
             if (state.rawKeyboardMode) {
                 FullScriptKeyboardEditor(
                     initialText = activeText.ifBlank { doc.seedTranscript },

@@ -88,6 +88,13 @@ data class BackdropPlateResult(
     val prompt: String
 )
 
+data class BrollMediaResult(
+    val mediaId: String,
+    val url: String,
+    val ext: String = "png",
+    val isVideo: Boolean = false
+)
+
 data class ShotPreviewAssetResult(
     val previewId: String,
     val previewUrl: String,
@@ -260,6 +267,20 @@ interface MacRigRenderGateway {
         aspect: String,
         task: RigTaskHandle? = null
     ): BackdropPlateResult
+
+    /** `POST /v1/core/broll-preview`: generates a real B-roll still image for B-Roll Studio. */
+    suspend fun generateBrollPreview(
+        rigBaseUrl: String,
+        prompt: String,
+        aspect: String
+    ): BrollMediaResult = throw UnsupportedOperationException("generateBrollPreview not implemented")
+
+    /** `POST /v1/core/broll-media`: uploads user-picked photo/video B-roll bytes to the rig. */
+    suspend fun uploadBrollMedia(
+        rigBaseUrl: String,
+        bytes: ByteArray,
+        ext: String
+    ): BrollMediaResult = throw UnsupportedOperationException("uploadBrollMedia not implemented")
 
     suspend fun generateAiOverlayBrief(
         rigBaseUrl: String,

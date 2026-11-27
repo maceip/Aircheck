@@ -85,8 +85,11 @@ MAX_DENSITY_DELTA = 15
 
 STYLE_CONSTRAINTS_SYSTEM_BLOCK = (
     "STRICT STYLE CONSTRAINTS (MANDATORY ON EVERY OUTPUT):\n"
-    "- Write direct, concrete, plain-spoken English prose.\n"
-    "- BAN metaphors, idioms, analogies, and figurative language.\n"
+    "- Write natural, everyday, conversational spoken English that sounds great read aloud to camera.\n"
+    "- Stay strictly grounded in the speaker's actual topic, facts, and words. NEVER invent fake jargon, "
+    "nonsense coinages, awkward buzzwords, or fabricated statistics.\n"
+    "- Use clear, concrete, simple words. Every sentence must make immediate sense on the first listen.\n"
+    "- BAN metaphors, idioms, analogies, corporate speak, and figurative fluff.\n"
     "- BAN rhetorical questions (never use '?' to ask the reader a rhetorical or leading question).\n"
     "- BAN em-dashes and en-dashes (never output '—' or '–').\n"
     "- BAN introductory throat-clearing such as \"Here's the thing:\", \"In today's world:\", "
@@ -258,6 +261,56 @@ ARC_BEAT_PURPOSE: dict[str, str] = {
 }
 # Fraction of the runtime at which each beat ends (HOOK ends at 8s of a 60s video, etc.).
 _ARC_BEAT_END_FRACTIONS: tuple[float, ...] = (8 / 60, 28 / 60, 48 / 60, 1.0)
+
+
+_ARC_REROLL_DIRECTIONS: tuple[str, ...] = (
+    "Take a completely fresh angle with a sharper concrete fact or practical consequence.",
+    "Flip the framing: focus on what changes for a real person instead of repeating the earlier phrasing.",
+    "Make it punchier and more specific using a brand-new opening subject and verb.",
+    "Highlight a counterintuitive detail or concrete tension from the seed note that was not used before.",
+)
+
+
+def _norm_words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _is_too_similar_to_any(candidate: str, previous_texts: Sequence[str]) -> bool:
+    cand_norm = " ".join(_norm_words(candidate))
+    if not cand_norm:
+        return True
+    cand_tokens = set(cand_norm.split())
+    for prev in previous_texts:
+        prev_norm = " ".join(_norm_words(prev))
+        if not prev_norm:
+            continue
+        if cand_norm == prev_norm:
+            return True
+        prev_tokens = set(prev_norm.split())
+        union = cand_tokens | prev_tokens
+        if union and (len(cand_tokens & prev_tokens) / float(len(union))) >= 0.72:
+            return True
+    return False
+
+
+def _format_anchor_blocks(
+    selected_angles: Sequence[str],
+    excluded_angles: Sequence[str] = (),
+) -> str:
+    blocks: list[str] = []
+    if selected_angles:
+        lines = "\n".join(f"- {a}" for a in selected_angles)
+        blocks.append(
+            "REQUIRED ANCHOR POINTS (YOU MUST CLEARLY INCLUDE AND REFLECT EVERY ONE OF THESE):\n"
+            f"{lines}\n"
+        )
+    if excluded_angles:
+        lines = "\n".join(f"- {a}" for a in excluded_angles)
+        blocks.append(
+            "EXCLUDED ANGLES (THE USER TURNED THESE OFF — DO NOT INCLUDE OR MENTION THESE):\n"
+            f"{lines}\n"
+        )
+    return "".join(blocks)
 
 
 def _arc_windows(target_sec: int) -> list[tuple[int, int]]:
@@ -1177,6 +1230,8 @@ class DraftPassEngine:
         seed = seed_raw.strip()
         steering = _parse_string_list(payload.get("steering_constraints"), "steering_constraints")
         angles = _parse_string_list(payload.get("selected_angles"), "selected_angles")
+        excluded_angles = _parse_string_list(payload.get("excluded_angles"), "excluded_angles")
+        previous_texts = _parse_string_list(payload.get("previous_texts"), "previous_texts")
         try:
             target_sec = int(payload.get("target_sec") or ARC_DEFAULT_TARGET_SEC)
         except (TypeError, ValueError) as exc:
@@ -1249,19 +1304,20 @@ class DraftPassEngine:
             "for a solo creator.\n"
             + STYLE_CONSTRAINTS_SYSTEM_BLOCK
         )
-        angle_block = ("SELECTED ANGLES TO COVER: " + " | ".join(angles) + "\n") if angles else ""
+        angle_block = _format_anchor_blocks(angles, excluded_angles)
         beat_spec = "\n".join(
             f"- {label} ({lo}-{hi}s): {ARC_BEAT_PURPOSE[label]}"
             for label, (lo, hi) in zip(ARC_BEAT_LABELS, windows)
         )
+        forbidden_reroll_texts: list[str] = []
         if reroll_index is None:
             user_prompt = (
                 f"SEED VOICE NOTE:\n{seed}\n"
                 f"{_format_tone_block(tone)}"
                 f"{angle_block}{_format_steering_block(steering)}\n"
                 f"Target runtime {target_sec}s (about {word_budget} spoken words total).\n"
-                f"Write ONE plain-ASCII sentence (6 to 14 words) in the {tone} tone for each beat, "
-                f"together with 1 to 3 concrete visual shots per beat:\n{beat_spec}\n\n"
+                f"Write ONE plain-ASCII sentence (7 to 16 words) in natural spoken English in the {tone} tone "
+                f"for each beat, together with 1 to 3 concrete visual shots per beat:\n{beat_spec}\n\n"
                 f"{shot_plan_instructions}\n"
                 "Return STRICT JSON ONLY:\n"
                 '{"beats":['
@@ -1274,14 +1330,26 @@ class DraftPassEngine:
         else:
             label = ARC_BEAT_LABELS[reroll_index]
             current = "\n".join(f"{ARC_BEAT_LABELS[i]}: {t}" for i, t in enumerate(existing))
+            seen_prev: set[str] = set()
+            for cand_prev in [existing[reroll_index], *previous_texts]:
+                clean_p = cand_prev.strip()
+                if clean_p and clean_p.lower() not in seen_prev:
+                    seen_prev.add(clean_p.lower())
+                    forbidden_reroll_texts.append(clean_p)
+            direction_hint = _ARC_REROLL_DIRECTIONS[
+                len(forbidden_reroll_texts) % len(_ARC_REROLL_DIRECTIONS)
+            ]
+            forbidden_block = "\n".join(f"- {t}" for t in forbidden_reroll_texts)
             user_prompt = (
                 f"SEED VOICE NOTE:\n{seed}\n"
                 f"{_format_tone_block(tone)}"
                 f"{angle_block}{_format_steering_block(steering)}\n"
                 f"CURRENT ARC:\n{current}\n"
-                f"Rewrite ONLY the {label} beat ({ARC_BEAT_PURPOSE[label]}) in the {tone} tone as one new "
-                f"plain-ASCII sentence (6 to 14 words) that differs clearly from: {existing[reroll_index]}\n"
-                f"Also propose 1 to 3 concrete shots for this rewritten {label} beat.\n"
+                f"PREVIOUS {label} VERSION(S) TO REPLACE (DO NOT REPEAT OR CLOSELY PARAPHRASE ANY OF THESE):\n"
+                f"{forbidden_block}\n\n"
+                f"Rewrite ONLY the {label} beat ({ARC_BEAT_PURPOSE[label]}) in natural spoken English ({tone} tone) "
+                f"as one genuinely NEW plain-ASCII sentence (7 to 16 words). {direction_hint}\n"
+                f"Also propose 1 to 3 fresh concrete visual shots for this rewritten {label} beat.\n"
                 f"{shot_plan_instructions}\n"
                 'Return STRICT JSON ONLY: {"beat":"...","shots":[{"type":"broll","prompt":"..."}]}'
             )
@@ -1289,13 +1357,22 @@ class DraftPassEngine:
         stage = "draft.arc"
         last_err: Exception | None = None
         last_meta: dict[str, Any] = {"provider": llm_provider or "unknown", "model": llm_model or self._llm_model, "is_local": False}
-        for attempt in range(2):
+        max_attempts = 3 if reroll_index is not None else 2
+        for attempt in range(max_attempts):
             prompt = user_prompt
             if attempt > 0:
-                prompt += (
-                    "\nCORRECTION: Return the exact JSON schema with non-empty beat text AND "
-                    "non-empty 'shots' list (1 to 3 items with 'type' in face|pip|broll|card and 'prompt')."
-                )
+                if reroll_index is not None:
+                    alt_hint = _ARC_REROLL_DIRECTIONS[(len(forbidden_reroll_texts) + attempt) % len(_ARC_REROLL_DIRECTIONS)]
+                    prompt += (
+                        "\nCORRECTION: Your previous output was missing fields OR repeated the old beat too closely. "
+                        f"Write a COMPLETELY DIFFERENT sentence with new wording. {alt_hint} "
+                        "Include non-empty 'beat' and non-empty 'shots' list."
+                    )
+                else:
+                    prompt += (
+                        "\nCORRECTION: Return the exact JSON schema with non-empty beat text AND "
+                        "non-empty 'shots' list (1 to 3 items with 'type' in face|pip|broll|card and 'prompt')."
+                    )
             content, last_meta = self._call_llm(
                 system_prompt,
                 prompt,
@@ -1328,6 +1405,14 @@ class DraftPassEngine:
                         )
                     if not new_text:
                         raise RuntimeError("AI arc reroll returned an empty beat")
+                    if (
+                        attempt < max_attempts - 1
+                        and forbidden_reroll_texts
+                        and _is_too_similar_to_any(new_text, forbidden_reroll_texts)
+                    ):
+                        raise RuntimeError(
+                            "AI arc reroll repeated the existing beat; retrying for a fresh angle"
+                        )
                     new_shots = _normalize_beat_shots(
                         raw_reroll_shots,
                         beat_index=reroll_index,
@@ -1796,6 +1881,7 @@ class DraftPassEngine:
             raise ValueError("seed_transcript must be a non-empty string")
         seed = seed_raw.strip()
         angles = _parse_string_list(payload.get("selected_angles"), "selected_angles")
+        excluded_angles = _parse_string_list(payload.get("excluded_angles"), "excluded_angles")
         steering = _parse_string_list(payload.get("steering_constraints"), "steering_constraints")
         arc_beats = _parse_string_list(payload.get("arc_beats"), "arc_beats")
         try:
@@ -1808,7 +1894,7 @@ class DraftPassEngine:
         beat_count = len(arc_beats) if arc_beats else len(ARC_BEAT_LABELS)
 
         system_prompt = (
-            "You write tight spoken scripts for solo creators reading to camera.\n"
+            "You write clear, natural spoken scripts for solo creators speaking straight to camera.\n"
             + STYLE_CONSTRAINTS_SYSTEM_BLOCK
         )
         arc_block = ""
@@ -1816,17 +1902,18 @@ class DraftPassEngine:
             arc_block = "APPROVED ARC (one paragraph per beat, in order):\n" + "\n".join(
                 f"{i + 1}. {b}" for i, b in enumerate(arc_beats)
             ) + "\n"
-        angle_block = ("ANGLES TO COVER: " + " | ".join(angles) + "\n") if angles else ""
+        angle_block = _format_anchor_blocks(angles, excluded_angles)
         user_prompt = (
             f"SEED VOICE NOTE:\n{seed}\n"
             f"{_format_tone_block(tone)}"
             f"{arc_block}{angle_block}{_format_steering_block(steering)}\n"
-            f"Write 3 distinct versions of a {target_sec}s script in the {tone} tone, "
+            f"Write 3 distinct versions of a {target_sec}s spoken script in natural everyday English ({tone} tone), "
             f"each about {word_budget} spoken words, each exactly {beat_count} paragraphs (one per beat). "
+            "Every line must sound like a real human speaking clearly on camera, grounded strictly in the seed note and required anchors. "
             f"All 3 versions MUST genuinely embody the {tone} tone while differing in pacing:\n"
-            f"- posture_label='DIRECT': states the {tone} argument plainly.\n"
-            f"- posture_label='PUNCHY': short hard-hitting {tone} sentences.\n"
-            f"- posture_label='STORY': delivers the {tone} point through a concrete moment.\n\n"
+            f"- posture_label='DIRECT': states the {tone} point plainly and clearly.\n"
+            f"- posture_label='PUNCHY': crisp short sentences with strong rhythm.\n"
+            f"- posture_label='STORY': walks through the point using a concrete real-world sequence.\n\n"
             "Return STRICT JSON ONLY:\n"
             '{"versions":[{"posture_label":"DIRECT","paragraphs":["..."]},'
             '{"posture_label":"PUNCHY","paragraphs":["..."]},'

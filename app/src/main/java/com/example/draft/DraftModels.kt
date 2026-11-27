@@ -51,6 +51,26 @@ class ExistingBeatShotsContext(
     companion object Key : CoroutineContext.Key<ExistingBeatShotsContext>
 }
 
+/**
+ * Carries deselected anchor points across suspend boundaries so turning an anchor OFF actively
+ * instructs both the Mac rig and on-device Nano/Gemma to exclude it from beats and scripts.
+ */
+class ExcludedAnglesContext(
+    val excludedAngles: List<String>
+) : AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<ExcludedAnglesContext>
+}
+
+/**
+ * Carries previously generated beat texts for a single-beat reroll so consecutive rerolls never
+ * repeat the same phrasing.
+ */
+class PreviousBeatTextsContext(
+    val previousTexts: List<String>
+) : AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<PreviousBeatTextsContext>
+}
+
 /** Clip Studio v5 per-beat shot types (`face -> pip -> broll -> card`). */
 @Serializable
 enum class ShotType(val wireValue: String, val label: String) {
@@ -258,6 +278,7 @@ data class DraftDocument(
     val attachment: XAttachment? = null,
     val arcBeats: List<ArcBeat> = emptyList(),
     val arcUndoStack: List<List<ArcBeat>> = emptyList(),
+    val arcUndoLabels: List<String> = emptyList(),
     /** Target runtime and word budget echoed by the rig for the current arc/script (0 = none yet). */
     val arcTargetSec: Int = 0,
     val arcWordBudget: Int = 0,

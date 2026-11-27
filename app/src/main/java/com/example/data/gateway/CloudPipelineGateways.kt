@@ -682,6 +682,20 @@ class DirectMacRigGateway(
                 .put("segment_mode", c.segmentMode.name)
                 .put("broll_caption", c.brollCaption.ifBlank { c.spokenText })
                 .put("b_roll_prompt", c.bRollPrompt.ifBlank { c.brollCaption })
+                .put("transition", c.transitionType.ifBlank { "cut" })
+                .put("transition_duration_ms", c.transitionDurationMs.coerceIn(150, 900))
+            if (c.brollFramingOverride.isNotBlank()) {
+                clauseObj.put("broll_framing", c.brollFramingOverride)
+            }
+            if (!c.brollMediaId.isNullOrBlank()) {
+                clauseObj.put("broll_media_id", c.brollMediaId)
+            } else if (!c.bRollSha.isNullOrBlank() && c.customBrollExt.isNotBlank()) {
+                val customFile = casStore.fileForSha(c.bRollSha, c.customBrollExt)
+                if (customFile != null && customFile.isFile && customFile.length() > 0L) {
+                    clauseObj.put("broll_media_base64", Base64.getEncoder().encodeToString(customFile.readBytes()))
+                    clauseObj.put("broll_media_ext", c.customBrollExt)
+                }
+            }
             if (!c.bRollSha.isNullOrBlank()) {
                 clauseObj.put("b_roll_sha", c.bRollSha)
             }
@@ -732,9 +746,11 @@ class DirectMacRigGateway(
                 .put("breaking_style", renderOptions.breakingStyle.wire)
                 .put("chyron_headline", renderOptions.chyronHeadline)
                 .put("chyron_subline", renderOptions.chyronSubline)
+                .put("show_lower_third", renderOptions.showLowerThird)
                 .put("show_brand_bug", renderOptions.showBrandBug)
                 .put("corner_bug_text", renderOptions.cornerBugText)
                 .put("broll_framing", renderOptions.brollFraming)
+                .put("default_transition", renderOptions.defaultTransition)
             if (effectiveUseRemotion != null) {
                 opts.put("use_remotion", effectiveUseRemotion)
             }
@@ -824,6 +840,57 @@ class DirectMacRigGateway(
             plateId = plateId,
             url = resolveAbsoluteUrl(baseUrl, url),
             prompt = json.optString("prompt", prompt)
+        )
+    }
+
+    override suspend fun generateBrollPreview(
+        rigBaseUrl: String,
+        prompt: String,
+        aspect: String
+    ): BrollMediaResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val json = postRigJson(
+            "$baseUrl/v1/core/broll-preview",
+            JSONObject().put("prompt", prompt.trim()).put("aspect", aspect.trim().ifBlank { "9:16" }),
+            label = "B-roll preview",
+            readTimeoutSec = 180L
+        )
+        val mediaId = json.optNullableString("media_id")
+            ?: throw IllegalStateException("Server /v1/core/broll-preview missing media_id.")
+        val url = json.optNullableString("url")
+            ?: throw IllegalStateException("Server /v1/core/broll-preview missing url.")
+        BrollMediaResult(
+            mediaId = mediaId,
+            url = resolveAbsoluteUrl(baseUrl, url),
+            ext = "png",
+            isVideo = false
+        )
+    }
+
+    override suspend fun uploadBrollMedia(
+        rigBaseUrl: String,
+        bytes: ByteArray,
+        ext: String
+    ): BrollMediaResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
+        val cleanExt = ext.trim().lowercase().removePrefix(".").ifBlank { "jpg" }
+        val json = postRigJson(
+            "$baseUrl/v1/core/broll-media",
+            JSONObject()
+                .put("media_base64", Base64.getEncoder().encodeToString(bytes))
+                .put("ext", cleanExt),
+            label = "B-roll upload",
+            readTimeoutSec = 120L
+        )
+        val mediaId = json.optNullableString("media_id")
+            ?: throw IllegalStateException("Server /v1/core/broll-media missing media_id.")
+        val url = json.optNullableString("url")
+            ?: throw IllegalStateException("Server /v1/core/broll-media missing url.")
+        BrollMediaResult(
+            mediaId = mediaId,
+            url = resolveAbsoluteUrl(baseUrl, url),
+            ext = json.optString("ext", cleanExt),
+            isVideo = json.optBoolean("is_video", cleanExt in setOf("mp4", "mov"))
         )
     }
 

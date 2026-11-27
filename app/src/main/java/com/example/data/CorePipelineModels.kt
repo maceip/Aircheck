@@ -27,6 +27,25 @@ enum class BrollSegmentMode(val label: String) {
 }
 
 @Serializable
+enum class ClipTransitionType(val wire: String, val label: String) {
+    CUT("cut", "Hard Cut"),
+    FADE("fade", "Crossfade"),
+    WIPE_LEFT("wipeleft", "Wipe Left"),
+    WIPE_RIGHT("wiperight", "Wipe Right"),
+    SLIDE_UP("slideup", "Slide Up"),
+    DISSOLVE("dissolve", "Dissolve"),
+    FADE_BLACK("fadeblack", "Dip Black");
+
+    companion object {
+        fun fromWire(raw: String?): ClipTransitionType =
+            entries.firstOrNull {
+                it.wire.equals(raw?.trim(), ignoreCase = true) ||
+                    it.name.equals(raw?.trim(), ignoreCase = true)
+            } ?: CUT
+    }
+}
+
+@Serializable
 data class CoreStoryClause(
     val id: String = "clause_" + UUID.randomUUID().toString().replace("-", "").take(10),
     val index: Int = 0,
@@ -39,7 +58,19 @@ data class CoreStoryClause(
     val bRollPrompt: String = "",
     val bRollSha: String? = null,
     val depthTextTag: String = "",
-    val shotTypeWire: String = ""
+    val shotTypeWire: String = "",
+    /** Transition entering this clause (`cut`, `fade`, `wipeleft`, `wiperight`, `slideup`, `dissolve`, `fadeblack`). */
+    val transitionType: String = ClipTransitionType.CUT.wire,
+    /** Transition duration in milliseconds (150..900). */
+    val transitionDurationMs: Int = 350,
+    /** Optional per-clause cutaway framing override (`""` = inherit global, or `"pip"`, `"full"`, `"split"`). */
+    val brollFramingOverride: String = "",
+    /** Optional rig media ID (`bmedia_...` or `broll_...`) for generated or uploaded custom B-roll media. */
+    val brollMediaId: String? = null,
+    /** Optional local CAS file path or rig URL for live thumbnail preview in B-Roll Studio. */
+    val brollPreviewUrl: String? = null,
+    /** Optional CAS extension (`jpg`, `png`, `mp4`) when user picked a custom B-roll asset from phone. */
+    val customBrollExt: String = ""
 ) {
     val durationMs: Long
         get() = (endMs - startMs).coerceAtLeast(0L)
@@ -129,10 +160,13 @@ data class CoreRenderOptions(
     val breakingStyle: BreakingNewsStyle = BreakingNewsStyle.BREAKING,
     val chyronHeadline: String = "",
     val chyronSubline: String = "",
+    val showLowerThird: Boolean = true,
     val showBrandBug: Boolean = false,
     val cornerBugText: String = "LIVE",
     /** Cut-scene B-roll framing: "pip" (Corner PiP), "full" (Full Cutaway), or "split" (50/50 Split). */
     val brollFraming: String = BROLL_FRAMING_PIP,
+    /** Default transition applied to cuts whose per-clause transition is unset. */
+    val defaultTransition: String = ClipTransitionType.CUT.wire,
     val useRemotion: Boolean? = null
 ) {
     companion object {
@@ -255,18 +289,35 @@ data class CorePipelineSession(
     val ttsSource: String = "",
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
-    /** Everything that changes the studio cut output: clauses, options, overlays, and the look. */
-    fun cutSignature(look: NewsroomLook?): String = buildString {
+    /** Everything that changes the studio cut output: clauses, transitions, options, overlays content, and look. */
+    fun cutSignature(
+        look: NewsroomLook?,
+        savedOverlays: List<SavedNewsroomOverlay> = emptyList()
+    ): String = buildString {
         clauses.forEach {
             append(it.spokenText.trim()).append('|')
                 .append(it.segmentMode.name).append('|')
                 .append(it.brollCaption).append('|')
                 .append(it.bRollPrompt).append('|')
                 .append(it.bRollSha.orEmpty()).append('|')
+                .append(it.brollMediaId.orEmpty()).append('|')
+                .append(it.brollFramingOverride).append('|')
+                .append(it.transitionType).append(':').append(it.transitionDurationMs).append('|')
                 .append(it.depthTextTag).append('\n')
         }
         append(renderOptions.toString()).append('\n')
-        append(selectedOverlayIds.sorted().joinToString(",")).append('\n')
+        val selectedSet = selectedOverlayIds.toSet()
+        val matchedOverlays = savedOverlays.filter { it.id in selectedSet }.sortedBy { it.id }
+        if (matchedOverlays.isNotEmpty()) {
+            matchedOverlays.forEach { ovl ->
+                append(ovl.id).append('|').append(ovl.kind.name).append('|')
+                    .append(ovl.breakingStyle.wire).append('|')
+                    .append(ovl.headline).append('|').append(ovl.subline).append('|')
+                    .append(ovl.calloutStat).append('|').append(ovl.durationSec).append('\n')
+            }
+        } else {
+            append(selectedOverlayIds.sorted().joinToString(",")).append('\n')
+        }
         append(talkingHeadJobId.orEmpty()).append('\n')
         if (look != null) {
             append(look.plateId.orEmpty()).append(look.blurPercent).append(look.brightnessEv)

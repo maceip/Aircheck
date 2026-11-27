@@ -30,6 +30,7 @@ import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.sharp.ArrowForward
+import androidx.compose.material.icons.automirrored.sharp.Undo
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.sharp.Add
 import androidx.compose.material.icons.sharp.Anchor
@@ -162,6 +163,16 @@ fun SparkScreen(
                         count = state.selectedAnchorCount,
                         open = state.anchorsSheetOpen,
                         onClick = vm::toggleAnchorsSheet
+                    )
+                    CsIconKey(
+                        icon = Icons.AutoMirrored.Sharp.Undo,
+                        contentDescription = "Undo beat edit",
+                        onClick = vm::undoArcShotEdit,
+                        enabled = doc.canUndoArc,
+                        size = 40.dp,
+                        radius = 11.dp,
+                        iconSize = 20.dp,
+                        modifier = Modifier.testTag("cs_spark_undo")
                     )
                 }
                 CsIconKey(
@@ -714,8 +725,8 @@ private fun SparkOutlineContent(
             )
         }
 
-        // Segmented 4-beat Outline Panel — clean individual beat sections (no rainbow section borders);
-        // tap any beat's text to edit inline; rainbow metallic shimmer lives directly on the sparkle icon.
+        // Scrollable 4-beat Outline Panel — spacious full-text beat cards; tap any beat text or Edit
+        // to edit directly inline; per-beat sparkle rewrites ONLY that beat without blocking others.
         var editingBeatIndex by rememberSaveable { mutableStateOf<Int?>(null) }
         BackHandler(enabled = editingBeatIndex != null) { editingBeatIndex = null }
         LaunchedEffect(doc.id, doc.arcBeats.size) {
@@ -729,14 +740,49 @@ private fun SparkOutlineContent(
                 .weight(1f)
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp)
-                .then(if (editingBeatIndex != null) Modifier.verticalScroll(rememberScrollState()) else Modifier)
+                .verticalScroll(rememberScrollState())
                 .testTag("cs_outline_panel"),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            val activeAnchors = (doc.extractedAngles + doc.blindspotAngles).filter { it.selected }
+            if (doc.arcBeats.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Cs.SunkenTrack)
+                        .border(1.dp, Color(0xFF23232B), RoundedCornerShape(12.dp))
+                        .clickable(role = Role.Button, onClick = vm::toggleAnchorsSheet)
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("cs_active_anchors_bar"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Sharp.Anchor,
+                        contentDescription = null,
+                        tint = if (activeAnchors.isNotEmpty()) Cs.Amber else Cs.Muted,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = if (activeAnchors.isEmpty()) {
+                            "No locked anchors · tap to add"
+                        } else {
+                            "Keeping: " + activeAnchors.joinToString(" · ") { it.label }
+                        },
+                        style = mono(11.5.sp, if (activeAnchors.isNotEmpty()) Cs.InkSub else Cs.Muted),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
             if (doc.arcBeats.isEmpty()) {
                 Column(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .fillMaxWidth()
+                        .heightIn(min = 260.dp)
                         .sunkenPanel(radius = 18.dp)
                         .padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterVertically),
@@ -767,17 +813,8 @@ private fun SparkOutlineContent(
                 }
             } else {
                 doc.arcBeats.forEachIndexed { i, beat ->
-                    val isRerolling = state.rerollingBeatIndex == i
+                    val isRerolling = i in state.rerollingBeatIndices
                     val isEditing = editingBeatIndex == i
-                    val cardModifier = if (editingBeatIndex != null) {
-                        Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = if (isEditing) 144.dp else 96.dp)
-                    } else {
-                        Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                    }
                     OutlineBeatRow(
                         index = i,
                         beat = beat,
@@ -785,7 +822,7 @@ private fun SparkOutlineContent(
                         isEditing = isEditing,
                         shotPreviews = state.shotPreviews,
                         inFlightShotIds = state.inFlightShotIds,
-                        isBusy = state.isBusy,
+                        isWholeArcBusy = state.isBusy,
                         onStartEdit = { editingBeatIndex = i },
                         onSaveEdit = { updated ->
                             vm.updateArcBeatText(i, updated)
@@ -795,22 +832,52 @@ private fun SparkOutlineContent(
                         onCycleShot = { shotIdx -> vm.cycleBeatShot(i, shotIdx) },
                         onAddShot = { vm.addBeatBrollShot(i) },
                         onReroll = {
-                            editingBeatIndex = null
+                            if (editingBeatIndex == i) editingBeatIndex = null
                             vm.rerollArcBeat(i)
                         },
-                        modifier = cardModifier
+                        modifier = Modifier
+                            .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
                             .background(Cs.SunkenPanel)
                             .border(
                                 width = 1.dp,
                                 color = when {
                                     isEditing -> Cs.Amber
-                                    isRerolling -> Color(0xFF42444E)
+                                    isRerolling -> Cs.Cobalt
                                     else -> Color(0xFF26262E)
                                 },
                                 shape = RoundedCornerShape(16.dp)
                             )
                     )
+                }
+
+                // One-tap regenerate all beats without losing your idea note
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 2.dp, bottom = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CsKey(
+                        onClick = vm::generateArc,
+                        enabled = !state.isBusy && doc.seedTranscript.isNotBlank(),
+                        role = KeyRole.STD,
+                        radius = 12.dp,
+                        horizontalPadding = 12.dp,
+                        contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(42.dp)
+                            .testTag("cs_arc_rewrite_all")
+                    ) { tint ->
+                        Icon(
+                            imageVector = Icons.Sharp.Refresh,
+                            contentDescription = null,
+                            tint = tint,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text("rewrite all 4 beats", style = mono(12.sp, tint), maxLines = 1)
+                    }
                 }
             }
         }
@@ -828,10 +895,14 @@ private fun SparkOutlineContent(
                     modifier = Modifier.testTag("cs_hold_direction")
                 )
             },
-            primaryLabel = "write the script",
+            primaryLabel = if (doc.candidates.isNotEmpty() && state.outlineChangedSinceScript) {
+                "rewrite script"
+            } else {
+                "write the script"
+            },
             primaryTrailingIcon = Icons.AutoMirrored.Sharp.ArrowForward,
             primaryRole = KeyRole.COMMIT,
-            primaryEnabled = doc.seedTranscript.isNotBlank() && !state.isBusy,
+            primaryEnabled = doc.seedTranscript.isNotBlank() && !state.isBusy && state.rerollingBeatIndices.isEmpty(),
             primaryTag = "cs_write_script",
             onPrimaryClick = vm::writeVideoScript,
             isBusy = state.isBusy,
@@ -848,7 +919,7 @@ private fun OutlineBeatRow(
     isEditing: Boolean,
     shotPreviews: Map<String, String>,
     inFlightShotIds: Set<String>,
-    isBusy: Boolean,
+    isWholeArcBusy: Boolean,
     onStartEdit: () -> Unit,
     onSaveEdit: (String) -> Unit,
     onCancelEdit: () -> Unit,
@@ -857,48 +928,58 @@ private fun OutlineBeatRow(
     onReroll: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val beatInteractive = !isWholeArcBusy && !isRerolling
     Row(
         modifier = modifier
-            .padding(start = 16.dp, top = 6.dp, end = 6.dp, bottom = 6.dp)
+            .padding(start = 14.dp, top = 10.dp, end = 8.dp, bottom = 10.dp)
             .testTag("cs_arc_beat_$index"),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Column(
-            modifier = Modifier.width(54.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
+            modifier = Modifier.width(56.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Text(beat.label, style = mono(11.sp, Cs.Ink, FontWeight.Medium), maxLines = 1)
+            Text(beat.label, style = mono(11.sp, Cs.Ink, FontWeight.SemiBold), maxLines = 1)
             Text(
                 text = beat.window.ifBlank { "${beat.startSec}–${beat.endSec}s" },
-                style = mono(11.sp, Cs.Muted),
+                style = mono(10.5.sp, Cs.Muted),
                 maxLines = 1
             )
             if (!isEditing && !isRerolling) {
-                Icon(
-                    imageVector = Icons.Sharp.Edit,
-                    contentDescription = "Edit beat ${index + 1}",
-                    tint = Cs.Muted,
+                Row(
                     modifier = Modifier
-                        .padding(top = 4.dp)
-                        .size(15.dp)
-                        .clickable(enabled = !isBusy, role = Role.Button, onClick = onStartEdit)
-                        .testTag("cs_edit_beat_$index")
-                )
+                        .padding(top = 2.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Cs.Track)
+                        .clickable(enabled = beatInteractive, role = Role.Button, onClick = onStartEdit)
+                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                        .testTag("cs_edit_beat_$index"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Sharp.Edit,
+                        contentDescription = "Edit beat ${index + 1}",
+                        tint = Cs.InkSub,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Text("edit", style = mono(10.sp, Cs.InkSub), maxLines = 1)
+                }
             }
         }
 
         Column(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (isEditing) {
                 val fieldState = rememberTextFieldState(initialText = beat.text)
                 BasicTextField(
                     state = fieldState,
-                    textStyle = sans(15.5.sp, Cs.White, 21.sp),
+                    textStyle = sans(15.5.sp, Cs.White, 22.sp),
                     cursorBrush = SolidColor(Cs.White),
-                    lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 2, maxHeightInLines = 4),
+                    lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 2, maxHeightInLines = 6),
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
@@ -917,8 +998,18 @@ private fun OutlineBeatRow(
                         weight = FontWeight.SemiBold,
                         enabled = fieldState.text.toString().isNotBlank(),
                         modifier = Modifier
-                            .height(36.dp)
+                            .height(38.dp)
                             .testTag("cs_beat_save_$index")
+                    )
+                    CsKeyLabel(
+                        label = "clear",
+                        onClick = { fieldState.setTextAndPlaceCursorAtEnd("") },
+                        role = KeyRole.STD,
+                        radius = 10.dp,
+                        size = 12.sp,
+                        modifier = Modifier
+                            .height(38.dp)
+                            .testTag("cs_beat_clear_$index")
                     )
                     CsKeyLabel(
                         label = "cancel",
@@ -927,19 +1018,17 @@ private fun OutlineBeatRow(
                         radius = 10.dp,
                         size = 12.sp,
                         modifier = Modifier
-                            .height(36.dp)
+                            .height(38.dp)
                             .testTag("cs_beat_cancel_$index")
                     )
                 }
             } else {
                 Text(
-                    text = if (isRerolling) "rewriting…" else beat.text,
-                    style = sans(16.sp, if (isRerolling) Cs.Muted else Cs.Ink, 21.sp),
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
+                    text = if (isRerolling) "rewriting ${beat.label.lowercase()}…" else beat.text,
+                    style = sans(15.5.sp, if (isRerolling) Cs.Cobalt else Cs.Ink, 22.sp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(enabled = !isBusy && !isRerolling, role = Role.Button, onClick = onStartEdit)
+                        .clickable(enabled = beatInteractive, role = Role.Button, onClick = onStartEdit)
                         .testTag("cs_beat_text_$index")
                 )
             }
@@ -953,7 +1042,7 @@ private fun OutlineBeatRow(
                         shot = shot,
                         previewPath = shotPreviews[shot.id],
                         isLoading = shot.id in inFlightShotIds,
-                        onClick = { onCycleShot(sIdx) },
+                        onClick = { if (beatInteractive) onCycleShot(sIdx) },
                         modifier = Modifier.testTag("cs_shot_${index}_$sIdx")
                     )
                 }
@@ -974,7 +1063,7 @@ private fun OutlineBeatRow(
                                 )
                             )
                         }
-                        .clickable(role = Role.Button, onClick = onAddShot)
+                        .clickable(enabled = beatInteractive, role = Role.Button, onClick = onAddShot)
                         .testTag("cs_add_shot_$index"),
                     contentAlignment = Alignment.Center
                 ) {
@@ -1000,12 +1089,11 @@ private fun OutlineBeatRow(
             }
         }
 
-        // Flat, unfilled (outlined) sparkle icon with rainbow shimmer directly on the icon strokes
-        // — NO border, NO box, NO elevation. Shows bold solving orb while re-rolling.
+        // Per-beat non-blocking sparkle rewrite: rewrites THIS entire beat (text + shots) while other beats stay interactive.
         Box(
             modifier = Modifier
                 .size(44.dp)
-                .clickable(enabled = !isBusy && !isRerolling, role = Role.Button, onClick = onReroll)
+                .clickable(enabled = beatInteractive, role = Role.Button, onClick = onReroll)
                 .testTag("cs_reroll_beat_$index"),
             contentAlignment = Alignment.Center
         ) {
@@ -1014,7 +1102,7 @@ private fun OutlineBeatRow(
             } else {
                 ShimmerSparkleIcon(
                     contentDescription = "Rewrite beat ${index + 1}",
-                    enabled = !isBusy,
+                    enabled = beatInteractive,
                     size = 24.dp,
                     phaseOffsetDeg = index * 75f
                 )
@@ -1432,8 +1520,54 @@ private fun AnchorsBottomSheet(
                 }
             }
 
+            val customAnchorState = rememberTextFieldState()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .sunkenPanel(radius = 12.dp)
+                    .padding(start = 12.dp, top = 4.dp, end = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                BasicTextField(
+                    state = customAnchorState,
+                    textStyle = sans(14.sp, Cs.Ink, 20.sp),
+                    cursorBrush = SolidColor(Cs.Ink),
+                    lineLimits = TextFieldLineLimits.SingleLine,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("cs_anchor_custom_input"),
+                    decorator = { inner ->
+                        Box {
+                            if (customAnchorState.text.isEmpty()) {
+                                Text("Add a point you want included…", style = sans(14.sp, Cs.Dim, 20.sp))
+                            }
+                            inner()
+                        }
+                    }
+                )
+                CsKeyLabel(
+                    label = "add",
+                    onClick = {
+                        val txt = customAnchorState.text.toString().trim()
+                        if (txt.isNotEmpty()) {
+                            vm.addCustomAnchor(txt)
+                            customAnchorState.setTextAndPlaceCursorAtEnd("")
+                        }
+                    },
+                    enabled = customAnchorState.text.toString().isNotBlank(),
+                    role = KeyRole.ACTIVE,
+                    radius = 10.dp,
+                    size = 12.sp,
+                    modifier = Modifier
+                        .height(38.dp)
+                        .testTag("cs_anchor_custom_add")
+                )
+            }
+
             CsKey(
-                onClick = { vm.setAnchorsSheetOpen(false) },
+                onClick = { vm.applyAnchorsAndRegenerateBeats() },
                 role = KeyRole.COMMIT,
                 radius = 18.dp,
                 horizontalPadding = 20.dp,
@@ -1441,15 +1575,21 @@ private fun AnchorsBottomSheet(
                 modifier = Modifier
                     .padding(top = 6.dp)
                     .fillMaxWidth()
-                    .height(64.dp)
+                    .height(60.dp)
                     .testTag("cs_anchors_done")
             ) { tint ->
                 Text(
-                    text = "keep $count anchor${if (count == 1) "" else "s"}",
-                    style = mono(15.sp, tint, FontWeight.Medium),
+                    text = if (state.anchorsDirtyForBeats) {
+                        "apply $count anchor${if (count == 1) "" else "s"} & update beats"
+                    } else {
+                        "keep $count anchor${if (count == 1) "" else "s"}"
+                    },
+                    style = mono(14.sp, tint, FontWeight.Medium),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                Icon(Icons.Sharp.Check, contentDescription = null, tint = tint, modifier = Modifier.size(24.dp))
+                Icon(Icons.Sharp.Check, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
             }
         }
     }

@@ -15,6 +15,7 @@ import com.example.data.BreakingNewsStyle
 import com.example.data.BrollSegmentMode
 import com.example.data.ClipCardRow
 import com.example.data.ClipRecord
+import com.example.data.ClipTransitionType
 import com.example.data.CorePipelineSession
 import com.example.data.CoreRenderOptions
 import com.example.data.NewsroomLook
@@ -105,7 +106,10 @@ data class StudioUiState(
     val isGeneratingBackdrop: Boolean = false,
     val isGeneratingOverlaySet: Boolean = false,
     val isDetectingSilence: Boolean = false,
+    val generatingBrollClauseIndices: Set<Int> = emptySet(),
+    val uploadingBrollClauseIndices: Set<Int> = emptySet(),
     val coreUndoDepth: Int = 0,
+    val lastUndoLabel: String? = null,
     val errorMessage: String? = null,
     val statusNotice: String? = null,
     val toastMessage: String? = null,
@@ -551,8 +555,7 @@ class StudioViewModel internal constructor(
                 a2uiComponentsJson = jsonPayload
             )
             localRepo.saveNewsroomOverlay(saved)
-            profileStore.incrementRemotionUsedCount()
-            val msg = "Saved '${saved.headline}' for News Briefs."
+            val msg = "Saved '${saved.headline}'."
             _uiState.update {
                 it.copy(
                     errorMessage = null,
@@ -562,6 +565,56 @@ class StudioViewModel internal constructor(
             }
             a2uiController.syncNewsroomSurface(remotionUnused = false, statusMessage = msg)
         }
+    }
+
+    /** Creates a new broadcast overlay directly from the Newsroom Overlays Editor and optionally attaches it. */
+    fun createAndAttachOverlay(
+        kind: OverlayObjectKind,
+        headline: String,
+        subline: String,
+        calloutStat: String = "",
+        durationSec: Int = 4,
+        breakingStyle: BreakingNewsStyle = _uiState.value.corePipelineSession.renderOptions.breakingStyle,
+        attachToCut: Boolean = true
+    ): SavedNewsroomOverlay? {
+        val cleanHeadline = headline.trim().take(64)
+        if (cleanHeadline.isEmpty()) {
+            _uiState.update { it.copy(errorMessage = "Enter a headline before creating an overlay.") }
+            return null
+        }
+        val cleanSubline = subline.trim().take(80)
+        val cleanStat = calloutStat.trim().take(28)
+        val created = SavedNewsroomOverlay(
+            kind = kind,
+            breakingStyle = breakingStyle,
+            headline = cleanHeadline,
+            subline = cleanSubline,
+            calloutStat = cleanStat,
+            durationSec = durationSec.coerceIn(2, 20),
+            a2uiComponentsJson = AircheckA2uiController.serializeOverlayAsA2uiComponentsJson(
+                headline = cleanHeadline,
+                subline = cleanSubline,
+                calloutStat = cleanStat
+            )
+        )
+        _uiState.update { st ->
+            st.copy(
+                savedOverlays = listOf(created) + st.savedOverlays.filterNot { it.id == created.id },
+                errorMessage = null,
+                toastMessage = if (attachToCut) "Overlay created & attached" else "Overlay created"
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            localRepo.saveNewsroomOverlay(created)
+        }
+        if (attachToCut) {
+            val current = _uiState.value.corePipelineSession
+            commitCoreEdit(
+                current.copy(selectedOverlayIds = (current.selectedOverlayIds + created.id).distinct()),
+                label = "Add overlay"
+            )
+        }
+        return created
     }
 
     /**
@@ -618,12 +671,12 @@ class StudioViewModel internal constructor(
                     )
                 }
                 savedItems.forEach { localRepo.saveNewsroomOverlay(it) }
-                profileStore.incrementRemotionUsedCount()
                 val currentSession = _uiState.value.corePipelineSession
                 commitCoreEdit(
                     currentSession.copy(
                         selectedOverlayIds = savedItems.map { it.id }
-                    )
+                    ),
+                    label = "Generate overlay set"
                 )
                 val primary = savedItems.firstOrNull()
                 val msg = "Generated ${savedItems.size} ${activeStyle.chipLabel} overlays & attached to cut."
@@ -1018,19 +1071,17 @@ class StudioViewModel internal constructor(
 
     fun toggleSavedOverlayForPipeline(overlayId: String) {
         val current = _uiState.value.corePipelineSession
-        val nextIds = if (overlayId in current.selectedOverlayIds) {
-            current.selectedOverlayIds - overlayId
-        } else {
+        val attaching = overlayId !in current.selectedOverlayIds
+        val nextIds = if (attaching) {
             current.selectedOverlayIds + overlayId
+        } else {
+            current.selectedOverlayIds - overlayId
         }
-        val updated = current.copy(
-            selectedOverlayIds = nextIds,
-            updatedAtMillis = System.currentTimeMillis()
+        commitCoreEdit(
+            current.copy(selectedOverlayIds = nextIds),
+            label = if (attaching) "Attach overlay" else "Detach overlay"
         )
-        _uiState.update { it.copy(corePipelineSession = updated) }
-        viewModelScope.launch(Dispatchers.IO) {
-            localRepo.saveCorePipelineSession(updated)
-        }
+        showToast(if (attaching) "Overlay attached to clip" else "Overlay detached from clip")
     }
 
     /**
@@ -1192,35 +1243,61 @@ class StudioViewModel internal constructor(
     }
 
     // =========================================================================
-    // Clip Studio v4: 03 CUT render options, undo, voice re-sync
+    // Clip Studio v5+: 03 CUT, Newsroom Overlays, B-Roll Studio & Rich Undo
     // =========================================================================
 
-    private val coreUndoStack = ArrayDeque<CorePipelineSession>()
+    private data class CoreUndoEntry(
+        val label: String,
+        val session: CorePipelineSession,
+        val looks: List<NewsroomLook>
+    )
 
-    /** Persists [next] as the new session and remembers the previous one for [undoCoreEdit]. */
-    private fun commitCoreEdit(next: CorePipelineSession) {
-        val previous = _uiState.value.corePipelineSession
+    private val coreUndoStack = ArrayDeque<CoreUndoEntry>()
+
+    /** Persists [next] as the new session and remembers the previous session + looks for [undoCoreEdit]. */
+    private fun commitCoreEdit(
+        next: CorePipelineSession,
+        label: String = "Edit",
+        looksOverride: List<NewsroomLook>? = null
+    ) {
+        val curState = _uiState.value
+        val previous = curState.corePipelineSession
+        val prevLooks = curState.newsroomLooks
         synchronized(coreUndoStack) {
-            coreUndoStack.addLast(previous)
+            coreUndoStack.addLast(CoreUndoEntry(label = label, session = previous, looks = prevLooks))
             while (coreUndoStack.size > MAX_CORE_UNDO) coreUndoStack.removeFirst()
         }
         val stamped = next.copy(updatedAtMillis = System.currentTimeMillis())
-        _uiState.update { it.copy(corePipelineSession = stamped, coreUndoDepth = coreUndoStack.size) }
-        viewModelScope.launch(Dispatchers.IO) { localRepo.saveCorePipelineSession(stamped) }
-    }
-
-    /** Restores and persists the session as it was before the last Cut edit. */
-    fun undoCoreEdit() {
-        val restored = synchronized(coreUndoStack) { coreUndoStack.removeLastOrNull() } ?: return
-        val stamped = restored.copy(updatedAtMillis = System.currentTimeMillis())
         _uiState.update {
             it.copy(
                 corePipelineSession = stamped,
+                newsroomLooks = looksOverride ?: it.newsroomLooks,
                 coreUndoDepth = coreUndoStack.size,
-                toastMessage = "undid last change"
+                lastUndoLabel = label
             )
         }
         viewModelScope.launch(Dispatchers.IO) { localRepo.saveCorePipelineSession(stamped) }
+    }
+
+    /** Restores and persists the session & newsroom looks as they were before the last edit. */
+    fun undoCoreEdit() {
+        val entry = synchronized(coreUndoStack) { coreUndoStack.removeLastOrNull() } ?: return
+        val stamped = entry.session.copy(updatedAtMillis = System.currentTimeMillis())
+        val nextTopLabel = synchronized(coreUndoStack) { coreUndoStack.lastOrNull()?.label }
+        _uiState.update {
+            it.copy(
+                corePipelineSession = stamped,
+                newsroomLooks = entry.looks,
+                coreUndoDepth = coreUndoStack.size,
+                lastUndoLabel = nextTopLabel,
+                toastMessage = "Undid: ${entry.label}"
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            localRepo.saveCorePipelineSession(stamped)
+            entry.looks.forEach { look -> localRepo.saveNewsroomLook(look) }
+            entry.looks.firstOrNull { it.isDefault }?.let { def -> localRepo.setDefaultNewsroomLook(def.id) }
+        }
     }
 
     /** Seeks to clause [index] and toggles its inline action tray (`edit words` / `b-roll here`). */
@@ -1241,15 +1318,21 @@ class StudioViewModel internal constructor(
         _uiState.update { it.copy(openClauseIndex = index) }
     }
 
-    fun setCoreStripSilence(enabled: Boolean) = updateRenderOptions { it.copy(stripSilence = enabled) }
+    fun setCoreStripSilence(enabled: Boolean) = updateRenderOptions("Trim pauses") { it.copy(stripSilence = enabled) }
 
-    fun setCorePunchIn(enabled: Boolean) = updateRenderOptions { it.copy(punchIn = enabled) }
+    fun setCorePunchIn(enabled: Boolean) = updateRenderOptions("Auto zoom") { it.copy(punchIn = enabled) }
 
-    fun setCoreCaptions(enabled: Boolean) = updateRenderOptions { it.copy(captions = enabled) }
+    fun setCoreCaptions(enabled: Boolean) = updateRenderOptions("Captions") { it.copy(captions = enabled) }
 
-    fun setCoreBreakingStyle(style: BreakingNewsStyle) = updateRenderOptions { it.copy(breakingStyle = style) }
+    fun setCoreBreakingStyle(style: BreakingNewsStyle) = updateRenderOptions("Chyron style") { it.copy(breakingStyle = style) }
 
-    fun setCoreBrandBug(show: Boolean, text: String? = null) = updateRenderOptions { cur ->
+    fun setCoreShowLowerThird(show: Boolean) = updateRenderOptions("Lower-third toggle") { it.copy(showLowerThird = show) }
+
+    fun updateChyronSubline(subline: String) = updateRenderOptions("Chyron subline") {
+        it.copy(chyronSubline = subline.trim().take(80))
+    }
+
+    fun setCoreBrandBug(show: Boolean, text: String? = null) = updateRenderOptions("Corner bug") { cur ->
         cur.copy(
             showBrandBug = show,
             cornerBugText = text?.trim()?.take(24)?.ifBlank { cur.cornerBugText } ?: cur.cornerBugText
@@ -1264,28 +1347,303 @@ class StudioViewModel internal constructor(
                 CoreRenderOptions.BROLL_FRAMING_SPLIT
             )
         } ?: CoreRenderOptions.BROLL_FRAMING_PIP
-        updateRenderOptions { it.copy(brollFraming = valid) }
+        updateRenderOptions("B-roll layout") { it.copy(brollFraming = valid) }
     }
 
-    /** Edits an existing saved cut-scene overlay card inline from `Video look` and persists to Room. */
+    fun setCoreDefaultTransition(transition: ClipTransitionType) {
+        updateRenderOptions("Default transition") { it.copy(defaultTransition = transition.wire) }
+    }
+
+    /** Applies [transition] and [durationMs] to every clause in the story. */
+    fun applyTransitionToAllCuts(transition: ClipTransitionType, durationMs: Int = 350) {
+        val clamped = durationMs.coerceIn(150, 900)
+        val current = _uiState.value.corePipelineSession
+        commitCoreEdit(
+            current.copy(
+                renderOptions = current.renderOptions.copy(defaultTransition = transition.wire),
+                clauses = current.clauses.map {
+                    it.copy(transitionType = transition.wire, transitionDurationMs = clamped)
+                }
+            ),
+            label = "Transition (${transition.label})"
+        )
+        showToast("Applied ${transition.label} to all cuts")
+    }
+
+    /** Updates the transition entering clause [index]. */
+    fun setClauseTransition(index: Int, transition: ClipTransitionType, durationMs: Int = 350) {
+        val clamped = durationMs.coerceIn(150, 900)
+        val current = _uiState.value.corePipelineSession
+        if (index !in current.clauses.indices) return
+        val curClause = current.clauses[index]
+        if (curClause.transitionType == transition.wire && curClause.transitionDurationMs == clamped) return
+        commitCoreEdit(
+            current.copy(
+                clauses = current.clauses.mapIndexed { i, c ->
+                    if (i == index) c.copy(transitionType = transition.wire, transitionDurationMs = clamped) else c
+                }
+            ),
+            label = "Cut ${index + 1} transition"
+        )
+    }
+
+    /** Updates per-clause cutaway framing override (`""` inherits default, or `"pip"`, `"full"`, `"split"`). */
+    fun setClauseBrollFraming(index: Int, framingOverride: String) {
+        val clean = framingOverride.trim().lowercase().takeIf {
+            it.isEmpty() || it in setOf(
+                CoreRenderOptions.BROLL_FRAMING_PIP,
+                CoreRenderOptions.BROLL_FRAMING_FULL,
+                CoreRenderOptions.BROLL_FRAMING_SPLIT
+            )
+        } ?: ""
+        val current = _uiState.value.corePipelineSession
+        if (index !in current.clauses.indices) return
+        if (current.clauses[index].brollFramingOverride == clean) return
+        commitCoreEdit(
+            current.copy(
+                clauses = current.clauses.mapIndexed { i, c ->
+                    if (i == index) c.copy(brollFramingOverride = clean) else c
+                }
+            ),
+            label = "Cut ${index + 1} framing"
+        )
+    }
+
+    /** Updates the visual B-roll prompt for clause [index] (clears stale generated media ID if prompt changed). */
+    fun updateClauseBrollPrompt(index: Int, prompt: String) {
+        val clean = prompt.trim().take(240)
+        val current = _uiState.value.corePipelineSession
+        if (index !in current.clauses.indices) return
+        val existing = current.clauses[index]
+        if (existing.bRollPrompt == clean && existing.brollCaption == clean) return
+        commitCoreEdit(
+            current.copy(
+                clauses = current.clauses.mapIndexed { i, c ->
+                    if (i == index) {
+                        c.copy(
+                            bRollPrompt = clean,
+                            brollCaption = clean,
+                            brollMediaId = if (c.customBrollExt.isBlank()) null else c.brollMediaId
+                        )
+                    } else {
+                        c
+                    }
+                }
+            ),
+            label = "B-roll prompt"
+        )
+    }
+
+    /** Generates a real B-roll still on the Mac rig for clause [index] and stores its servable URL/ID. */
+    fun generateBrollForClause(index: Int, promptOverride: String? = null) {
+        val current = _uiState.value.corePipelineSession
+        val clause = current.clauses.getOrNull(index) ?: return
+        if (index in _uiState.value.generatingBrollClauseIndices) return
+        val prompt = promptOverride?.trim()?.takeIf { it.isNotEmpty() }
+            ?: clause.bRollPrompt.trim().ifBlank { clause.brollCaption.trim().ifBlank { clause.spokenText.trim() } }
+        if (prompt.isEmpty()) {
+            _uiState.update { it.copy(errorMessage = "Describe the B-roll visual before generating.") }
+            return
+        }
+        val aspect = current.renderOptions.aspect
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update {
+                it.copy(
+                    generatingBrollClauseIndices = it.generatingBrollClauseIndices + index,
+                    errorMessage = null
+                )
+            }
+            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+            val result = runCatching {
+                val health = macRigGateway.resolveAndCheckHealth(rigUrl)
+                macRigGateway.generateBrollPreview(health.resolvedUrl, prompt, aspect)
+            }
+            result.onSuccess { media ->
+                val latest = _uiState.value.corePipelineSession
+                if (index in latest.clauses.indices) {
+                    commitCoreEdit(
+                        latest.copy(
+                            clauses = latest.clauses.mapIndexed { i, c ->
+                                if (i == index) {
+                                    c.copy(
+                                        segmentMode = BrollSegmentMode.BROLL_CUTAWAY,
+                                        bRollPrompt = prompt,
+                                        brollCaption = prompt,
+                                        brollMediaId = media.mediaId,
+                                        brollPreviewUrl = media.url,
+                                        bRollSha = null,
+                                        customBrollExt = ""
+                                    )
+                                } else {
+                                    c
+                                }
+                            }
+                        ),
+                        label = "Generate B-roll"
+                    )
+                }
+                _uiState.update {
+                    it.copy(
+                        generatingBrollClauseIndices = it.generatingBrollClauseIndices - index,
+                        toastMessage = "B-roll generated for cut ${index + 1}"
+                    )
+                }
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                _uiState.update {
+                    it.copy(
+                        generatingBrollClauseIndices = it.generatingBrollClauseIndices - index,
+                        errorMessage = "B-roll generation failed: ${err.localizedMessage ?: "rig unreachable"}."
+                    )
+                }
+            }
+        }
+    }
+
+    /** Imports a user-picked photo or video clip from phone storage into CAS & uploads it for clause [index]. */
+    fun importCustomBrollMediaForClause(index: Int, uri: Uri) {
+        val current = _uiState.value.corePipelineSession
+        if (index !in current.clauses.indices) return
+        if (index in _uiState.value.uploadingBrollClauseIndices) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update {
+                it.copy(
+                    uploadingBrollClauseIndices = it.uploadingBrollClauseIndices + index,
+                    errorMessage = null
+                )
+            }
+            try {
+                val resolver = getApplication<Application>().contentResolver
+                val mime = resolver.getType(uri).orEmpty().lowercase()
+                val isVideo = mime.startsWith("video/")
+                val (bytes, ext) = if (isVideo) {
+                    val raw = resolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: throw IllegalStateException("Could not read selected video.")
+                    if (raw.isEmpty()) throw IllegalStateException("Selected video is empty.")
+                    if (raw.size > 38 * 1024 * 1024) {
+                        throw IllegalStateException("B-roll video must be under 38 MB.")
+                    }
+                    raw to (if (mime.contains("quicktime")) "mov" else "mp4")
+                } else {
+                    val source = ImageDecoder.createSource(resolver, uri)
+                    val decoded = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                        val maxDim = maxOf(info.size.width, info.size.height)
+                        if (maxDim > 1600) {
+                            val ratio = 1600f / maxDim.toFloat()
+                            decoder.setTargetSize(
+                                (info.size.width * ratio).toInt().coerceAtLeast(1),
+                                (info.size.height * ratio).toInt().coerceAtLeast(1)
+                            )
+                        }
+                    }
+                    val jpg = ByteArrayOutputStream().use { baos ->
+                        decoded.compress(Bitmap.CompressFormat.JPEG, 90, baos)
+                        decoded.recycle()
+                        baos.toByteArray()
+                    }
+                    if (jpg.isEmpty()) throw IllegalStateException("Selected image could not be encoded.")
+                    jpg to "jpg"
+                }
+                val stored = casStore.putBytes(bytes, ext)
+                val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+                val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+                val uploaded = runCatching {
+                    val health = macRigGateway.resolveAndCheckHealth(rigUrl)
+                    macRigGateway.uploadBrollMedia(health.resolvedUrl, bytes, ext)
+                }.getOrNull()
+
+                val latest = _uiState.value.corePipelineSession
+                if (index in latest.clauses.indices) {
+                    commitCoreEdit(
+                        latest.copy(
+                            clauses = latest.clauses.mapIndexed { i, c ->
+                                if (i == index) {
+                                    c.copy(
+                                        segmentMode = BrollSegmentMode.BROLL_CUTAWAY,
+                                        bRollSha = stored.sha256,
+                                        customBrollExt = ext,
+                                        brollMediaId = uploaded?.mediaId,
+                                        brollPreviewUrl = stored.file.absolutePath
+                                    )
+                                } else {
+                                    c
+                                }
+                            }
+                        ),
+                        label = "Attach custom B-roll"
+                    )
+                }
+                _uiState.update {
+                    it.copy(
+                        uploadingBrollClauseIndices = it.uploadingBrollClauseIndices - index,
+                        toastMessage = if (isVideo) "Video attached to cut ${index + 1}" else "Photo attached to cut ${index + 1}"
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        uploadingBrollClauseIndices = it.uploadingBrollClauseIndices - index,
+                        errorMessage = "Could not attach B-roll media: ${e.localizedMessage ?: "unsupported file"}."
+                    )
+                }
+            }
+        }
+    }
+
+    /** Clears custom or generated B-roll media on clause [index]. */
+    fun clearClauseCustomBroll(index: Int) {
+        val current = _uiState.value.corePipelineSession
+        if (index !in current.clauses.indices) return
+        commitCoreEdit(
+            current.copy(
+                clauses = current.clauses.mapIndexed { i, c ->
+                    if (i == index) {
+                        c.copy(bRollSha = null, customBrollExt = "", brollMediaId = null, brollPreviewUrl = null)
+                    } else {
+                        c
+                    }
+                }
+            ),
+            label = "Clear B-roll media"
+        )
+        showToast("Cleared custom media on cut ${index + 1}")
+    }
+
+    /** Edits an existing saved overlay inline from the Newsroom Overlays Editor and persists to Room. */
     fun updateSavedOverlayInline(
         overlayId: String,
         headline: String,
         subline: String? = null,
         calloutStat: String? = null,
-        breakingStyle: BreakingNewsStyle? = null
+        breakingStyle: BreakingNewsStyle? = null,
+        kind: OverlayObjectKind? = null,
+        durationSec: Int? = null
     ) {
         val existing = _uiState.value.savedOverlays.firstOrNull { it.id == overlayId } ?: return
+        val nextHeadline = headline.trim().ifBlank { existing.headline }.take(64)
+        val nextSubline = subline?.trim()?.take(80) ?: existing.subline
+        val nextStat = calloutStat?.trim()?.take(28) ?: existing.calloutStat
         val updated = existing.copy(
-            headline = headline.trim().ifBlank { existing.headline }.take(64),
-            subline = subline?.trim()?.take(80) ?: existing.subline,
-            calloutStat = calloutStat?.trim()?.take(28) ?: existing.calloutStat,
-            breakingStyle = breakingStyle ?: existing.breakingStyle
+            kind = kind ?: existing.kind,
+            headline = nextHeadline,
+            subline = nextSubline,
+            calloutStat = nextStat,
+            durationSec = durationSec?.coerceIn(2, 20) ?: existing.durationSec,
+            breakingStyle = breakingStyle ?: existing.breakingStyle,
+            a2uiComponentsJson = AircheckA2uiController.serializeOverlayAsA2uiComponentsJson(
+                headline = nextHeadline,
+                subline = nextSubline,
+                calloutStat = nextStat
+            )
         )
         _uiState.update { st ->
             st.copy(
                 savedOverlays = st.savedOverlays.map { if (it.id == overlayId) updated else it },
-                toastMessage = "card updated"
+                toastMessage = "Overlay updated"
             )
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -1379,14 +1737,17 @@ class StudioViewModel internal constructor(
         require(aspect == CoreRenderOptions.ASPECT_VERTICAL || aspect == CoreRenderOptions.ASPECT_HORIZONTAL) {
             "Unsupported aspect $aspect"
         }
-        updateRenderOptions { it.copy(aspect = aspect) }
+        updateRenderOptions("Aspect $aspect") { it.copy(aspect = aspect) }
     }
 
-    private fun updateRenderOptions(transform: (CoreRenderOptions) -> CoreRenderOptions) {
+    private fun updateRenderOptions(
+        label: String = "Render setting",
+        transform: (CoreRenderOptions) -> CoreRenderOptions
+    ) {
         val current = _uiState.value.corePipelineSession
         val next = transform(current.renderOptions)
         if (next == current.renderOptions) return
-        commitCoreEdit(current.copy(renderOptions = next))
+        commitCoreEdit(current.copy(renderOptions = next), label = label)
     }
 
     /** Edits clause [index] in Cut; the clause becomes "unsynced" until [resyncEditedVoice] runs. */
@@ -1398,7 +1759,8 @@ class StudioViewModel internal constructor(
         commitCoreEdit(
             current.copy(
                 clauses = current.clauses.mapIndexed { i, c -> if (i == index) c.copy(spokenText = clean) else c }
-            )
+            ),
+            label = "Line ${index + 1} edit"
         )
     }
 
@@ -1415,15 +1777,17 @@ class StudioViewModel internal constructor(
                     } else if (willBeBroll) {
                         c.copy(
                             segmentMode = BrollSegmentMode.BROLL_CUTAWAY,
-                            brollCaption = c.brollCaption.ifBlank { c.spokenText.take(48) }
+                            brollCaption = c.brollCaption.ifBlank { c.spokenText.take(48) },
+                            bRollPrompt = c.bRollPrompt.ifBlank { c.brollCaption.ifBlank { c.spokenText.take(72) } }
                         )
                     } else {
                         c.copy(segmentMode = BrollSegmentMode.TALKING_HEAD)
                     }
                 }
-            )
+            ),
+            label = if (willBeBroll) "Add B-roll cut ${index + 1}" else "Remove B-roll cut ${index + 1}"
         )
-        showToast(if (willBeBroll) "b-roll added" else "b-roll removed")
+        showToast(if (willBeBroll) "B-roll enabled on cut ${index + 1}" else "Switched cut ${index + 1} to talking head")
     }
 
     /** Asks the rig which pauses `strip_silence` would remove from the current talking-head render. */
@@ -1543,9 +1907,26 @@ class StudioViewModel internal constructor(
             } else {
                 listOf(clamped) + st.newsroomLooks.map { it.copy(isDefault = false) }
             }
+            val prevLooks = st.newsroomLooks
+            synchronized(coreUndoStack) {
+                coreUndoStack.addLast(
+                    CoreUndoEntry(
+                        label = "Overlays & look",
+                        session = st.corePipelineSession,
+                        looks = prevLooks
+                    )
+                )
+                while (coreUndoStack.size > MAX_CORE_UNDO) coreUndoStack.removeFirst()
+            }
             st.copy(
                 newsroomLooks = updatedList,
-                toastMessage = "look applied · render to see it"
+                coreUndoDepth = coreUndoStack.size,
+                lastUndoLabel = "Overlays & look",
+                toastMessage = if (st.corePipelineSession.hasTalkingHead) {
+                    "Overlays saved · tap Render Video to apply"
+                } else {
+                    "Overlays saved · will apply when rendered"
+                }
             )
         }
         viewModelScope.launch {

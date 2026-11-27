@@ -129,12 +129,13 @@ class CoreStageRunner(
     suspend fun cut(lookIdOverride: String?, photoSha: String?, onProgress: (Float, String) -> Unit): String {
         val base = session()
         val look: NewsroomLook? = lookIdOverride?.let { localRepo.getNewsroomLook(it) } ?: localRepo.getDefaultNewsroomLook()
-        val signature = base.cutSignature(look)
+        val allSavedOverlays = localRepo.listSavedNewsroomOverlays()
+        val signature = base.cutSignature(look, allSavedOverlays)
         onProgress(PROGRESS_UNKNOWN, "Preparing studio cut…")
         val result = coordinator.chopTalkingHeadIntoBrollStage4(
             session = base,
             rigBaseUrl = rigUrl(),
-            allSavedOverlays = localRepo.listSavedNewsroomOverlays(),
+            allSavedOverlays = allSavedOverlays,
             photoSha = photoSha(photoSha),
             look = look,
             task = handle(
@@ -156,7 +157,6 @@ class CoreStageRunner(
                 pendingRigTasks = chopped.pendingRigTasks - KEY_CUT
             )
         )
-        if (chopped.selectedOverlayIds.isNotEmpty()) profileStore.incrementRemotionUsedCount()
         return "Final video ready."
     }
 

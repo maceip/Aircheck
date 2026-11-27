@@ -24,10 +24,12 @@ import com.example.draft.DraftStateReducer
 import com.example.draft.DraftTone
 import com.example.draft.DraftToneContext
 import com.example.draft.EditSource
+import com.example.draft.ExcludedAnglesContext
 import com.example.draft.ExistingBeatShotsContext
 import com.example.draft.FollowupDirectionCard
 import com.example.draft.LlmMetaDto
 import com.example.draft.LockedPhrase
+import com.example.draft.PreviousBeatTextsContext
 import com.example.draft.ShotSpec
 import com.example.draft.ShotType
 import com.example.draft.Stage
@@ -111,18 +113,24 @@ data class DraftDeckUiState(
     val isDraftingFollowup: Boolean = false,
     val shotPreviews: Map<String, String> = emptyMap(),
     val inFlightShotIds: Set<String> = emptySet(),
-    val rerollingBeatIndex: Int = -1,
+    val rerollingBeatIndices: Set<Int> = emptySet(),
+    val anchorsDirtyForBeats: Boolean = false,
+    val outlineChangedSinceScript: Boolean = false,
     val lastSeedAudioPath: String? = null,
     val lastSeedDurationSec: Int = 0,
     val isPlayingSeedAudio: Boolean = false,
     val lengthRowOpen: Boolean = false,
     val scriptHintSeen: Boolean = false
 ) {
+    /** First actively rerolling beat index, or -1 if none (backwards-compatible accessor). */
+    val rerollingBeatIndex: Int
+        get() = rerollingBeatIndices.firstOrNull() ?: -1
+
     val isAnyRecording: Boolean
         get() = isRecordingSeed || isRecordingSteer || isRecordingSplice
 
     val isThinkingActive: Boolean
-        get() = isBusy || isExtractingAngles
+        get() = isBusy || isExtractingAngles || rerollingBeatIndices.isNotEmpty()
 
     val hasAnyBackgroundThinking: Boolean
         get() = sessions.any { it.id != document.id && it.isThinking }
@@ -210,6 +218,7 @@ class DraftDeckViewModel internal constructor(
 
     private val transcribeMutex = Mutex()
     private val editGeneration = AtomicLong(0L)
+    private val beatRerollHistory = ConcurrentHashMap<String, MutableList<String>>()
 
     private var seedBeforeLatch: String = ""
     private var openLatchHadIncremental: Boolean = false
@@ -660,7 +669,7 @@ class DraftDeckViewModel internal constructor(
     }
 
     fun toggleAngleChip(chipId: String) {
-        _uiState.update { state ->
+        updateSession(_uiState.value.document.id) { state ->
             val doc = state.document
             val updatedExtracted = doc.extractedAngles.map { chip ->
                 if (chip.id == chipId) chip.copy(selected = !chip.selected) else chip
@@ -672,8 +681,69 @@ class DraftDeckViewModel internal constructor(
                 document = doc.copy(
                     extractedAngles = updatedExtracted,
                     blindspotAngles = updatedBlindspots
-                )
+                ),
+                anchorsDirtyForBeats = true
             )
+        }
+    }
+
+    /** Adds a user-written custom anchor point (selected by default) so the outline & script keep it. */
+    fun addCustomAnchor(rawLabel: String) {
+        val clean = DraftStateReducer.sanitizeAscii(rawLabel).trim().take(64)
+        if (clean.isEmpty()) return
+        val sessionId = _uiState.value.document.id
+        var added = false
+        updateSession(sessionId) { state ->
+            val doc = state.document
+            val dup = (doc.extractedAngles + doc.blindspotAngles).any {
+                it.label.equals(clean, ignoreCase = true)
+            }
+            if (dup) return@updateSession state
+            added = true
+            val chip = com.example.draft.AngleChip(
+                id = "custom_${UUID.randomUUID().toString().take(8)}",
+                label = clean,
+                preview = clean,
+                isBlindspot = false,
+                selected = true
+            )
+            state.copy(
+                document = doc.copy(extractedAngles = doc.extractedAngles + chip),
+                anchorsDirtyForBeats = true
+            )
+        }
+        if (added) showToast("Anchor added: $clean")
+    }
+
+    /**
+     * Closes the Anchors sheet and, when anchors were changed (or [forceRegenerate] is true),
+     * immediately regenerates the 4-beat outline with the updated selected + excluded anchors.
+     */
+    fun applyAnchorsAndRegenerateBeats(forceRegenerate: Boolean = false) {
+        val state = _uiState.value
+        val shouldRegen = (state.anchorsDirtyForBeats || forceRegenerate) &&
+            state.document.seedTranscript.isNotBlank()
+        val count = state.selectedAnchorCount
+        updateSession(state.document.id) {
+            it.copy(
+                anchorsSheetOpen = false,
+                anchorsDirtyForBeats = false,
+                outlineChangedSinceScript = if (shouldRegen && it.document.candidates.isNotEmpty()) {
+                    true
+                } else {
+                    it.outlineChangedSinceScript
+                }
+            )
+        }
+        if (shouldRegen) {
+            showToast(
+                if (count == 0) {
+                    "Updating beats without locked anchors…"
+                } else {
+                    "Updating beats with $count anchor${if (count == 1) "" else "s"}…"
+                }
+            )
+            generateArcInternal(state.document.id, rerollIndex = null)
         }
     }
 
@@ -1079,6 +1149,7 @@ class DraftDeckViewModel internal constructor(
                         brushActiveAltIndex = 0,
                         flashRange = null,
                         densityDeltaPercent = 0,
+                        outlineChangedSinceScript = false,
                         lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
                         lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
                         isBusy = false,
@@ -1123,24 +1194,29 @@ class DraftDeckViewModel internal constructor(
         if (clean.isEmpty()) return
         val sessionId = _uiState.value.document.id
         var changed = false
+        var beatLabel = "Beat ${index + 1}"
         updateSession(sessionId) { state ->
             val doc = state.document
             val current = doc.arcBeats.getOrNull(index) ?: return@updateSession state
             if (current.text.trim() == clean) return@updateSession state
             changed = true
+            beatLabel = current.label.ifBlank { "Beat ${index + 1}" }
             val updatedBeats = doc.arcBeats.mapIndexed { i, b ->
                 if (i == index) b.copy(text = clean) else b
             }
             val nextUndo = (doc.arcUndoStack + listOf(doc.arcBeats)).takeLast(MAX_ARC_UNDO)
+            val nextLabels = (doc.arcUndoLabels + "$beatLabel edit").takeLast(MAX_ARC_UNDO)
             state.copy(
                 document = doc.copy(
                     arcBeats = updatedBeats,
-                    arcUndoStack = nextUndo
+                    arcUndoStack = nextUndo,
+                    arcUndoLabels = nextLabels
                 ),
+                outlineChangedSinceScript = doc.candidates.isNotEmpty(),
                 errorMessage = null
             )
         }
-        if (changed) showToast("beat updated")
+        if (changed) showToast("$beatLabel updated")
     }
 
     private fun generateArcInternal(targetSessionId: String, rerollIndex: Int?) {
@@ -1152,62 +1228,191 @@ class DraftDeckViewModel internal constructor(
         val doc = snapshot.document
         val cleanSeed = DraftStateReducer.sanitizeAscii(doc.seedTranscript).trim()
         if (cleanSeed.isEmpty()) return
-        val existing = if (rerollIndex != null) doc.arcBeats.map { it.text } else null
-        val existingShots = doc.arcBeats.map { it.shots }
-        launchSessionJob(targetSessionId, if (rerollIndex == null) "arc" else "arc_$rerollIndex") {
+        val selectedAngles = collectSelectedAngleSpecs(doc)
+        val excludedAngles = collectExcludedAngleSpecs(doc)
+
+        if (rerollIndex != null) {
+            if (rerollIndex !in doc.arcBeats.indices) return
+            val existing = doc.arcBeats.map { it.text }
+            val existingShots = doc.arcBeats.map { it.shots }
+            val historyKey = "$targetSessionId:$rerollIndex"
+            val priorTexts = synchronized(beatRerollHistory) {
+                val list = beatRerollHistory.getOrPut(historyKey) { mutableListOf() }
+                val curTxt = doc.arcBeats[rerollIndex].text.trim()
+                if (curTxt.isNotEmpty() && list.none { it.equals(curTxt, ignoreCase = true) }) {
+                    list.add(curTxt)
+                }
+                list.toList()
+            }
+            // Non-blocking per-beat reroll: never sets global isBusy, never locks other beats.
+            launchSessionJob(targetSessionId, "arc_beat_$rerollIndex") {
+                updateSession(targetSessionId) {
+                    it.copy(
+                        rerollingBeatIndices = it.rerollingBeatIndices + rerollIndex,
+                        errorMessage = null
+                    )
+                }
+                try {
+                    val response = withContext(
+                        DraftToneContext(doc.tone) +
+                            ExistingBeatShotsContext(existingShots) +
+                            ExcludedAnglesContext(excludedAngles) +
+                            PreviousBeatTextsContext(priorTexts)
+                    ) {
+                        llmStageRouter.arc(
+                            seedTranscript = cleanSeed,
+                            steeringConstraints = doc.steeringConstraints,
+                            selectedAngles = selectedAngles,
+                            targetSec = ARC_TARGET_SEC,
+                            rerollIndex = rerollIndex,
+                            existingBeats = existing
+                        )
+                    }
+                    val rewrittenDto = response.beats.getOrNull(rerollIndex)
+                        ?: response.beats.firstOrNull()
+                        ?: throw IllegalStateException("LLM returned an empty beat rewrite.")
+                    val rewrittenBeat = rewrittenDto.toArcBeat(
+                        beatIndex = rerollIndex,
+                        shotIdFactory = ::nextShotId
+                    )
+                    synchronized(beatRerollHistory) {
+                        val list = beatRerollHistory.getOrPut(historyKey) { mutableListOf() }
+                        val freshTxt = rewrittenBeat.text.trim()
+                        if (freshTxt.isNotEmpty() && list.none { it.equals(freshTxt, ignoreCase = true) }) {
+                            list.add(freshTxt)
+                            if (list.size > 8) list.removeAt(0)
+                        }
+                    }
+                    var mergedHeadline = rewrittenBeat.text.take(40)
+                    updateSession(targetSessionId) { state ->
+                        val latestBeats = state.document.arcBeats
+                        val mergedBeats = if (rerollIndex in latestBeats.indices) {
+                            latestBeats.mapIndexed { idx, existingBeat ->
+                                if (idx == rerollIndex) {
+                                    rewrittenBeat.copy(
+                                        label = existingBeat.label.ifBlank { rewrittenBeat.label },
+                                        startSec = existingBeat.startSec,
+                                        endSec = existingBeat.endSec,
+                                        window = existingBeat.window
+                                    )
+                                } else {
+                                    existingBeat
+                                }
+                            }
+                        } else {
+                            latestBeats
+                        }
+                        mergedHeadline = mergedBeats.firstOrNull()?.text.orEmpty().take(40)
+                        val nextUndoStack = if (latestBeats.isNotEmpty()) {
+                            (state.document.arcUndoStack + listOf(latestBeats)).takeLast(MAX_ARC_UNDO)
+                        } else {
+                            state.document.arcUndoStack
+                        }
+                        val nextUndoLabels = if (latestBeats.isNotEmpty()) {
+                            val lbl = latestBeats.getOrNull(rerollIndex)?.label?.ifBlank { null }
+                                ?: "Beat ${rerollIndex + 1}"
+                            (state.document.arcUndoLabels + "$lbl rewrite").takeLast(MAX_ARC_UNDO)
+                        } else {
+                            state.document.arcUndoLabels
+                        }
+                        state.copy(
+                            document = state.document.copy(
+                                arcBeats = mergedBeats,
+                                arcUndoStack = nextUndoStack,
+                                arcUndoLabels = nextUndoLabels,
+                                lastRerolledBeat = rerollIndex
+                            ),
+                            rerollingBeatIndices = state.rerollingBeatIndices - rerollIndex,
+                            outlineChangedSinceScript = state.document.candidates.isNotEmpty(),
+                            lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
+                            lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
+                            toastMessage = "${rewrittenBeat.label} rewritten"
+                        )
+                    }
+                    requestShotPreviewsForBeats(
+                        sessionId = targetSessionId,
+                        beats = listOf(rewrittenBeat),
+                        headline = mergedHeadline
+                    )
+                } catch (e: CancellationException) {
+                    updateSession(targetSessionId) {
+                        it.copy(rerollingBeatIndices = it.rerollingBeatIndices - rerollIndex)
+                    }
+                    throw e
+                } catch (e: Exception) {
+                    val offline = isRigTransportFailure(e)
+                    val detail = e.message?.trim().takeUnless { it.isNullOrBlank() } ?: "Unknown error"
+                    updateSession(targetSessionId) { state ->
+                        state.copy(
+                            rerollingBeatIndices = state.rerollingBeatIndices - rerollIndex,
+                            lastSeedRigOnline = if (offline) false else state.lastSeedRigOnline,
+                            errorMessage = if (offline || com.example.engine.userFacingStageError(e, detail) == com.example.engine.MacStudioOfflineException().message) {
+                                com.example.engine.MacStudioOfflineException().message
+                            } else {
+                                "Beat rewrite failed: $detail"
+                            }
+                        )
+                    }
+                }
+            }
+            return
+        }
+
+        // Full 4-beat outline generation
+        beatRerollHistory.keys.filter { it.startsWith("$targetSessionId:") }.forEach {
+            beatRerollHistory.remove(it)
+        }
+        launchSessionJob(targetSessionId, "arc") {
             updateSession(targetSessionId) {
                 it.copy(
                     isBusy = true,
-                    rerollingBeatIndex = rerollIndex ?: -1,
-                    busyLabel = if (rerollIndex == null) "Proposing 60s arc..." else "Re-rolling beat...",
+                    busyLabel = "Outlining 4 beats...",
                     errorMessage = null
                 )
             }
             try {
                 val response = withContext(
-                    DraftToneContext(doc.tone) + ExistingBeatShotsContext(existingShots)
+                    DraftToneContext(doc.tone) + ExcludedAnglesContext(excludedAngles)
                 ) {
                     llmStageRouter.arc(
                         seedTranscript = cleanSeed,
                         steeringConstraints = doc.steeringConstraints,
-                        selectedAngles = collectSelectedAngleSpecs(doc),
+                        selectedAngles = selectedAngles,
                         targetSec = ARC_TARGET_SEC,
-                        rerollIndex = rerollIndex,
-                        existingBeats = existing
+                        rerollIndex = null,
+                        existingBeats = null
                     )
                 }
                 val beats = response.beats.mapIndexed { bIdx, dto ->
-                    val preservedBeat = if (
-                        rerollIndex != null &&
-                        bIdx != rerollIndex &&
-                        bIdx in doc.arcBeats.indices &&
-                        doc.arcBeats[bIdx].shots.isNotEmpty()
-                    ) {
-                        doc.arcBeats[bIdx]
-                    } else {
-                        null
-                    }
-                    preservedBeat ?: dto.toArcBeat(
+                    dto.toArcBeat(
                         beatIndex = bIdx,
                         shotIdFactory = ::nextShotId
                     )
                 }
                 if (beats.isEmpty()) throw IllegalStateException("LLM returned an empty arc.")
                 updateSession(targetSessionId) { state ->
-                    val nextUndoStack = if (rerollIndex != null && state.document.arcBeats.isNotEmpty()) {
+                    val nextUndoStack = if (state.document.arcBeats.isNotEmpty()) {
                         (state.document.arcUndoStack + listOf(state.document.arcBeats)).takeLast(MAX_ARC_UNDO)
                     } else {
                         state.document.arcUndoStack
+                    }
+                    val nextUndoLabels = if (state.document.arcBeats.isNotEmpty()) {
+                        (state.document.arcUndoLabels + "Outline update").takeLast(MAX_ARC_UNDO)
+                    } else {
+                        state.document.arcUndoLabels
                     }
                     state.copy(
                         document = state.document.copy(
                             arcBeats = beats,
                             arcUndoStack = nextUndoStack,
+                            arcUndoLabels = nextUndoLabels,
                             arcTargetSec = response.targetSec,
                             arcWordBudget = response.wordBudget,
-                            lastRerolledBeat = rerollIndex ?: -1
+                            lastRerolledBeat = -1
                         ),
-                        rerollingBeatIndex = -1,
+                        rerollingBeatIndices = emptySet(),
+                        anchorsDirtyForBeats = false,
+                        outlineChangedSinceScript = state.document.candidates.isNotEmpty(),
                         lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
                         lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
                         isBusy = false,
@@ -1220,10 +1425,9 @@ class DraftDeckViewModel internal constructor(
                     headline = beats.firstOrNull()?.text.orEmpty().take(40)
                 )
             } catch (e: CancellationException) {
-                updateSession(targetSessionId) { it.copy(rerollingBeatIndex = -1) }
+                updateSession(targetSessionId) { it.copy(isBusy = false, busyLabel = null) }
                 throw e
             } catch (e: Exception) {
-                updateSession(targetSessionId) { it.copy(rerollingBeatIndex = -1) }
                 handleSessionApiFailure(targetSessionId, "Arc pass failed", e)
             }
         }
@@ -1246,7 +1450,9 @@ class DraftDeckViewModel internal constructor(
                 it.copy(isBusy = true, busyLabel = "Writing 60s script...", errorMessage = null, rawKeyboardMode = false)
             }
             try {
-                val response = withContext(DraftToneContext(doc.tone)) {
+                val response = withContext(
+                    DraftToneContext(doc.tone) + ExcludedAnglesContext(collectExcludedAngleSpecs(doc))
+                ) {
                     llmStageRouter.synthesizeScript(
                         seedTranscript = cleanSeed,
                         selectedAngles = collectSelectedAngleSpecs(doc),
@@ -1284,6 +1490,7 @@ class DraftDeckViewModel internal constructor(
                         brushActiveAltIndex = 0,
                         flashRange = null,
                         densityDeltaPercent = 0,
+                        outlineChangedSinceScript = false,
                         lastSeedRigOnline = resolveRigOnlineAfterSuccess(state.lastSeedRigOnline, response.llmMeta),
                         lastLlmMeta = response.llmMeta ?: state.lastLlmMeta,
                         isBusy = false,
@@ -1954,6 +2161,7 @@ class DraftDeckViewModel internal constructor(
         if (stepped == activeCandidate) return
         clearBrushBaseline()
         replaceActiveCandidate(stepped, dismissBrush = true)
+        showToast(if (delta < 0) "Undid script edit" else "Redid script edit")
         refreshGraphMatches()
     }
 
@@ -2450,10 +2658,12 @@ class DraftDeckViewModel internal constructor(
                 )
             }
             val nextUndo = (doc.arcUndoStack + listOf(doc.arcBeats)).takeLast(MAX_ARC_UNDO)
+            val nextLabels = (doc.arcUndoLabels + "Shot type change").takeLast(MAX_ARC_UNDO)
             state.copy(
                 document = doc.copy(
                     arcBeats = updatedBeats,
-                    arcUndoStack = nextUndo
+                    arcUndoStack = nextUndo,
+                    arcUndoLabels = nextLabels
                 )
             )
         }
@@ -2489,10 +2699,12 @@ class DraftDeckViewModel internal constructor(
                 if (bIdx != beatIndex) b else b.copy(shots = b.shots + newShot)
             }
             val nextUndo = (doc.arcUndoStack + listOf(doc.arcBeats)).takeLast(MAX_ARC_UNDO)
+            val nextLabels = (doc.arcUndoLabels + "Shot type change").takeLast(MAX_ARC_UNDO)
             state.copy(
                 document = doc.copy(
                     arcBeats = updatedBeats,
-                    arcUndoStack = nextUndo
+                    arcUndoStack = nextUndo,
+                    arcUndoLabels = nextLabels
                 )
             )
         }
@@ -2513,13 +2725,16 @@ class DraftDeckViewModel internal constructor(
         updateSession(sessionId) { state ->
             val doc = state.document
             val prev = doc.arcUndoStack.lastOrNull() ?: return@updateSession state
+            val undoneLabel = doc.arcUndoLabels.lastOrNull()?.takeIf { it.isNotBlank() }
             restoredBeats = prev
             state.copy(
                 document = doc.copy(
                     arcBeats = prev,
-                    arcUndoStack = doc.arcUndoStack.dropLast(1)
+                    arcUndoStack = doc.arcUndoStack.dropLast(1),
+                    arcUndoLabels = if (doc.arcUndoLabels.isNotEmpty()) doc.arcUndoLabels.dropLast(1) else emptyList()
                 ),
-                toastMessage = "undid last change"
+                outlineChangedSinceScript = doc.candidates.isNotEmpty(),
+                toastMessage = if (undoneLabel != null) "Undid: $undoneLabel" else "Undid beat edit"
             )
         }
         restoredBeats?.let { beats ->
@@ -3212,6 +3427,14 @@ class DraftDeckViewModel internal constructor(
         val selected = doc.extractedAngles.filter { it.selected } +
             doc.blindspotAngles.filter { it.selected }
         return selected.map { chip ->
+            if (chip.preview.isNotBlank()) "${chip.label}: ${chip.preview}" else chip.label
+        }
+    }
+
+    private fun collectExcludedAngleSpecs(doc: DraftDocument): List<String> {
+        val excluded = doc.extractedAngles.filter { !it.selected } +
+            doc.blindspotAngles.filter { !it.selected }
+        return excluded.map { chip ->
             if (chip.preview.isNotBlank()) "${chip.label}: ${chip.preview}" else chip.label
         }
     }

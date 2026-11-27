@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-SILENCE_NOISE_DB = -35.0
-SILENCE_MIN_GAP_SEC = 0.35
+SILENCE_NOISE_DB = -32.0
+SILENCE_MIN_GAP_SEC = 0.25
 # Silence kept on each side of a removed pause so cuts do not clip word onsets/tails.
 SILENCE_KEEP_PAD_MS = 90
 PUNCH_IN_SCALE = 1.12
@@ -41,10 +41,15 @@ GRAIN_STRENGTH = 10
 LOOK_LIGHT_VALUES = ("warm", "cool", "neutral")
 BREAKING_STYLE_VALUES = ("breaking", "developing", "exclusive", "alert_stat", "clean")
 BROLL_FRAMING_VALUES = ("pip", "full", "split")
+TRANSITION_VALUES = ("cut", "fade", "wipeleft", "wiperight", "slideup", "dissolve", "fadeblack")
+ALLOWED_BROLL_IMAGE_EXTS = frozenset({"png", "jpg", "jpeg", "webp"})
+ALLOWED_BROLL_VIDEO_EXTS = frozenset({"mp4", "mov"})
+ALLOWED_BROLL_MEDIA_EXTS = ALLOWED_BROLL_IMAGE_EXTS | ALLOWED_BROLL_VIDEO_EXTS
 DEFAULT_ACCENT_HEX = "#D71921"
 ASPECT_SIZES: dict[str, tuple[int, int]] = {"9:16": (720, 1280), "16:9": (1280, 720)}
 ASPECT_SIZES_1080P: dict[str, tuple[int, int]] = {"9:16": (1080, 1920), "16:9": (1920, 1080)}
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_BROLL_MEDIA_FILENAME_RE = re.compile(r"^(?:bmedia|broll)_[0-9a-f]{8,24}\.(?:png|jpg|jpeg|webp|mp4|mov)$")
 
 
 def _hex_to_rgba(hex_str: str | None) -> tuple[int, int, int, int] | None:
@@ -149,9 +154,11 @@ class StudioRenderOptions:
     breaking_style: str = "breaking"
     chyron_headline: str = ""
     chyron_subline: str = ""
+    show_lower_third: bool = True
     show_brand_bug: bool | None = None
     corner_bug_text: str = "LIVE"
     broll_framing: str = "pip"
+    default_transition: str = "cut"
     look: StudioLook = field(default_factory=StudioLook)
 
     @staticmethod
@@ -169,8 +176,13 @@ class StudioRenderOptions:
         framing = str(raw.get("broll_framing") or "pip").strip().lower()
         if framing not in BROLL_FRAMING_VALUES:
             raise ValueError(f"render_options.broll_framing must be one of {BROLL_FRAMING_VALUES}")
+        def_trans = str(raw.get("default_transition") or "cut").strip().lower()
+        if def_trans not in TRANSITION_VALUES:
+            def_trans = "cut"
         raw_show_bug = raw.get("show_brand_bug")
         show_bug: bool | None = bool(raw_show_bug) if raw_show_bug is not None else None
+        raw_show_lt = raw.get("show_lower_third")
+        show_lt = True if raw_show_lt is None else bool(raw_show_lt)
         return StudioRenderOptions(
             strip_silence=bool(raw.get("strip_silence", False)),
             punch_in=bool(raw.get("punch_in", False)),
@@ -179,9 +191,11 @@ class StudioRenderOptions:
             breaking_style=bstyle,
             chyron_headline=str(raw.get("chyron_headline") or "").strip()[:64],
             chyron_subline=str(raw.get("chyron_subline") or "").strip()[:80],
+            show_lower_third=show_lt,
             show_brand_bug=show_bug,
             corner_bug_text=str(raw.get("corner_bug_text") or "LIVE").strip()[:28] or "LIVE",
             broll_framing=framing,
+            default_transition=def_trans,
             look=StudioLook.from_payload(raw.get("look")),
         )
 
@@ -374,6 +388,45 @@ def plate_path(plates_dir: Path, plate_id: str) -> Path | None:
     if candidate.parent != plates_dir.resolve() or not candidate.is_file():
         return None
     return candidate
+
+
+def broll_media_dir(plates_dir: Path) -> Path:
+    d = plates_dir / "broll_media"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def broll_media_path(plates_dir: Path, filename: str) -> Path | None:
+    clean = str(filename or "").strip()
+    if not _BROLL_MEDIA_FILENAME_RE.match(clean):
+        return None
+    root = broll_media_dir(plates_dir).resolve()
+    candidate = (root / clean).resolve()
+    if candidate.parent != root or not candidate.is_file():
+        return None
+    return candidate
+
+
+def save_broll_media_bytes(plates_dir: Path, raw_bytes: bytes, ext: str) -> dict[str, Any]:
+    clean_ext = str(ext or "").strip().lower().lstrip(".")
+    if clean_ext == "jpeg":
+        clean_ext = "jpg"
+    if clean_ext not in ALLOWED_BROLL_MEDIA_EXTS:
+        raise ValueError(f"Unsupported B-roll media extension: {ext!r}")
+    if not raw_bytes:
+        raise ValueError("B-roll media payload is empty")
+    media_id = f"bmedia_{uuid.uuid4().hex[:12]}.{clean_ext}"
+    target = broll_media_dir(plates_dir) / media_id
+    tmp = target.with_suffix(f".{clean_ext}.tmp")
+    tmp.write_bytes(raw_bytes)
+    tmp.replace(target)
+    return {
+        "media_id": media_id,
+        "url": f"/v1/broll-media/{media_id}",
+        "ext": clean_ext,
+        "is_video": clean_ext in ALLOWED_BROLL_VIDEO_EXTS,
+        "size_bytes": len(raw_bytes),
+    }
 
 
 def _generate_backdrop_via_openai(
@@ -760,9 +813,8 @@ def compose_studio_cut(
     ]
     lower_overlays = [o for o in valid_overlays if str(o.get("kind") or "LOWER_THIRD").upper() != "QUOTE_BRIEF"]
     quote_overlays = [o for o in valid_overlays if str(o.get("kind") or "").upper() == "QUOTE_BRIEF"]
-    # Render the configured Video Look title bar as a broadcast lower-third chyron even when no
-    # separate saved LOWER_THIRD overlay card is attached, matching the live 04 VIDEO LOOK preview.
-    if not lower_overlays and options.chyron_headline:
+    # Render the configured lower-third title bar when enabled and no explicit LOWER_THIRD card is attached.
+    if options.show_lower_third and not lower_overlays and options.chyron_headline:
         desk_sub = options.chyron_subline or (
             options.corner_bug_text.upper() if options.corner_bug_text.upper() != "LIVE" else "AIRCHECK DESK"
         )
@@ -776,11 +828,16 @@ def compose_studio_cut(
                 "breaking_style": options.breaking_style,
             }
         ]
-    has_lower_third = bool(lower_overlays or options.chyron_headline)
+    has_lower_third = bool(lower_overlays)
 
+    # (path, start_s, end_s, is_video, transition, transition_sec)
+    broll_layers: list[tuple[Path, float, float, bool, str, float]] = []
     timed_pngs: list[tuple[Path, float, float]] = []
-    broll_windows: list[tuple[float, float]] = []
+    pip_windows: list[tuple[float, float]] = []
+    split_windows: list[tuple[float, float]] = []
+    black_dip_windows: list[tuple[float, float]] = []
     broll_count = 0
+    transition_count = 0
     caption_count = 0
     overlay_count = 0
     punch_windows: list[tuple[float, float]] = []
@@ -790,36 +847,53 @@ def compose_studio_cut(
     custom_accent = _hex_to_rgba(options.look.accent_hex)
     has_custom_accent = custom_accent is not None and options.look.accent_hex.upper() != DEFAULT_ACCENT_HEX
     active_accent = custom_accent if (has_custom_accent and options.breaking_style != "clean") else base_accent
-    framing = options.broll_framing if options.broll_framing in BROLL_FRAMING_VALUES else "pip"
-    use_presenter_pip = framing in ("pip", "split")
+    default_framing = options.broll_framing if options.broll_framing in BROLL_FRAMING_VALUES else "pip"
 
-    # Presenter PiP / Split dimensions during B-roll cutaways
-    if framing == "split":
-        if width < height:
-            pip_w, pip_h = width, height - (height // 2)
-            pip_h -= pip_h % 2
-            pip_x, pip_y = 0, height - pip_h
-        else:
-            pip_w, pip_h = width - (width // 2), height
-            pip_w -= pip_w % 2
-            pip_x, pip_y = width - pip_w, 0
-    elif width < height:
+    # Compute BOTH PiP and Split presenter geometry so individual clauses can mix layouts cleanly.
+    if width < height:
+        split_w, split_h = width, height - (height // 2)
+        split_h -= split_h % 2
+        split_x, split_y = 0, height - split_h
         pip_w = int(round(236 * scale))
         pip_h = int(round(316 * scale))
         pip_w -= pip_w % 2
         pip_h -= pip_h % 2
         pip_x, pip_y = width - pip_w - int(round(36 * scale)), int(round(56 * scale))
     else:
+        split_w, split_h = width - (width // 2), height
+        split_w -= split_w % 2
+        split_x, split_y = width - split_w, 0
         pip_w = int(round(320 * scale))
         pip_h = int(round(220 * scale))
         pip_w -= pip_w % 2
         pip_h -= pip_h % 2
         pip_x, pip_y = width - pip_w - int(round(40 * scale)), int(round(36 * scale))
 
+    # Resolve any custom user-supplied B-roll photo/video per clause before generating missing stills.
+    custom_media_by_idx: dict[int, tuple[Path, bool]] = {}
+    for idx, it in enumerate(clause_dicts):
+        if str(it.get("segment_mode") or "").upper() != "BROLL_CUTAWAY":
+            continue
+        raw_b64 = str(it.get("broll_media_base64") or "").strip()
+        raw_ext = str(it.get("broll_media_ext") or "").strip().lower().lstrip(".")
+        raw_mid = str(it.get("broll_media_id") or "").strip()
+        if raw_b64:
+            ext_use = raw_ext if raw_ext in ALLOWED_BROLL_MEDIA_EXTS else "jpg"
+            decoded = base64.b64decode(raw_b64)
+            custom_file = work_dir / f"custom_broll_{idx}.{ext_use}"
+            custom_file.write_bytes(decoded)
+            custom_media_by_idx[idx] = (custom_file, ext_use in ALLOWED_BROLL_VIDEO_EXTS)
+        elif raw_mid:
+            resolved = broll_media_path(plates_dir, raw_mid)
+            if resolved is not None:
+                is_vid = resolved.suffix.lower().lstrip(".") in ALLOWED_BROLL_VIDEO_EXTS
+                custom_media_by_idx[idx] = (resolved, is_vid)
+
     broll_prompts = [
-        str(it.get("broll_caption") or it.get("spoken_text") or "").strip()
-        for it in clause_dicts
+        str(it.get("b_roll_prompt") or it.get("broll_caption") or it.get("spoken_text") or "").strip()
+        for idx, it in enumerate(clause_dicts)
         if str(it.get("segment_mode") or "").upper() == "BROLL_CUTAWAY"
+        and idx not in custom_media_by_idx
     ]
     broll_images: dict[str, Path] = {}
     if broll_prompts:
@@ -836,31 +910,61 @@ def compose_studio_cut(
             continue
         start_s, end_s = window[0] / 1000.0, window[1] / 1000.0
         mode = str(item.get("segment_mode") or "TALKING_HEAD").upper()
+        raw_trans = str(item.get("transition") or item.get("transition_type") or "").strip().lower()
+        clause_trans = raw_trans if raw_trans in TRANSITION_VALUES else options.default_transition
+        try:
+            trans_ms = int(item.get("transition_duration_ms") or 350)
+        except (TypeError, ValueError):
+            trans_ms = 350
+        trans_ms = max(150, min(900, trans_ms))
+        dur_s = min(trans_ms / 1000.0, max(0.12, (end_s - start_s) * 0.38))
+
         if mode == "BROLL_CUTAWAY":
-            shot_prompt = str(item.get("broll_caption") or item.get("spoken_text") or "").strip()
-            png = work_dir / f"broll_plate_{idx}.png"
-            with Image.open(broll_images[shot_prompt]) as still:
-                img = ImageOps.fit(still.convert("RGBA"), (width, height), method=Image.LANCZOS)
-            draw = ImageDraw.Draw(img)
-            if framing == "pip":
-                # Crisp broadcast frame around top-right live talking-head PiP window
-                draw.rounded_rectangle(
-                    [(pip_x - 3, pip_y - 3), (pip_x + pip_w + 3, pip_y + pip_h + 3)],
-                    radius=int(10 * scale),
-                    fill=(0, 0, 0, 0),
-                    outline=active_accent,
-                    width=3,
-                )
-            elif framing == "split":
-                if width < height:
-                    draw.rectangle([(0, pip_y - 3), (width, pip_y)], fill=active_accent)
+            raw_clause_framing = str(item.get("broll_framing") or "").strip().lower()
+            clause_framing = raw_clause_framing if raw_clause_framing in BROLL_FRAMING_VALUES else default_framing
+            custom_entry = custom_media_by_idx.get(idx)
+            if custom_entry is not None and custom_entry[1]:
+                # Custom user video cutaway!
+                broll_layers.append((custom_entry[0], start_s, end_s, True, clause_trans, dur_s))
+            else:
+                if custom_entry is not None:
+                    src_img_path = custom_entry[0]
                 else:
-                    draw.rectangle([(pip_x - 3, 0), (pip_x, height)], fill=active_accent)
-            img.save(png)
-            timed_pngs.append((png, start_s, end_s))
-            broll_windows.append((start_s, end_s))
+                    shot_prompt = str(item.get("b_roll_prompt") or item.get("broll_caption") or item.get("spoken_text") or "").strip()
+                    src_img_path = broll_images[shot_prompt]
+                png = work_dir / f"broll_plate_{idx}.png"
+                with Image.open(src_img_path) as still:
+                    img = ImageOps.fit(still.convert("RGBA"), (width, height), method=Image.LANCZOS)
+                draw = ImageDraw.Draw(img)
+                if clause_framing == "pip":
+                    draw.rounded_rectangle(
+                        [(pip_x - 3, pip_y - 3), (pip_x + pip_w + 3, pip_y + pip_h + 3)],
+                        radius=int(10 * scale),
+                        fill=(0, 0, 0, 0),
+                        outline=active_accent,
+                        width=3,
+                    )
+                elif clause_framing == "split":
+                    if width < height:
+                        draw.rectangle([(0, split_y - 3), (width, split_y)], fill=active_accent)
+                    else:
+                        draw.rectangle([(split_x - 3, 0), (split_x, height)], fill=active_accent)
+                img.save(png)
+                broll_layers.append((png, start_s, end_s, False, clause_trans, dur_s))
+
+            if clause_framing == "pip":
+                pip_windows.append((start_s, end_s))
+            elif clause_framing == "split":
+                split_windows.append((start_s, end_s))
+            if clause_trans != "cut":
+                transition_count += 1
+                if clause_trans == "fadeblack":
+                    black_dip_windows.append((max(0.0, start_s - 0.06), min(total_s, start_s + 0.08)))
             broll_count += 1
         else:
+            if idx > 0 and clause_trans == "fadeblack":
+                black_dip_windows.append((max(0.0, start_s - 0.06), min(total_s, start_s + 0.08)))
+                transition_count += 1
             if options.punch_in and talking_head_seen % 2 == 1:
                 punch_windows.append((start_s, end_s))
             talking_head_seen += 1
@@ -1072,6 +1176,14 @@ def compose_studio_cut(
         cmd.extend(["-loop", "1", "-i", str(plate)])
         plate_input = next_input
         next_input += 1
+    broll_inputs: list[int] = []
+    for media_path, _, _, is_vid, _, _ in broll_layers:
+        if is_vid:
+            cmd.extend(["-stream_loop", "-1", "-i", str(media_path)])
+        else:
+            cmd.extend(["-loop", "1", "-i", str(media_path)])
+        broll_inputs.append(next_input)
+        next_input += 1
     png_inputs: list[int] = []
     for png, _, _ in timed_pngs:
         cmd.extend(["-loop", "1", "-i", str(png)])
@@ -1095,35 +1207,36 @@ def compose_studio_cut(
         frame_w, frame_h = width, height
 
     base_fit = f"scale={frame_w}:{frame_h}:force_original_aspect_ratio=increase,crop={frame_w}:{frame_h},fps=30"
-    if broll_windows and use_presenter_pip:
+    split_branches: list[str] = ["p_norm"]
+    if punch_windows:
+        split_branches.append("p_zoom")
+    if pip_windows:
+        split_branches.append("p_pip_src")
+    if split_windows:
+        split_branches.append("p_split_src")
+
+    if len(split_branches) > 1:
+        parts.append(f"[0:v]split={len(split_branches)}" + "".join(f"[{b}]" for b in split_branches))
         if punch_windows:
             zw = int(round(frame_w * PUNCH_IN_SCALE))
             zh = int(round(frame_h * PUNCH_IN_SCALE))
             zw += zw % 2
             zh += zh % 2
-            parts.append("[0:v]split=3[p_norm][p_zoom][p_pip_src]")
             parts.append(f"[p_norm]{base_fit}[p_n]")
             parts.append(
                 f"[p_zoom]scale={zw}:{zh}:force_original_aspect_ratio=increase,crop={frame_w}:{frame_h},fps=30[p_z]"
             )
             parts.append(f"[p_n][p_z]overlay=0:0:enable='{_between(punch_windows)}'[pres0]")
         else:
-            parts.append("[0:v]split=2[p_norm][p_pip_src]")
             parts.append(f"[p_norm]{base_fit}[pres0]")
-        parts.append(
-            f"[p_pip_src]scale={pip_w}:{pip_h}:force_original_aspect_ratio=increase,crop={pip_w}:{pip_h},fps=30[vpip]"
-        )
-    elif punch_windows:
-        zw = int(round(frame_w * PUNCH_IN_SCALE))
-        zh = int(round(frame_h * PUNCH_IN_SCALE))
-        zw += zw % 2
-        zh += zh % 2
-        parts.append("[0:v]split=2[p_norm][p_zoom]")
-        parts.append(f"[p_norm]{base_fit}[p_n]")
-        parts.append(
-            f"[p_zoom]scale={zw}:{zh}:force_original_aspect_ratio=increase,crop={frame_w}:{frame_h},fps=30[p_z]"
-        )
-        parts.append(f"[p_n][p_z]overlay=0:0:enable='{_between(punch_windows)}'[pres0]")
+        if pip_windows:
+            parts.append(
+                f"[p_pip_src]scale={pip_w}:{pip_h}:force_original_aspect_ratio=increase,crop={pip_w}:{pip_h},fps=30[vpip]"
+            )
+        if split_windows:
+            parts.append(
+                f"[p_split_src]scale={split_w}:{split_h}:force_original_aspect_ratio=increase,crop={split_w}:{split_h},fps=30[vsplit]"
+            )
     else:
         parts.append(f"[0:v]{base_fit}[pres0]")
 
@@ -1144,16 +1257,55 @@ def compose_studio_cut(
     else:
         parts.append(f"[{pres_label}]null[v0]")
 
+    cur_v = "v0"
+    # Composite B-roll cutaways FIRST (with real visual transitions), then presenter PiP/Split, then graphics overlays!
+    for bi, ((_, s_sec, e_sec, is_vid, trans, dur_s), in_idx) in enumerate(zip(broll_layers, broll_inputs)):
+        layer_lbl = f"broll_in_{bi}"
+        if is_vid:
+            chain = f"[{in_idx}:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps=30,setpts=PTS-STARTPTS+{s_sec:.3f}/TB,format=yuva420p"
+        else:
+            chain = f"[{in_idx}:v]fps=30,format=yuva420p"
+        if trans in ("fade", "dissolve", "fadeblack"):
+            fade_out_st = max(s_sec, e_sec - dur_s)
+            chain += f",fade=t=in:st={s_sec:.3f}:d={dur_s:.3f}:alpha=1,fade=t=out:st={fade_out_st:.3f}:d={dur_s:.3f}:alpha=1"
+        parts.append(f"{chain}[{layer_lbl}]")
+        next_v = f"vb_{bi}"
+        if trans == "wipeleft":
+            x_expr = f"'if(lt(t,{s_sec + dur_s:.3f}),W*(1-(t-{s_sec:.3f})/{dur_s:.3f}),0)'"
+            parts.append(f"[{cur_v}][{layer_lbl}]overlay=x={x_expr}:y=0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[{next_v}]")
+        elif trans == "wiperight":
+            x_expr = f"'if(lt(t,{s_sec + dur_s:.3f}),-W*(1-(t-{s_sec:.3f})/{dur_s:.3f}),0)'"
+            parts.append(f"[{cur_v}][{layer_lbl}]overlay=x={x_expr}:y=0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[{next_v}]")
+        elif trans == "slideup":
+            y_expr = f"'if(lt(t,{s_sec + dur_s:.3f}),H*(1-(t-{s_sec:.3f})/{dur_s:.3f}),0)'"
+            parts.append(f"[{cur_v}][{layer_lbl}]overlay=x=0:y={y_expr}:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[{next_v}]")
+        else:
+            parts.append(f"[{cur_v}][{layer_lbl}]overlay=0:0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[{next_v}]")
+        cur_v = next_v
+
+    if pip_windows:
+        parts.append(
+            f"[{cur_v}][vpip]overlay={pip_x}:{pip_y}:shortest=1:enable='{_between(pip_windows)}'[v_with_pip]"
+        )
+        cur_v = "v_with_pip"
+    if split_windows:
+        parts.append(
+            f"[{cur_v}][vsplit]overlay={split_x}:{split_y}:shortest=1:enable='{_between(split_windows)}'[v_with_split]"
+        )
+        cur_v = "v_with_split"
+    if black_dip_windows:
+        parts.append(
+            f"[{cur_v}]drawbox=x=0:y=0:w=iw:h=ih:color=black@0.92:t=fill:enable='{_between(black_dip_windows)}'[v_dip]"
+        )
+        cur_v = "v_dip"
+
     for i, ((_, s_sec, e_sec), in_idx) in enumerate(zip(timed_pngs, png_inputs)):
+        next_v = f"vo_{i}"
         parts.append(
-            f"[v{i}][{in_idx}:v]overlay=0:0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[v{i + 1}]"
+            f"[{cur_v}][{in_idx}:v]overlay=0:0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[{next_v}]"
         )
-    graded = f"v{len(timed_pngs)}"
-    if broll_windows and use_presenter_pip:
-        parts.append(
-            f"[{graded}][vpip]overlay={pip_x}:{pip_y}:shortest=1:enable='{_between(broll_windows)}'[v_with_pip]"
-        )
-        graded = "v_with_pip"
+        cur_v = next_v
+    graded = cur_v
     grade_filters: list[str] = []
     if abs(look.brightness_ev) > 1e-6:
         gain = round(2.0 ** look.brightness_ev, 4)
@@ -1213,6 +1365,7 @@ def compose_studio_cut(
         )
     return {
         "broll_cut_count": broll_count,
+        "transition_count": transition_count,
         "applied_overlay_count": overlay_count,
         "caption_count": caption_count,
         "punch_in_count": len(punch_windows),

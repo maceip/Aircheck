@@ -11,13 +11,18 @@ import com.example.draft.BrushSwapResponse
 import com.example.draft.DensityResponse
 import com.example.draft.DraftApiClient
 import com.example.draft.DraftStateReducer
+import com.example.draft.DraftTone
+import com.example.draft.DraftToneContext
 import com.example.draft.EditSource
+import com.example.draft.ExcludedAnglesContext
 import com.example.draft.LlmMetaDto
+import com.example.draft.PreviousBeatTextsContext
 import com.example.draft.RewriteResponse
 import com.example.draft.SeamHealResponse
 import com.example.draft.SynthesizeResponse
 import com.example.draft.SynthesizeScriptResponse
 import com.example.draft.SynthesizedCandidateDto
+import kotlin.coroutines.coroutineContext
 import com.google.mlkit.genai.common.FeatureStatus
 import com.google.mlkit.genai.common.GenAiException
 import com.google.mlkit.genai.prompt.CachedContext
@@ -144,7 +149,14 @@ private data class NanoAnglesPayload(
 private data class NanoArcPayload(
     @SerialName("target_sec") val targetSec: Int = 0,
     @SerialName("word_budget") val wordBudget: Int = 0,
-    val beats: List<ArcBeatDto> = emptyList()
+    val beats: List<ArcBeatDto> = emptyList(),
+    val beat: String = ""
+)
+
+@Serializable
+private data class NanoSingleScriptPayload(
+    val paragraphs: List<String> = emptyList(),
+    val text: String = ""
 )
 
 @Serializable
@@ -402,10 +414,14 @@ class OnDevicePromptEngine internal constructor(
         if (cleanSeed.isEmpty()) {
             return Result.failure(OnDeviceLlmException("seed_transcript must not be blank."))
         }
+        val tone = coroutineContext[DraftToneContext]?.tone ?: DraftTone.DIRECT
         val prompt = buildString {
-            appendLine("Extract 3 sharp editorial angles and 2 blindspots from the seed transcript.")
+            appendLine(NATURAL_SPEECH_RULES)
+            appendLine("Tone: ${tone.label}.")
+            appendLine("Extract 3 concrete claims directly from the speaker's note and 2 sharp missing angles (blindspots).")
+            appendLine("Keep each label 2 to 5 plain words and each preview one simple, clear English sentence.")
             appendSteeringBlock(steeringConstraints)
-            appendLine("Seed transcript:")
+            appendLine("Speaker's note:")
             appendLine(cleanSeed)
             appendLine("Respond ONLY with valid ASCII JSON:")
             appendLine("""{"extracted_angles":[{"id":"ang_1","label":"...","preview":"..."}],"blindspots":[{"id":"bs_1","label":"...","preview":"..."}]}""")
@@ -455,41 +471,120 @@ class OnDevicePromptEngine internal constructor(
         }
         val clampedSec = targetSec.coerceIn(20, 120)
         val expectedWordBudget = (clampedSec * 2.5).toInt().coerceAtLeast(30)
+        val tone = coroutineContext[DraftToneContext]?.tone ?: DraftTone.DIRECT
+        val excludedAngles = coroutineContext[ExcludedAnglesContext]?.excludedAngles.orEmpty()
+        val previousTexts = coroutineContext[PreviousBeatTextsContext]?.previousTexts.orEmpty()
+
+        // Single-beat reroll: generate ONLY the target beat with explicit anti-repetition + retries
+        // so consecutive clicks ALWAYS produce a genuinely new beat and never corrupt other beats.
+        if (rerollIndex != null && !existingBeats.isNullOrEmpty() && rerollIndex in existingBeats.indices) {
+            val targetLabel = ARC_BEAT_LABELS.getOrElse(rerollIndex) { "BEAT ${rerollIndex + 1}" }
+            val targetPurpose = ARC_BEAT_PURPOSES.getOrElse(rerollIndex) { "deliver this step of the story clearly" }
+            val forbidden = (listOf(existingBeats[rerollIndex]) + previousTexts)
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinctBy { it.lowercase() }
+            val windows = computeDefaultWindows(clampedSec)
+            var lastError: Throwable? = null
+            for (attempt in 0 until 3) {
+                val angleHint = REROLL_ANGLES[(forbidden.size + attempt) % REROLL_ANGLES.size]
+                val prompt = buildString {
+                    appendLine(NATURAL_SPEECH_RULES)
+                    appendLine("Tone: ${tone.label}.")
+                    appendLine("Rewrite ONLY the $targetLabel beat ($targetPurpose) of this 4-beat video outline.")
+                    appendLine("Current 4 beats:")
+                    existingBeats.forEachIndexed { idx, txt ->
+                        appendLine("${ARC_BEAT_LABELS.getOrElse(idx) { "BEAT ${idx + 1}" }}: $txt")
+                    }
+                    appendLine("PREVIOUS $targetLabel VERSION(S) TO REPLACE (DO NOT REPEAT OR PARAPHRASE):")
+                    forbidden.forEach { appendLine("- $it") }
+                    appendLine("Direction: $angleHint")
+                    if (attempt > 0) {
+                        appendLine("IMPORTANT: Your previous attempt was too close to the old beat. Use completely different wording and structure.")
+                    }
+                    appendAnchorBlocks(selectedAngles, excludedAngles)
+                    appendSteeringBlock(steeringConstraints)
+                    appendLine("Speaker's note:")
+                    appendLine(cleanSeed)
+                    appendLine("Write ONE crisp, natural spoken English sentence (7 to 16 words) for $targetLabel.")
+                    appendLine("Respond ONLY with valid ASCII JSON:")
+                    appendLine("""{"beat":"..."}""")
+                }
+                val pass = runJsonPass(prompt, steeringConstraints, "arc_reroll") { jsonText ->
+                    val payload = json.decodeFromString<NanoArcPayload>(jsonText)
+                    val candidateText = when {
+                        payload.beat.isNotBlank() -> DraftStateReducer.sanitizeAscii(payload.beat).trim()
+                        payload.beats.size > rerollIndex -> DraftStateReducer.sanitizeAscii(payload.beats[rerollIndex].text).trim()
+                        payload.beats.isNotEmpty() -> DraftStateReducer.sanitizeAscii(payload.beats.first().text).trim()
+                        else -> ""
+                    }
+                    if (candidateText.isBlank()) {
+                        throw OnDeviceLlmException("Gemini Nano returned an empty beat rewrite.")
+                    }
+                    if (attempt < 2 && isTooSimilarToAny(candidateText, forbidden)) {
+                        throw OnDeviceLlmException("Gemini Nano repeated the previous beat.")
+                    }
+                    val rebuilt = existingBeats.mapIndexed { idx, oldText ->
+                        val (lo, hi) = windows[idx.coerceIn(0, windows.lastIndex)]
+                        val finalTxt = if (idx == rerollIndex) candidateText else oldText
+                        ArcBeatDto(
+                            label = ARC_BEAT_LABELS.getOrElse(idx) { "BEAT ${idx + 1}" },
+                            startSec = lo,
+                            endSec = hi,
+                            text = finalTxt
+                        )
+                    }
+                    ArcResponse(
+                        targetSec = clampedSec,
+                        wordBudget = expectedWordBudget,
+                        beats = rebuilt,
+                        llmMeta = engineLlmMeta
+                    )
+                }
+                if (pass.isSuccess) return pass
+                lastError = pass.exceptionOrNull()
+                if (completionOverride != null && attempt == 0 && lastError?.message?.contains("repeated", ignoreCase = true) != true) {
+                    // Preserve fast failure for deterministic unit-test overrides on schema errors.
+                    return pass
+                }
+            }
+            return Result.failure(lastError ?: OnDeviceLlmException("Beat rewrite failed."))
+        }
+
         val prompt = buildString {
-            if (rerollIndex != null && !existingBeats.isNullOrEmpty()) {
-                appendLine("Rewrite beat index $rerollIndex of this 4-beat ${clampedSec}s broadcast arc while keeping other beats coherent.")
-                appendLine("Existing beats: ${existingBeats.joinToString(" | ")}")
-            } else {
-                appendLine("Build a 4-beat spoken broadcast arc totaling ~${clampedSec}s (~$expectedWordBudget words).")
-                appendLine("Exactly four beats, in this order, with exactly these labels:")
-                appendLine("HOOK = the surprising core tension in one line")
-                appendLine("DETAIL = the concrete evidence or mechanism behind it")
-                appendLine("SHIFT = what people are doing about it, or the turn")
-                appendLine("PAYOFF = the takeaway or demand that closes the video")
-            }
-            if (selectedAngles.isNotEmpty()) {
-                appendLine("Selected angles: ${selectedAngles.joinToString("; ")}")
-            }
+            appendLine(NATURAL_SPEECH_RULES)
+            appendLine("Tone: ${tone.label}.")
+            appendLine("Build a 4-beat spoken video outline totaling ~${clampedSec}s (~$expectedWordBudget words).")
+            appendLine("Write ONE plain, natural spoken English sentence (7 to 16 words) for each beat, in exact order:")
+            appendLine("HOOK = the clear core tension or hook in one line")
+            appendLine("DETAIL = the concrete evidence, reason, or mechanism behind it")
+            appendLine("SHIFT = what changed or what people are actually doing about it")
+            appendLine("PAYOFF = the practical takeaway that closes the video")
+            appendAnchorBlocks(selectedAngles, excludedAngles)
             appendSteeringBlock(steeringConstraints)
-            appendLine("Seed transcript:")
+            appendLine("Speaker's note:")
             appendLine(cleanSeed)
             appendLine("Respond ONLY with valid ASCII JSON:")
-            appendLine("""{"target_sec":$clampedSec,"word_budget":$expectedWordBudget,"beats":[{"label":"HOOK","start_sec":0,"end_sec":15,"text":"..."}]}""")
+            appendLine("""{"target_sec":$clampedSec,"word_budget":$expectedWordBudget,"beats":[{"label":"HOOK","start_sec":0,"end_sec":8,"text":"..."},{"label":"DETAIL","start_sec":8,"end_sec":28,"text":"..."},{"label":"SHIFT","start_sec":28,"end_sec":48,"text":"..."},{"label":"PAYOFF","start_sec":48,"end_sec":$clampedSec,"text":"..."}]}""")
         }
         return runJsonPass(prompt, steeringConstraints, "arc") { jsonText ->
             val payload = json.decodeFromString<NanoArcPayload>(jsonText)
+            val windows = computeDefaultWindows(clampedSec)
             val beats = payload.beats.mapIndexedNotNull { idx, beat ->
                 val cleanText = DraftStateReducer.sanitizeAscii(beat.text).trim()
                 if (cleanText.isBlank()) null
-                else ArcBeatDto(
-                    // Same contract as the Mac rig: a beat's label is its position in the 4-beat arc
-                    // (HOOK / DETAIL / SHIFT / PAYOFF), never free text invented by the model.
-                    label = ARC_BEAT_LABELS.getOrNull(idx)
-                        ?: DraftStateReducer.sanitizeAscii(beat.label).trim().ifBlank { "BEAT ${idx + 1}" },
-                    startSec = beat.startSec.coerceAtLeast(0),
-                    endSec = beat.endSec.coerceAtLeast(beat.startSec + 1),
-                    text = cleanText
-                )
+                else {
+                    val (defStart, defEnd) = windows[idx.coerceIn(0, windows.lastIndex)]
+                    val sSec = if (beat.endSec > beat.startSec) beat.startSec.coerceAtLeast(0) else defStart
+                    val eSec = if (beat.endSec > beat.startSec) beat.endSec else defEnd
+                    ArcBeatDto(
+                        label = ARC_BEAT_LABELS.getOrNull(idx)
+                            ?: DraftStateReducer.sanitizeAscii(beat.label).trim().ifBlank { "BEAT ${idx + 1}" },
+                        startSec = sSec,
+                        endSec = eSec,
+                        text = cleanText
+                    )
+                }
             }
             if (beats.isEmpty()) {
                 throw OnDeviceLlmException("Gemini Nano returned an empty arc.")
@@ -517,20 +612,22 @@ class OnDevicePromptEngine internal constructor(
         if (slot != null && slot !in 0..2) {
             return Result.failure(IllegalArgumentException("slot must be null or in 0..2, got $slot"))
         }
+        val tone = coroutineContext[DraftToneContext]?.tone ?: DraftTone.DIRECT
+        val excludedAngles = coroutineContext[ExcludedAnglesContext]?.excludedAngles.orEmpty()
         val prompt = buildString {
+            appendLine(NATURAL_SPEECH_RULES)
+            appendLine("Tone: ${tone.label}.")
             if (slot != null) {
-                appendLine("Generate 1 fresh broadcast draft candidate for slot $slot distinct from existing drafts.")
+                appendLine("Generate 1 fresh plain-spoken draft candidate for slot $slot distinct from existing drafts.")
             } else {
-                appendLine("Generate 3 distinct spoken broadcast draft candidates (DIRECT, PUNCHY, CONTRARIAN).")
+                appendLine("Generate 3 distinct plain-spoken draft candidates (DIRECT, PUNCHY, CONTRARIAN).")
             }
-            if (selectedAngles.isNotEmpty()) {
-                appendLine("Selected angles: ${selectedAngles.joinToString("; ")}")
-            }
+            appendAnchorBlocks(selectedAngles, excludedAngles)
             if (existingDrafts.isNotEmpty()) {
                 appendLine("Existing drafts to avoid repeating: ${existingDrafts.joinToString(" || ")}")
             }
             appendSteeringBlock(steeringConstraints)
-            appendLine("Seed transcript:")
+            appendLine("Speaker's note:")
             appendLine(cleanSeed)
             appendLine("Respond ONLY with valid ASCII JSON:")
             appendLine("""{"candidates":[{"posture_label":"DIRECT","text":"..."}]}""")
@@ -569,16 +666,74 @@ class OnDevicePromptEngine internal constructor(
         }
         val clampedSec = targetSec.coerceIn(20, 120)
         val expectedWordBudget = (clampedSec * 2.5).toInt().coerceAtLeast(30)
-        val prompt = buildString {
-            appendLine("Write 3 spoken newscast script versions (DIRECT, PUNCHY, STORY) targeting ~${clampedSec}s (~$expectedWordBudget words). Use plain ASCII only.")
-            if (selectedAngles.isNotEmpty()) {
-                appendLine("Selected angles: ${selectedAngles.joinToString("; ")}")
+        val tone = coroutineContext[DraftToneContext]?.tone ?: DraftTone.DIRECT
+        val excludedAngles = coroutineContext[ExcludedAnglesContext]?.excludedAngles.orEmpty()
+
+        // On real on-device AICore Gemini Nano (small output budget), generating all 3 long scripts
+        // inside a single JSON blob degrades coherence and produces garbled phrases. Generate each
+        // version in its own crisp, bounded call so every paragraph reads like clean human speech.
+        if (completionOverride == null) {
+            val postureSpecs = listOf(
+                "DIRECT" to "state each beat plainly and clearly with zero fluff",
+                "PUNCHY" to "use short, crisp spoken sentences with strong rhythm",
+                "STORY" to "walk through each beat in order like explaining to a friend"
+            )
+            val generated = mutableListOf<SynthesizedCandidateDto>()
+            var firstFailure: Throwable? = null
+            for ((posture, guidance) in postureSpecs) {
+                val prompt = buildString {
+                    appendLine(NATURAL_SPEECH_RULES)
+                    appendLine("Tone: ${tone.label}. Style: $posture ($guidance).")
+                    appendLine("Write ONE spoken video script (~${expectedWordBudget} words total, 4 short paragraphs matching the 4 beats below).")
+                    if (arcBeats.isNotEmpty()) {
+                        appendLine("Outline beats (one short spoken paragraph per beat, in exact order):")
+                        arcBeats.forEachIndexed { idx, b -> appendLine("${idx + 1}. $b") }
+                    }
+                    appendAnchorBlocks(selectedAngles, excludedAngles)
+                    appendSteeringBlock(steeringConstraints)
+                    appendLine("Speaker's note:")
+                    appendLine(cleanSeed)
+                    appendLine("Respond ONLY with valid ASCII JSON:")
+                    appendLine("""{"paragraphs":["beat 1 spoken lines","beat 2 spoken lines","beat 3 spoken lines","beat 4 spoken lines"]}""")
+                }
+                val res = runJsonPass(prompt, steeringConstraints, "script_$posture") { jsonText ->
+                    val p = json.decodeFromString<NanoSingleScriptPayload>(jsonText)
+                    val joined = if (p.paragraphs.isNotEmpty()) {
+                        p.paragraphs.map { DraftStateReducer.sanitizeAscii(it).trim() }
+                            .filter { it.isNotEmpty() }
+                            .joinToString("\n\n")
+                    } else {
+                        DraftStateReducer.sanitizeAscii(p.text).trim()
+                    }
+                    if (joined.isBlank()) throw OnDeviceLlmException("Empty $posture script.")
+                    SynthesizedCandidateDto(postureLabel = posture, text = joined)
+                }
+                res.onSuccess { generated += it }
+                    .onFailure { if (firstFailure == null) firstFailure = it }
             }
+            if (generated.isEmpty()) {
+                return Result.failure(firstFailure ?: OnDeviceLlmException("Gemini Nano returned zero script versions."))
+            }
+            return Result.success(
+                SynthesizeScriptResponse(
+                    targetSec = clampedSec,
+                    wordBudget = expectedWordBudget,
+                    candidates = generated,
+                    llmMeta = engineLlmMeta
+                )
+            )
+        }
+
+        val prompt = buildString {
+            appendLine(NATURAL_SPEECH_RULES)
+            appendLine("Tone: ${tone.label}.")
+            appendLine("Write 3 clear, natural spoken script versions (DIRECT, PUNCHY, STORY) targeting ~${clampedSec}s (~$expectedWordBudget words). Use plain ASCII only.")
+            appendAnchorBlocks(selectedAngles, excludedAngles)
             if (arcBeats.isNotEmpty()) {
-                appendLine("Arc beats: ${arcBeats.joinToString(" | ")}")
+                appendLine("Outline beats (keep this order): ${arcBeats.joinToString(" | ")}")
             }
             appendSteeringBlock(steeringConstraints)
-            appendLine("Seed transcript:")
+            appendLine("Speaker's note:")
             appendLine(cleanSeed)
             appendLine("Respond ONLY with valid ASCII JSON:")
             appendLine("""{"target_sec":$clampedSec,"word_budget":$expectedWordBudget,"candidates":[{"posture_label":"DIRECT","text":"..."},{"posture_label":"PUNCHY","text":"..."},{"posture_label":"STORY","text":"..."}]}""")
@@ -812,10 +967,15 @@ class OnDevicePromptEngine internal constructor(
         } else {
             trimmed
         }
-        if (!unwrapped.startsWith("{") || !unwrapped.endsWith("}")) {
-            throw OnDeviceLlmException("Gemini Nano response is not a valid JSON object.")
+        if (unwrapped.startsWith("{") && unwrapped.endsWith("}")) {
+            return unwrapped
         }
-        return unwrapped
+        val firstBrace = unwrapped.indexOf('{')
+        val lastBrace = unwrapped.lastIndexOf('}')
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            return unwrapped.substring(firstBrace, lastBrace + 1).trim()
+        }
+        throw OnDeviceLlmException("Gemini Nano response is not a valid JSON object.")
     }
 
     private fun enforceLockParityAndSanitize(
@@ -933,6 +1093,49 @@ class OnDevicePromptEngine internal constructor(
         }
     }
 
+    private fun StringBuilder.appendAnchorBlocks(
+        selectedAngles: List<String>,
+        excludedAngles: List<String>
+    ) {
+        if (selectedAngles.isNotEmpty()) {
+            appendLine("REQUIRED ANCHORS (MUST include these points):")
+            selectedAngles.forEach { appendLine("- $it") }
+        }
+        if (excludedAngles.isNotEmpty()) {
+            appendLine("EXCLUDED ANGLES (DO NOT include or mention these):")
+            excludedAngles.forEach { appendLine("- $it") }
+        }
+    }
+
+    private fun computeDefaultWindows(targetSec: Int): List<Pair<Int, Int>> {
+        val fracs = listOf(8.0 / 60.0, 28.0 / 60.0, 48.0 / 60.0, 1.0)
+        val out = mutableListOf<Pair<Int, Int>>()
+        var start = 0
+        for (f in fracs) {
+            val end = if (f >= 1.0) targetSec else (targetSec * f).toInt().coerceAtLeast(start + 1)
+            out += start to end
+            start = end
+        }
+        return out
+    }
+
+    private fun isTooSimilarToAny(candidate: String, previous: List<String>): Boolean {
+        val candTokens = WORD_TOKEN_REGEX.findAll(candidate.lowercase()).map { it.value }.toList()
+        if (candTokens.isEmpty()) return true
+        val candJoined = candTokens.joinToString(" ")
+        val candSet = candTokens.toSet()
+        for (prev in previous) {
+            val prevTokens = WORD_TOKEN_REGEX.findAll(prev.lowercase()).map { it.value }.toList()
+            if (prevTokens.isEmpty()) continue
+            if (candJoined == prevTokens.joinToString(" ")) return true
+            val prevSet = prevTokens.toSet()
+            val union = (candSet + prevSet).size
+            val inter = candSet.intersect(prevSet).size
+            if (union > 0 && inter.toDouble() / union.toDouble() >= 0.72) return true
+        }
+        return false
+    }
+
     private fun buildOverlayBriefPrompt(topic: String): String =
         """Create a broadcast news overlay brief for: $topic
 Respond ONLY with valid ASCII JSON:
@@ -948,6 +1151,23 @@ Respond ONLY with valid ASCII JSON:
     companion object {
         /** Positional beat labels of a full arc; mirrors `ARC_BEAT_LABELS` in the rig's drafting_passes.py. */
         val ARC_BEAT_LABELS: List<String> = listOf("HOOK", "DETAIL", "SHIFT", "PAYOFF")
+        private val ARC_BEAT_PURPOSES: List<String> = listOf(
+            "the clear core tension or hook in one line",
+            "the concrete evidence, reason, or mechanism behind it",
+            "what changed or what people are actually doing about it",
+            "the practical takeaway that closes the video"
+        )
+        private val REROLL_ANGLES: List<String> = listOf(
+            "Use a completely fresh angle with a specific real-world detail.",
+            "Focus on the direct practical effect on a real person instead of repeating earlier wording.",
+            "Lead with a stronger contrast or surprising plain fact from the note.",
+            "Strip it down to a punchier, plainer spoken line with new verbs."
+        )
+        private const val NATURAL_SPEECH_RULES: String =
+            "Write natural, everyday spoken English that sounds great read aloud on camera. " +
+                "Stay strictly grounded in the speaker's note. Never invent weird phrases, buzzwords, " +
+                "metaphors, idioms, rhetorical questions, or em-dashes. Plain ASCII only."
+        private val WORD_TOKEN_REGEX = Regex("[a-z0-9]+")
 
         /**
          * AICore client pinned to the FULL (highest-quality, TPU-accelerated) stable system model.

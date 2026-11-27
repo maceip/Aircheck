@@ -181,11 +181,13 @@ data class ArcRequest(
     @SerialName("seed_transcript") val seedTranscript: String,
     @SerialName("steering_constraints") val steeringConstraints: List<String> = emptyList(),
     @SerialName("selected_angles") val selectedAngles: List<String> = emptyList(),
+    @SerialName("excluded_angles") val excludedAngles: List<String> = emptyList(),
     @SerialName("target_sec") val targetSec: Int = 60,
     val tone: String? = null,
     @SerialName("reroll_index") val rerollIndex: Int? = null,
     @SerialName("existing_beats") val existingBeats: List<String>? = null,
     @SerialName("existing_beat_shots") val existingBeatShots: List<List<ShotSpecDto>>? = null,
+    @SerialName("previous_texts") val previousTexts: List<String> = emptyList(),
     @SerialName("llm_provider") val llmProvider: String? = null,
     @SerialName("llm_model") val llmModel: String? = null
 )
@@ -278,6 +280,7 @@ data class ArcResponse(
 data class SynthesizeScriptRequest(
     @SerialName("seed_transcript") val seedTranscript: String,
     @SerialName("selected_angles") val selectedAngles: List<String> = emptyList(),
+    @SerialName("excluded_angles") val excludedAngles: List<String> = emptyList(),
     @SerialName("steering_constraints") val steeringConstraints: List<String> = emptyList(),
     @SerialName("arc_beats") val arcBeats: List<String> = emptyList(),
     @SerialName("target_sec") val targetSec: Int = 60,
@@ -595,6 +598,8 @@ class DraftApiClient(
         if (cleanSeed.isEmpty()) throw IOException("seed_transcript must not be blank.")
         val wireTone = resolveWireTone(tone)
         val wireShots = resolveExistingBeatShots(existingBeatShots, rerollIndex)
+        val excluded = coroutineContext[ExcludedAnglesContext]?.excludedAngles.orEmpty()
+        val prevTexts = coroutineContext[PreviousBeatTextsContext]?.previousTexts.orEmpty()
         return postJson(
             path = "/v1/draft/arc",
             requestBody = json.encodeToString(
@@ -602,11 +607,13 @@ class DraftApiClient(
                     seedTranscript = cleanSeed,
                     steeringConstraints = steeringConstraints,
                     selectedAngles = selectedAngles,
+                    excludedAngles = excluded,
                     targetSec = targetSec,
                     tone = wireTone,
                     rerollIndex = rerollIndex,
                     existingBeats = existingBeats,
                     existingBeatShots = wireShots,
+                    previousTexts = prevTexts,
                     llmProvider = normalizeWireOptional(llmProvider),
                     llmModel = normalizeWireOptional(llmModel)
                 )
@@ -653,6 +660,8 @@ class DraftApiClient(
         if (cleanSeed.isEmpty()) throw IOException("seed_transcript must not be blank.")
         val wireTone = resolveWireTone(tone?.wireValue)
         val wireShots = resolveExistingBeatShots(existingBeatShots, rerollIndex)
+        val excluded = coroutineContext[ExcludedAnglesContext]?.excludedAngles.orEmpty()
+        val prevTexts = coroutineContext[PreviousBeatTextsContext]?.previousTexts.orEmpty()
         return postJson(
             path = "/v1/draft/reroll-beat",
             requestBody = json.encodeToString(
@@ -660,11 +669,13 @@ class DraftApiClient(
                     seedTranscript = cleanSeed,
                     steeringConstraints = steeringConstraints,
                     selectedAngles = selectedAngles,
+                    excludedAngles = excluded,
                     targetSec = targetSec,
                     tone = wireTone,
                     rerollIndex = rerollIndex,
                     existingBeats = existingBeats,
                     existingBeatShots = wireShots,
+                    previousTexts = prevTexts,
                     llmProvider = normalizeWireOptional(llmProvider),
                     llmModel = normalizeWireOptional(llmModel)
                 )
@@ -687,12 +698,14 @@ class DraftApiClient(
         val cleanSeed = seedTranscript.trim()
         if (cleanSeed.isEmpty()) throw IOException("seed_transcript must not be blank.")
         val wireTone = resolveWireTone(tone)
+        val excluded = coroutineContext[ExcludedAnglesContext]?.excludedAngles.orEmpty()
         return postJson(
             path = "/v1/draft/synthesize-script",
             requestBody = json.encodeToString(
                 SynthesizeScriptRequest(
                     seedTranscript = cleanSeed,
                     selectedAngles = selectedAngles,
+                    excludedAngles = excluded,
                     steeringConstraints = steeringConstraints,
                     arcBeats = arcBeats,
                     targetSec = targetSec,

@@ -626,9 +626,11 @@ class CoreStoryPipelineCoordinator(
 
             val attachedOverlays = allSavedOverlays.filter { it.id in session.selectedOverlayIds }
             val health = macRigGateway.resolveAndCheckHealth(rigBaseUrl)
-            val settings = runCatching { profileStore?.current() }.getOrNull()
-            val effectiveUseRemotion = session.renderOptions.useRemotion
-                ?: (settings?.providers?.packageProviderId == "mac_rig_remotion")
+            // Default Stage 4 to the full studio_cut FFmpeg compositor so every edit (trim pauses,
+            // captions, auto-zoom, aspect 9:16/16:9, overlays, chyrons, look grade/backdrop, custom
+            // B-roll photos/videos, and per-cut transitions) renders faithfully. Only use Remotion
+            // when explicitly requested on renderOptions.useRemotion == true.
+            val effectiveUseRemotion = session.renderOptions.useRemotion == true
             val effectiveTitle = session.title.ifBlank {
                 activeClauses.first().spokenText.take(40)
             }
