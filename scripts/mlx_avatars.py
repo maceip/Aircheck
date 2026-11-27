@@ -186,12 +186,12 @@ print(f"Saved {{out_path}}", flush=True)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Aircheck MLX talking-head avatar helper")
+    ap = argparse.ArgumentParser(description="Generate talking-head videos with MLX models")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("status", help="Show install, weight, and disk status")
+    sub.add_parser("status", help="Check model installs, weights, and free disk space")
 
-    af = sub.add_parser("avatarforcing", help="Generate talking head with AvatarForcing MLX (fp32 flow / fp16 decoder)")
+    af = sub.add_parser("avatarforcing", help="Generate a video with AvatarForcing MLX")
     af.add_argument("--image", required=True)
     af.add_argument("--audio", required=True)
     af.add_argument("--out", required=True)
@@ -202,15 +202,15 @@ def main() -> int:
     af.add_argument("--nfe", type=int, default=10)
     af.add_argument("--seed", type=int, default=25)
 
-    lcd = sub.add_parser("longcat-download", help="Download LongCat-Video-Avatar 1.6 MLX weights (default v1.6-bf16)")
+    lcd = sub.add_parser("longcat-download", help="Download LongCat 1.6 MLX model weights")
     lcd.add_argument("--variant", default="v1.6-bf16", choices=tuple(LONGCAT_VARIANTS))
     lcd.add_argument("--weights-dir", default=str(DEFAULT_LC_WEIGHTS))
     lcd.add_argument("--force", action="store_true")
 
-    lc = sub.add_parser("longcat", help="Generate talking avatar with LongCat-Video-Avatar 1.6 MLX")
+    lc = sub.add_parser("longcat", help="Generate a video with LongCat 1.6 MLX")
     lc.add_argument("--image", required=True)
     lc.add_argument("--audio", required=True)
-    lc.add_argument("--prompt", default="A person speaks naturally directly to the camera in studio lighting.")
+    lc.add_argument("--prompt", default="A person speaks naturally to the camera in a studio.")
     lc.add_argument("--out", required=True)
     lc.add_argument("--variant", default="v1.6-bf16", choices=tuple(LONGCAT_VARIANTS))
     lc.add_argument("--weights-dir", default=str(DEFAULT_LC_WEIGHTS))

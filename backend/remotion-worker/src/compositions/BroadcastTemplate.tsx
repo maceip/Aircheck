@@ -103,16 +103,45 @@ function getStyleTheme(style?: BreakingStyle, accentHex?: string): StyleTheme {
   };
 }
 
-function pickActiveOverlay(
+/**
+ * Each overlay owns an equal slot of the clip and shows for its `durationSec` from the start of
+ * that slot (the same timing the FFmpeg compositor uses). Overlays without a duration fill the slot.
+ */
+export function pickActiveOverlay(
   items: OverlayItemSpec[],
   contentFrame: number,
   contentDurationFrames: number,
+  fps: number,
 ): OverlayItemSpec | undefined {
   if (items.length === 0) return undefined;
-  if (items.length === 1) return items[0];
   const slot = Math.max(1, Math.floor(contentDurationFrames / items.length));
   const idx = Math.min(items.length - 1, Math.max(0, Math.floor(contentFrame / slot)));
-  return items[idx];
+  const item = items[idx];
+  if (typeof item.durationSec === "number" && Number.isFinite(item.durationSec)) {
+    const frameInSlot = contentFrame - idx * slot;
+    if (frameInSlot >= Math.round(item.durationSec * fps)) return undefined;
+  }
+  return item;
+}
+
+/**
+ * How a presenter video of aspect `presenterAspect` sits in a `boxWidth` x `boxHeight` box.
+ * A portrait presenter in a much wider box is shown whole over a blurred fill instead of being
+ * cropped to a band across the chest; a milder mismatch crops but keeps the head in frame.
+ */
+export function presenterFit(
+  presenterAspect: number | undefined,
+  boxWidth: number,
+  boxHeight: number,
+  isPip: boolean,
+): { letterbox: boolean; objectPosition: string } {
+  if (!presenterAspect || boxWidth <= 0 || boxHeight <= 0) {
+    return { letterbox: false, objectPosition: "50% 50%" };
+  }
+  const mismatch = boxWidth / boxHeight / presenterAspect;
+  if (mismatch <= 1.15) return { letterbox: false, objectPosition: "50% 50%" };
+  if (!isPip && mismatch > 1.6) return { letterbox: true, objectPosition: "50% 50%" };
+  return { letterbox: false, objectPosition: "50% 18%" };
 }
 
 /**
@@ -217,8 +246,14 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
   const attachedOverlays = packaging.overlays ?? [];
   const lowerOverlays = attachedOverlays.filter((o) => o.kind !== "QUOTE_BRIEF");
   const quoteOverlays = attachedOverlays.filter((o) => o.kind === "QUOTE_BRIEF");
-  const activeLower = pickActiveOverlay(lowerOverlays, contentFrame, contentDuration);
-  const activeQuote = pickActiveOverlay(quoteOverlays, contentFrame, contentDuration);
+  const activeLower = pickActiveOverlay(lowerOverlays, contentFrame, contentDuration, fps);
+  const activeQuote = pickActiveOverlay(quoteOverlays, contentFrame, contentDuration, fps);
+  const fit = presenterFit(
+    packaging.presenterAspect,
+    presenterWidth,
+    presenterHeight,
+    Boolean(activeEvent?.pipShrink),
+  );
 
   const effectiveStyle: BreakingStyle =
     activeLower?.breakingStyle ?? packaging.breakingStyle ?? "breaking";
@@ -512,11 +547,33 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
             zIndex: activeEvent?.pipShrink ? (isFullCutaway ? 2 : 10) : 2,
           }}
         >
+          {lipsyncUrl && fit.letterbox ? (
+            <OffthreadVideo
+              src={lipsyncUrl}
+              muted
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                filter: "blur(36px) brightness(0.45)",
+                transform: "scale(1.15)",
+              }}
+            />
+          ) : null}
           {lipsyncUrl ? (
             <OffthreadVideo
               src={lipsyncUrl}
               muted={Boolean(voiceUrl)}
-              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: fit.letterbox ? "contain" : "cover",
+                objectPosition: fit.objectPosition,
+              }}
             />
           ) : null}
         </div>

@@ -347,6 +347,12 @@ function validatePackaging(rawPackaging: unknown): PackagingSpec {
       throw new HttpError(400, `inputProps.packaging.${field} must be a boolean`);
     }
   }
+  if (
+    p.presenterAspect !== undefined &&
+    (typeof p.presenterAspect !== "number" || !Number.isFinite(p.presenterAspect) || p.presenterAspect <= 0)
+  ) {
+    throw new HttpError(400, "inputProps.packaging.presenterAspect must be a positive number");
+  }
   if (p.templateId !== undefined && p.templateId !== "Newsroom916" && p.templateId !== "Explainer169") {
     throw new HttpError(400, 'inputProps.packaging.templateId must be "Newsroom916" or "Explainer169"');
   }
@@ -413,6 +419,7 @@ function validatePackaging(rawPackaging: unknown): PackagingSpec {
     showCaptions: p.showCaptions as boolean | undefined,
     punchIn: p.punchIn as boolean | undefined,
     showLowerThird: p.showLowerThird as boolean | undefined,
+    presenterAspect: p.presenterAspect as number | undefined,
   };
 }
 
@@ -892,6 +899,7 @@ async function handleRenderJob(rawBody: unknown) {
       width: composition.width,
       height: composition.height,
       fps: composition.fps,
+      captionPhraseCount: req.packaging.showCaptions === false ? 0 : timeline.captions.length,
       ...(req.outputLocalPath ? { outputLocalPath: req.outputLocalPath } : {}),
       ...(gcsUploaded ? { bucketName: req.bucketName, outputGcsPath: req.outputGcsPath } : {}),
     };

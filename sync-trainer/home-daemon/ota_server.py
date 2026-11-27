@@ -78,6 +78,8 @@ from studio_cut import (
     generate_broll_images,
     plate_path as studio_plate_path,
     save_broll_media_bytes,
+    _probe_video_dims,
+    _truncate_words,
 )
 from drafting_passes import (
     MAX_DRAFT_AUDIO_BODY_BYTES,
@@ -2970,9 +2972,9 @@ class RenderJobManager:
                     {
                         "kind": ovl_kind,
                         "breakingStyle": ovl_bstyle,
-                        "headline": ovl_h[:48],
-                        "subline": ovl_s[:64],
-                        "calloutStat": ovl_stat[:28],
+                        "headline": _truncate_words(ovl_h, 48),
+                        "subline": _truncate_words(ovl_s, 64),
+                        "calloutStat": _truncate_words(ovl_stat, 28),
                         "durationSec": max(2, min(20, int(ovl_item.get("duration_sec") or 5))),
                     }
                 )
@@ -2988,6 +2990,9 @@ class RenderJobManager:
             }
             if accent_hex:
                 packaging_payload["accentHex"] = accent_hex
+            src_w, src_h = _probe_video_dims(src_mp4)
+            if src_w > 0 and src_h > 0:
+                packaging_payload["presenterAspect"] = round(src_w / src_h, 4)
             # Clip Studio toggles: only forwarded when the caller sent them, so legacy callers keep
             # the worker's always-on behaviour.
             for opt_key, prop_key in (
@@ -3030,6 +3035,13 @@ class RenderJobManager:
                 raise RuntimeError(
                     f"Remotion 4 worker succeeded ({resp_raw[:200]}) but output MP4 is missing or empty: {out_mp4}"
                 )
+            try:
+                worker_result = json.loads(resp_raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Remotion 4 worker returned invalid JSON: {resp_raw[:200]}") from exc
+            caption_phrase_count = worker_result.get("captionPhraseCount") if isinstance(worker_result, dict) else None
+            if type(caption_phrase_count) is not int or caption_phrase_count < 0:
+                raise RuntimeError("Remotion 4 worker response is missing captionPhraseCount; rebuild the worker.")
             if self._on_remotion_render_completed is not None:
                 self._on_remotion_render_completed()
             applied_overlays = sum(
@@ -3045,7 +3057,7 @@ class RenderJobManager:
             return {
                 "broll_cut_count": broll_cuts,
                 "applied_overlay_count": applied_overlays,
-                "caption_count": len(input_props.get("words") or []),
+                "caption_count": caption_phrase_count,
                 "punch_in_count": 0,
                 "removed_silence_gap_count": 0,
                 "removed_silence_ms": 0,

@@ -44,6 +44,8 @@ export interface PackagingSpec {
   showCaptions?: boolean;
   punchIn?: boolean;
   showLowerThird?: boolean;
+  /** Width / height of the presenter video, when the caller probed it. */
+  presenterAspect?: number;
 }
 
 export interface CaptionPhrase {

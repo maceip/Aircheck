@@ -1083,6 +1083,16 @@ func launchAgentPath() (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"), nil
 }
 
+// servicePath is the PATH the launchd job runs with: the installing shell's PATH (so node from
+// nvm, Homebrew tools and npm resolve the same way as in a terminal) plus the system defaults.
+func servicePath() string {
+	base := "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	if cur := strings.TrimSpace(os.Getenv("PATH")); cur != "" {
+		return cur + ":" + base
+	}
+	return base
+}
+
 func xmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
@@ -1108,7 +1118,7 @@ func launchAgentPlist(exe, repoRoot, logFile string, flags []string) string {
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>` + detachedEnv + `</key><string>1</string>
-		<key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>PATH</key><string>` + xmlEscape(servicePath()) + `</string>
 	</dict>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>

@@ -1600,7 +1600,9 @@ def test_chop_broll_use_remotion_delegates_to_worker_and_fails_loudly(tmp_path: 
             out_path = Path(body["outputLocalPath"])
             out_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_mp4, out_path)
-            resp = json.dumps({"status": "READY", "outputLocalPath": str(out_path)}).encode("utf-8")
+            resp = json.dumps(
+                {"status": "READY", "outputLocalPath": str(out_path), "captionPhraseCount": 1}
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(resp)))
@@ -1645,7 +1647,15 @@ def test_chop_broll_use_remotion_delegates_to_worker_and_fails_loudly(tmp_path: 
                     "depth_text_tag": "LIVE",
                 }
             ],
-            "overlays": [{"headline": "DESK ALERT", "subline": "LOCAL PIPELINE"}],
+            "overlays": [
+                {"headline": "DESK ALERT", "subline": "LOCAL PIPELINE"},
+                {
+                    "kind": "QUOTE_BRIEF",
+                    "headline": "This highlights the paradox of success: the grand event",
+                    "duration_sec": 6,
+                },
+            ],
+            "render_options": {"captions": True, "punch_in": False, "show_lower_third": True},
         }
         req = urllib.request.Request(
             f"http://127.0.0.1:{ota_port}/v1/core/chop-broll",
@@ -1674,6 +1684,19 @@ def test_chop_broll_use_remotion_delegates_to_worker_and_fails_loudly(tmp_path: 
         assert ip["beats"][0]["evidenceSource"] == "LAB REPORT"
         assert ip["beats"][0]["depthTextTag"] == "LIVE"
         assert ip["packaging"]["chyronHeadline"] == "DESK ALERT"
+        # Clip Studio toggles reach the worker, and the stat is the worker's real caption count.
+        assert ip["packaging"]["showCaptions"] is True
+        assert ip["packaging"]["punchIn"] is False
+        assert ip["packaging"]["showLowerThird"] is True
+        assert out["caption_count"] == 1
+        # The presenter's real aspect is probed from the source so the template can frame it.
+        probe_w, probe_h = ota_server._probe_video_dims(src_mp4)
+        assert ip["packaging"]["presenterAspect"] == round(probe_w / probe_h, 4)
+        # Overlay text is cut at a word boundary, never mid-word, and keeps its duration.
+        quote = ip["packaging"]["overlays"][1]
+        assert quote["kind"] == "QUOTE_BRIEF"
+        assert quote["headline"] == "This highlights the paradox of success: the…"
+        assert quote["durationSec"] == 6
 
         with urllib.request.urlopen(f"http://127.0.0.1:{ota_port}/health", timeout=10) as hresp:
             health = json.loads(hresp.read().decode("utf-8"))
