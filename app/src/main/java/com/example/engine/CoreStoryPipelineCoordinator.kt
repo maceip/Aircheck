@@ -3,6 +3,7 @@ package com.example.engine
 import com.example.data.AlignedWord
 import com.example.data.BrollSegmentMode
 import com.example.data.ClipRecord
+import com.example.data.ClipTransitionType
 import com.example.data.CorePipelineSession
 import com.example.data.NewsroomLook
 import com.example.data.RigQualityMetrics
@@ -634,11 +635,18 @@ class CoreStoryPipelineCoordinator(
 
             val attachedOverlays = allSavedOverlays.filter { it.id in session.selectedOverlayIds }
             val health = macRigGateway.resolveAndCheckHealth(rigBaseUrl)
-            // Default Stage 4 to the full studio_cut FFmpeg compositor so every edit (trim pauses,
-            // captions, auto-zoom, aspect 9:16/16:9, overlays, chyrons, look grade/backdrop, custom
-            // B-roll photos/videos, and per-cut transitions) renders faithfully. Only use Remotion
-            // when explicitly requested on renderOptions.useRemotion == true.
-            val effectiveUseRemotion = session.renderOptions.useRemotion == true
+            // Stage 4 renders with the rig's Remotion worker by default. The Remotion template does
+            // not implement trim pauses, non-cut transitions, or the look grade (backdrop plate,
+            // blur, exposure, light, grain, border), so a cut that uses any of those goes to the
+            // FFmpeg studio_cut compositor, which does. renderOptions.useRemotion forces either one.
+            val needsFfmpegOnlyFeature = session.renderOptions.stripSilence ||
+                session.renderOptions.defaultTransition != ClipTransitionType.CUT.wire ||
+                activeClauses.any { it.transitionType != ClipTransitionType.CUT.wire } ||
+                (look != null && (
+                    look.plateId != null || look.blurPercent != 0 || look.brightnessEv != 0.0 ||
+                        look.light != NewsroomLook.LIGHT_NEUTRAL || look.grain || look.border
+                    ))
+            val effectiveUseRemotion = session.renderOptions.useRemotion ?: !needsFfmpegOnlyFeature
             val effectiveTitle = session.title.ifBlank {
                 activeClauses.first().spokenText.take(40)
             }

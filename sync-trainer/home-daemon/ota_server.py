@@ -2988,6 +2988,15 @@ class RenderJobManager:
             }
             if accent_hex:
                 packaging_payload["accentHex"] = accent_hex
+            # Clip Studio toggles: only forwarded when the caller sent them, so legacy callers keep
+            # the worker's always-on behaviour.
+            for opt_key, prop_key in (
+                ("captions", "showCaptions"),
+                ("punch_in", "punchIn"),
+                ("show_lower_third", "showLowerThird"),
+            ):
+                if render_opts_raw.get(opt_key) is not None:
+                    packaging_payload[prop_key] = bool(render_opts_raw.get(opt_key))
             input_props["packaging"] = packaging_payload
 
             _report_async_progress(0.7, "Rendering studio cut…")

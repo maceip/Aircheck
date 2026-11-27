@@ -506,6 +506,25 @@ test("POST /render validates packaging.accentHex and packaging.brollFraming stri
     });
     assert.equal(badFramingRes.status, 400);
     assert.match((await badFramingRes.json()).error, /brollFraming/);
+
+    for (const field of ["showCaptions", "punchIn", "showLowerThird"]) {
+      const badToggleRes = await fetch(`${baseUrl}/render`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobId: "toggle-test",
+          outputLocalPath: "/tmp/out.mp4",
+          inputProps: {
+            lipsyncUrl: "http://127.0.0.1:9/a.mp4",
+            voiceUrl: "http://127.0.0.1:9/a.wav",
+            words: [{ word: "Live", startMs: 0, endMs: 400 }],
+            packaging: { [field]: "yes" },
+          },
+        }),
+      });
+      assert.equal(badToggleRes.status, 400);
+      assert.match((await badToggleRes.json()).error, new RegExp(field));
+    }
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

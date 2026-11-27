@@ -342,6 +342,11 @@ function validatePackaging(rawPackaging: unknown): PackagingSpec {
   if (p.showBrandBug !== undefined && typeof p.showBrandBug !== "boolean") {
     throw new HttpError(400, "inputProps.packaging.showBrandBug must be a boolean");
   }
+  for (const field of ["showCaptions", "punchIn", "showLowerThird"] as const) {
+    if (p[field] !== undefined && typeof p[field] !== "boolean") {
+      throw new HttpError(400, `inputProps.packaging.${field} must be a boolean`);
+    }
+  }
   if (p.templateId !== undefined && p.templateId !== "Newsroom916" && p.templateId !== "Explainer169") {
     throw new HttpError(400, 'inputProps.packaging.templateId must be "Newsroom916" or "Explainer169"');
   }
@@ -405,6 +410,9 @@ function validatePackaging(rawPackaging: unknown): PackagingSpec {
     brollFraming,
     overlays,
     templateId: p.templateId as "Newsroom916" | "Explainer169" | undefined,
+    showCaptions: p.showCaptions as boolean | undefined,
+    punchIn: p.punchIn as boolean | undefined,
+    showLowerThird: p.showLowerThird as boolean | undefined,
   };
 }
 

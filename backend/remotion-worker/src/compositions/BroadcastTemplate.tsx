@@ -164,7 +164,8 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
 
   const pipProgress = activeEvent?.pipShrink ? eventProgress : 0;
   const punchProgress = activeEvent && !activeEvent.pipShrink ? eventProgress : 0;
-  const punchScale = 1 + ((activeEvent?.punchInScale ?? 1) - 1) * punchProgress;
+  const punchScale =
+    packaging.punchIn === false ? 1 : 1 + ((activeEvent?.punchInScale ?? 1) - 1) * punchProgress;
   const brollFraming = packaging.brollFraming ?? "pip";
   const isFullCutaway = brollFraming === "full";
   const isSplitCutaway = brollFraming === "split";
@@ -644,7 +645,7 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
       )}
 
       {/* Word-Highlighted Kinetic Captions (clearance above breaking kicker + lower-third) */}
-      {!isCover && activePhrase && (
+      {!isCover && activePhrase && packaging.showCaptions !== false && (
         <div
           style={{
             position: "absolute",
@@ -695,6 +696,7 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
       )}
 
       {/* Broadcast Lower-Third Chyron + Breaking News Style Kicker Chip */}
+      {packaging.showLowerThird !== false && (
       <div
         style={{
           position: "absolute",
@@ -785,6 +787,7 @@ export const AircheckBroadcastTemplate: React.FC<AircheckTemplateProps> = ({
           )}
         </div>
       </div>
+      )}
 
       {/* Opaque 0.5s First-Frame Cover Card for Crisp Feed Thumbnails */}
       {isCover && (

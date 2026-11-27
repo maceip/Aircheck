@@ -10,6 +10,7 @@ import com.example.data.CorePipelineSession
 import com.example.data.CorePipelineStage
 import com.example.data.CoreRenderOptions
 import com.example.data.CoreStoryClause
+import com.example.data.ClipTransitionType
 import com.example.data.NewsroomLook
 import com.example.data.RenderJobStatus
 import com.example.data.RigQualityMetrics
@@ -385,21 +386,47 @@ class CoreStoryPipelineCoordinatorTest {
             look = null
         )
         assertTrue(chopRes.isSuccess)
-        // Default Stage 4 cut uses unified FFmpeg studio_cut (useRemotion = false) so trim,
-        // punch-in, captions, looks, and per-cut transitions always apply reliably.
-        assertEquals(false, fakeGateway.lastChopUseRemotion)
+        // Default Stage 4 cut renders on the rig's Remotion worker.
+        assertEquals(true, fakeGateway.lastChopUseRemotion)
         assertEquals("http://127.0.0.1:8443/v1/align.json", fakeGateway.lastChopAlignUrl)
         assertEquals(2, fakeGateway.lastChopWords.size)
 
-        // Explicit opt-in renderOptions.useRemotion == true still routes to Remotion when requested.
-        val remotionRes = coordinator.chopTalkingHeadIntoBrollStage4(
-            session = stage4Session.copy(renderOptions = stage4Session.renderOptions.copy(useRemotion = true)),
-            rigBaseUrl = "http://127.0.0.1:8443",
-            allSavedOverlays = emptyList(),
-            look = null
+        // Features only the FFmpeg studio_cut compositor implements route the cut to FFmpeg.
+        suspend fun chopWith(session: CorePipelineSession, look: NewsroomLook? = null): Boolean? {
+            val res = coordinator.chopTalkingHeadIntoBrollStage4(
+                session = session,
+                rigBaseUrl = "http://127.0.0.1:8443",
+                allSavedOverlays = emptyList(),
+                look = look
+            )
+            assertTrue(res.isSuccess)
+            return fakeGateway.lastChopUseRemotion
+        }
+        val opts = stage4Session.renderOptions
+        assertEquals(false, chopWith(stage4Session.copy(renderOptions = opts.copy(stripSilence = true))))
+        assertEquals(
+            false,
+            chopWith(stage4Session.copy(renderOptions = opts.copy(defaultTransition = ClipTransitionType.FADE.wire)))
         )
-        assertTrue(remotionRes.isSuccess)
-        assertEquals(true, fakeGateway.lastChopUseRemotion)
+        assertEquals(
+            false,
+            chopWith(
+                stage4Session.copy(
+                    clauses = stage4Session.clauses.map { it.copy(transitionType = ClipTransitionType.FADE.wire) }
+                )
+            )
+        )
+        assertEquals(false, chopWith(stage4Session, look = NewsroomLook(name = "Grainy", grain = true)))
+        // An accent-only look is rendered by Remotion, so it stays on the default.
+        assertEquals(true, chopWith(stage4Session, look = NewsroomLook(name = "Blue", accentHex = "#3A86F2")))
+        // Toggles the Remotion template honors (captions, auto zoom) stay on Remotion.
+        assertEquals(true, chopWith(stage4Session.copy(renderOptions = opts.copy(captions = true, punchIn = true))))
+        // renderOptions.useRemotion forces either renderer.
+        assertEquals(false, chopWith(stage4Session.copy(renderOptions = opts.copy(useRemotion = false))))
+        assertEquals(
+            true,
+            chopWith(stage4Session.copy(renderOptions = opts.copy(useRemotion = true, stripSilence = true)))
+        )
 
         // CoreStageRunner.tts duration formatting (< 1000ms -> ms, >= 1000ms -> %.1fs)
         val runner = CoreStageRunner(localRepo, profileStore, coordinator, fakeGateway)

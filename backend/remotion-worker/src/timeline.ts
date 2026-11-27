@@ -40,6 +40,10 @@ export interface PackagingSpec {
   brollFraming?: BrollFraming;
   overlays?: OverlayItemSpec[];
   templateId?: "Newsroom916" | "Explainer169";
+  /** Clip Studio toggles. Undefined keeps the legacy always-on behaviour for older callers. */
+  showCaptions?: boolean;
+  punchIn?: boolean;
+  showLowerThird?: boolean;
 }
 
 export interface CaptionPhrase {
