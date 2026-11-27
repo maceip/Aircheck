@@ -1,0 +1,9 @@
+.venv/
+bin/
+out/
+export/.venv/
+export/out_run9/
+export/shim/
+export/*.log
+run9_litert/*.tflite
+run9_litert/tokenizer.json
