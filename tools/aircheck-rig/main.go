@@ -57,6 +57,40 @@ func rigEnvFile(repoRoot string) []string {
 	return out
 }
 
+// out is where the supervisor and its children write. In the foreground it is the terminal plus
+// the log file; when detached, stdout already is the log file.
+var out io.Writer = os.Stdout
+
+const (
+	detachedEnv    = "AIRCHECK_RIG_DETACHED"
+	maxLogBytes    = 10 * 1024 * 1024
+	launchdLabel   = "com.aircheck.rig"
+	mediaConfigRel = "media-providers.json"
+)
+
+// rotateLog keeps one previous log (<name>.1) once the current one passes maxLogBytes.
+func rotateLog(path string) {
+	if st, err := os.Stat(path); err == nil && st.Size() > maxLogBytes {
+		_ = os.Rename(path, path+".1")
+	}
+}
+
+// attachLogFile makes a foreground supervisor also write to the log file, so a run that dies
+// leaves a record. Returns a closer.
+func attachLogFile(cfg *Config) func() {
+	if os.Getenv(detachedEnv) == "1" {
+		return func() {}
+	}
+	rotateLog(cfg.LogFile)
+	fh, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aircheck-rig: cannot open log file %s: %v\n", cfg.LogFile, err)
+		return func() {}
+	}
+	out = io.MultiWriter(os.Stdout, fh)
+	return func() { out = os.Stdout; _ = fh.Close() }
+}
+
 var tryCloudflareRe = regexp.MustCompile(`https://[a-zA-Z0-9-]+\.trycloudflare\.com`)
 
 type RigState struct {
@@ -129,6 +163,25 @@ func main() {
 		if err := stopSupervisor(cfg); err != nil {
 			fatalf("%v", err)
 		}
+	case "restart":
+		if err := stopSupervisor(cfg); err != nil {
+			fatalf("%v", err)
+		}
+		if err := startDetached(cfg, os.Args[1:]); err != nil {
+			fatalf("%v", err)
+		}
+	case "url":
+		os.Exit(printURL(cfg))
+	case "doctor":
+		os.Exit(runDoctor(cfg))
+	case "install-service":
+		if err := installService(cfg, os.Args[1:]); err != nil {
+			fatalf("%v", err)
+		}
+	case "uninstall-service":
+		if err := uninstallService(); err != nil {
+			fatalf("%v", err)
+		}
 	case "status":
 		os.Exit(printStatus(cfg))
 	case "sync-phone":
@@ -140,7 +193,15 @@ func main() {
 			fatalf("%v", err)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "Usage: aircheck-rig [run|start|stop|status|sync-phone|logs] [--no-tunnel] [--no-lambda]\n")
+		fmt.Fprintf(os.Stderr, "Usage: aircheck-rig <command> [--no-tunnel] [--no-lambda] [--no-phone-sync]\n"+
+			"  run                foreground supervisor (Ctrl-C to stop)\n"+
+			"  start | stop | restart   background supervisor\n"+
+			"  status             service health\n"+
+			"  url                print the phone-facing rig URL\n"+
+			"  logs               follow the supervisor log\n"+
+			"  doctor             check binaries, keys, ports and Python modules\n"+
+			"  sync-phone         push the rig URL to the phone now\n"+
+			"  install-service | uninstall-service   start at login and restart on exit (launchd)\n")
 		os.Exit(2)
 	}
 }
@@ -329,17 +390,30 @@ func startDetached(cfg *Config, origArgs []string) error {
 		_ = printStatus(cfg)
 		return nil
 	}
+	if serviceInstalled() {
+		// launchd owns the process: load the job (a no-op error if already loaded) and kick it.
+		plistPath, _ := launchAgentPath()
+		domain := fmt.Sprintf("gui/%d", os.Getuid())
+		_ = exec.Command("launchctl", "bootstrap", domain, plistPath).Run()
+		if outBytes, err := exec.Command("launchctl", "kickstart", domain+"/"+launchdLabel).CombinedOutput(); err != nil {
+			return fmt.Errorf("launchctl kickstart failed: %v (%s)", err, strings.TrimSpace(string(outBytes)))
+		}
+		fmt.Print("Started aircheck-rig via launchd. Waiting for services")
+		waitReady(cfg)
+		return nil
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	childArgs := []string{"run"}
 	for _, a := range origArgs {
-		if a == "start" {
+		if a == "start" || a == "restart" {
 			continue
 		}
 		childArgs = append(childArgs, a)
 	}
+	rotateLog(cfg.LogFile)
 	logFh, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
@@ -348,6 +422,7 @@ func startDetached(cfg *Config, origArgs []string) error {
 
 	cmd := exec.Command(exe, childArgs...)
 	cmd.Dir = cfg.RepoRoot
+	cmd.Env = append(os.Environ(), detachedEnv+"=1")
 	cmd.Stdout = logFh
 	cmd.Stderr = logFh
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -355,7 +430,12 @@ func startDetached(cfg *Config, origArgs []string) error {
 		return err
 	}
 	fmt.Printf("Started aircheck-rig supervisor (pid %d). Waiting for services", cmd.Process.Pid)
+	waitReady(cfg)
+	return nil
+}
 
+// waitReady polls the state file until the daemon, Remotion and (when enabled) the tunnel are up.
+func waitReady(cfg *Config) {
 	deadline := time.Now().Add(25 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(700 * time.Millisecond)
@@ -365,18 +445,21 @@ func startDetached(cfg *Config, origArgs []string) error {
 			continue
 		}
 		tunnelReady := !cfg.EnableTunnel || st.PublicURL != "" || cfg.Cloudflared == ""
-		if st.OtaHealthy && st.RemotionOK && tunnelReady {
+		if st.PID != 0 && pidAlive(st.PID) && st.OtaHealthy && st.RemotionOK && tunnelReady {
 			fmt.Println(" ready!")
 			_ = printStatus(cfg)
-			return nil
+			return
 		}
 	}
-	fmt.Println()
+	fmt.Println(" not ready after 25s; see './aircheck-rig logs'.")
 	_ = printStatus(cfg)
-	return nil
 }
 
 func stopSupervisor(cfg *Config) error {
+	if serviceInstalled() {
+		// Unload the launchd job first, otherwise KeepAlive restarts the supervisor immediately.
+		_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)).Run()
+	}
 	pid, alive := readRunningPID(cfg.PidFile)
 	if !alive {
 		cleanupPortListeners()
@@ -409,6 +492,9 @@ func runSupervisor(cfg *Config) error {
 		return err
 	}
 	defer os.Remove(cfg.PidFile)
+	defer attachLogFile(cfg)()
+	logf("Supervisor starting (pid %d, tunnel=%v, lambda=%v, phone-sync=%v)",
+		os.Getpid(), cfg.EnableTunnel, cfg.EnableLambda, cfg.SyncPhone)
 
 	secret, err := loadOrCreateTunnelSecret(cfg.SecretFile)
 	if err != nil {
@@ -444,10 +530,10 @@ func runSupervisor(cfg *Config) error {
 	closeStop := func() { stopOnce.Do(func() { close(stopCh) }) }
 
 	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
-		<-sigCh
-		logf("Shutting down aircheck-rig...")
+		sig := <-sigCh
+		logf("Shutting down aircheck-rig (signal: %v)...", sig)
 		closeStop()
 	}()
 
@@ -521,16 +607,7 @@ func runSupervisor(cfg *Config) error {
 	// 4. Aircheck OTA & Studio Server (:8443).
 	wg.Add(1)
 	go superviseProcess(&wg, stopCh, "ota-server", func() *exec.Cmd {
-		c := exec.Command(
-			cfg.PythonBin,
-			filepath.Join(cfg.RepoRoot, "sync-trainer", "home-daemon", "ota_server.py"),
-			"--host", "0.0.0.0",
-			"--port", strconv.Itoa(defaultOtaPort),
-			"--bundles-dir", cfg.BundlesDir,
-			"--preferences-file", cfg.PrefsFile,
-			"--renders-dir", cfg.RendersDir,
-			"--default-avatar", cfg.AvatarPath,
-		)
+		c := exec.Command(cfg.PythonBin, otaServerArgs(cfg)...)
 		c.Dir = cfg.RepoRoot
 		c.Env = append(append(os.Environ(), rigEnvFile(cfg.RepoRoot)...),
 			fmt.Sprintf("REMOTION_WORKER_URL=http://127.0.0.1:%d", defaultRemotionPort),
@@ -633,6 +710,25 @@ func runSupervisor(cfg *Config) error {
 	return nil
 }
 
+// otaServerArgs builds the daemon command line. A media provider config is passed only when the
+// operator has put one at .aircheck-rig/media-providers.json.
+func otaServerArgs(cfg *Config) []string {
+	args := []string{
+		filepath.Join(cfg.RepoRoot, "sync-trainer", "home-daemon", "ota_server.py"),
+		"--host", "0.0.0.0",
+		"--port", strconv.Itoa(defaultOtaPort),
+		"--bundles-dir", cfg.BundlesDir,
+		"--preferences-file", cfg.PrefsFile,
+		"--renders-dir", cfg.RendersDir,
+		"--default-avatar", cfg.AvatarPath,
+	}
+	mediaCfg := filepath.Join(cfg.StateDir, mediaConfigRel)
+	if st, err := os.Stat(mediaCfg); err == nil && !st.IsDir() {
+		args = append(args, "--media-config", mediaCfg)
+	}
+	return args
+}
+
 func superviseProcess(
 	wg *sync.WaitGroup,
 	stopCh <-chan struct{},
@@ -680,7 +776,7 @@ func superviseProcess(
 				if onLine != nil {
 					onLine(line)
 				}
-				fmt.Fprintf(os.Stdout, "[%s] %s\n", name, line)
+				fmt.Fprintf(out, "[%s] %s\n", name, line)
 			}
 		}()
 
@@ -882,6 +978,210 @@ func printStatus(cfg *Config) int {
 	return 1
 }
 
+// printURL prints the URL the phone should use: the tunnel URL when live, else the LAN URL.
+func printURL(cfg *Config) int {
+	_, alive := readRunningPID(cfg.PidFile)
+	st, err := readState(cfg.StateFile)
+	if !alive || err != nil {
+		fmt.Fprintln(os.Stderr, "aircheck-rig is not running.")
+		return 1
+	}
+	if st.PublicURL != "" {
+		fmt.Println(st.PublicURL)
+	} else {
+		fmt.Println(st.LanURL)
+	}
+	return 0
+}
+
+// runDoctor checks what the supervisor needs before it can run. It starts nothing.
+func runDoctor(cfg *Config) int {
+	failures := 0
+	check := func(ok bool, required bool, label, detail string) {
+		mark := "ok  "
+		if !ok {
+			if required {
+				mark = "FAIL"
+				failures++
+			} else {
+				mark = "warn"
+			}
+		}
+		fmt.Printf("[%s] %-22s %s\n", mark, label, detail)
+	}
+	check(cfg.PythonBin != "", true, "python", cfg.PythonBin)
+	check(cfg.NodeBin != "", true, "node", cfg.NodeBin)
+	check(firstExecutable("ffmpeg") != "", true, "ffmpeg", firstExecutable("ffmpeg"))
+	check(firstExecutable("ffprobe") != "", true, "ffprobe", firstExecutable("ffprobe"))
+	check(cfg.Cloudflared != "", false, "cloudflared", cfg.Cloudflared)
+	check(cfg.AdbBin != "", false, "adb", cfg.AdbBin)
+
+	_, keyErr := os.Stat(cfg.LambdaKey)
+	check(keyErr == nil, false, "lambda ssh key", cfg.LambdaKey)
+
+	workerDir := filepath.Join(cfg.RepoRoot, "backend", "remotion-worker")
+	_, nmErr := os.Stat(filepath.Join(workerDir, "node_modules", "remotion", "package.json"))
+	check(nmErr == nil, true, "remotion packages", "npm ci in "+workerDir)
+	_, distErr := os.Stat(filepath.Join(workerDir, "dist", "server.js"))
+	check(distErr == nil, false, "remotion build", "built on first run if missing")
+
+	if cfg.PythonBin != "" {
+		daemonDir := filepath.Join(cfg.RepoRoot, "sync-trainer", "home-daemon")
+		c := exec.Command(cfg.PythonBin, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import ota_server", daemonDir)
+		outBytes, err := c.CombinedOutput()
+		detail := "ota_server imports cleanly"
+		if err != nil {
+			lines := strings.Split(strings.TrimSpace(string(outBytes)), "\n")
+			detail = lines[len(lines)-1]
+		}
+		check(err == nil, true, "daemon imports", detail)
+	}
+
+	for _, d := range []struct{ label, path string }{
+		{"bundles dir", cfg.BundlesDir}, {"renders dir", cfg.RendersDir},
+	} {
+		st, err := os.Stat(d.path)
+		check(err == nil && st.IsDir(), true, d.label, d.path)
+	}
+	_, avErr := os.Stat(cfg.AvatarPath)
+	check(avErr == nil, false, "default avatar", cfg.AvatarPath)
+
+	mediaCfg := filepath.Join(cfg.StateDir, mediaConfigRel)
+	if _, err := os.Stat(mediaCfg); err == nil {
+		check(true, false, "media config", mediaCfg)
+	} else {
+		check(true, false, "media config", "none (HeyGen video, auto voice)")
+	}
+
+	pid, alive := readRunningPID(cfg.PidFile)
+	for _, port := range []int{defaultOtaPort, defaultRemotionPort, defaultProxyPort} {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			_ = ln.Close()
+			check(true, false, fmt.Sprintf("port %d", port), "free")
+		} else if alive {
+			check(true, false, fmt.Sprintf("port %d", port), fmt.Sprintf("in use (rig running, pid %d)", pid))
+		} else {
+			check(false, false, fmt.Sprintf("port %d", port), "in use by another process; start will terminate it")
+		}
+	}
+	check(checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/v1/models", defaultMlxPort)), false, "local MLX :8080",
+		"not started by the rig; local LLM stages need it")
+	if failures > 0 {
+		fmt.Printf("%d required check(s) failed.\n", failures)
+		return 1
+	}
+	fmt.Println("All required checks passed.")
+	return 0
+}
+
+func launchAgentPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"), nil
+}
+
+func xmlEscape(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
+}
+
+// launchAgentPlist renders the launchd job: run the supervisor at login and restart it on exit.
+func launchAgentPlist(exe, repoRoot, logFile string, flags []string) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>` + launchdLabel + `</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>` + xmlEscape(exe) + `</string>
+		<string>run</string>
+`)
+	for _, f := range flags {
+		b.WriteString("\t\t<string>" + xmlEscape(f) + "</string>\n")
+	}
+	b.WriteString(`	</array>
+	<key>WorkingDirectory</key><string>` + xmlEscape(repoRoot) + `</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>` + detachedEnv + `</key><string>1</string>
+		<key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>ThrottleInterval</key><integer>10</integer>
+	<key>StandardOutPath</key><string>` + xmlEscape(logFile) + `</string>
+	<key>StandardErrorPath</key><string>` + xmlEscape(logFile) + `</string>
+</dict>
+</plist>
+`)
+	return b.String()
+}
+
+// installService registers the supervisor with launchd so it starts at login and is restarted
+// if it exits. Flags given to install-service (e.g. --no-tunnel) are kept for every start.
+func installService(cfg *Config, origArgs []string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	var flags []string
+	for _, a := range origArgs {
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+		}
+	}
+	plistPath, err := launchAgentPath()
+	if err != nil {
+		return err
+	}
+	if err := stopSupervisor(cfg); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(plistPath, []byte(launchAgentPlist(exe, cfg.RepoRoot, cfg.LogFile, flags)), 0o644); err != nil {
+		return err
+	}
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	_ = exec.Command("launchctl", "bootout", domain+"/"+launchdLabel).Run()
+	if outBytes, err := exec.Command("launchctl", "bootstrap", domain, plistPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("launchctl bootstrap failed: %v (%s)", err, strings.TrimSpace(string(outBytes)))
+	}
+	fmt.Printf("Installed %s. The rig now starts at login and restarts if it exits.\n", plistPath)
+	return nil
+}
+
+func uninstallService() error {
+	plistPath, err := launchAgentPath()
+	if err != nil {
+		return err
+	}
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	_ = exec.Command("launchctl", "bootout", domain+"/"+launchdLabel).Run()
+	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	fmt.Println("Removed the aircheck-rig launchd service.")
+	return nil
+}
+
+func serviceInstalled() bool {
+	p, err := launchAgentPath()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(p)
+	return err == nil
+}
+
 func tailLogs(cfg *Config) error {
 	c := exec.Command("tail", "-n", "80", "-f", cfg.LogFile)
 	c.Stdout = os.Stdout
@@ -994,7 +1294,7 @@ func minDuration(a, b time.Duration) time.Duration {
 }
 
 func logf(format string, args ...any) {
-	fmt.Fprintf(os.Stdout, "%s [aircheck-rig] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+	fmt.Fprintf(out, "%s [aircheck-rig] %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
 }
 
 func fatalf(format string, args ...any) {

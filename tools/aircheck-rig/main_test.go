@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -103,5 +104,65 @@ func TestLoadOrCreateTunnelSecretPersistsAcrossReads(t *testing.T) {
 	}
 	if st.Mode().Perm() != 0o600 {
 		t.Fatalf("expected 0600 perms, got %o", st.Mode().Perm())
+	}
+}
+
+func TestOtaServerArgsPassesMediaConfigOnlyWhenPresent(t *testing.T) {
+	stateDir := t.TempDir()
+	cfg := &Config{RepoRoot: "/repo", StateDir: stateDir, BundlesDir: "/b", PrefsFile: "/p", RendersDir: "/r", AvatarPath: "/a"}
+
+	without := strings.Join(otaServerArgs(cfg), " ")
+	if strings.Contains(without, "--media-config") {
+		t.Fatalf("media config must not be passed when the file is absent: %s", without)
+	}
+	if !strings.Contains(without, "--renders-dir /r") || !strings.Contains(without, "--port 8443") {
+		t.Fatalf("unexpected daemon args: %s", without)
+	}
+
+	mediaCfg := filepath.Join(stateDir, mediaConfigRel)
+	if err := os.WriteFile(mediaCfg, []byte(`{"schema_version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	with := otaServerArgs(cfg)
+	if with[len(with)-2] != "--media-config" || with[len(with)-1] != mediaCfg {
+		t.Fatalf("media config not passed: %v", with)
+	}
+}
+
+func TestLaunchAgentPlistRunsSupervisorWithFlagsAndKeepAlive(t *testing.T) {
+	plist := launchAgentPlist("/x/air & check/aircheck-rig", "/repo", "/repo/.aircheck-rig/logs/supervisor.log", []string{"--no-tunnel"})
+	for _, want := range []string{
+		"<string>/x/air &amp; check/aircheck-rig</string>",
+		"<string>run</string>",
+		"<string>--no-tunnel</string>",
+		"<key>KeepAlive</key><true/>",
+		"<key>RunAtLoad</key><true/>",
+		"<key>" + detachedEnv + "</key><string>1</string>",
+		"<string>" + launchdLabel + "</string>",
+	} {
+		if !strings.Contains(plist, want) {
+			t.Fatalf("plist missing %q:\n%s", want, plist)
+		}
+	}
+}
+
+func TestRotateLogKeepsOnePreviousFile(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "supervisor.log")
+	if err := os.WriteFile(logPath, make([]byte, maxLogBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rotateLog(logPath)
+	if _, err := os.Stat(logPath + ".1"); err != nil {
+		t.Fatalf("oversized log was not rotated: %v", err)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("current log should be gone after rotation")
+	}
+	small := filepath.Join(dir, "small.log")
+	_ = os.WriteFile(small, []byte("x"), 0o644)
+	rotateLog(small)
+	if _, err := os.Stat(small); err != nil {
+		t.Fatalf("small log must not be rotated")
 	}
 }
