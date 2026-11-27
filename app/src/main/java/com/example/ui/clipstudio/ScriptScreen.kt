@@ -2,27 +2,19 @@ package com.example.ui.clipstudio
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.input.TextFieldLineLimits
-import androidx.compose.foundation.text.input.rememberTextFieldState
-import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.sharp.ArrowForward
 import androidx.compose.material.icons.automirrored.sharp.ShortText
@@ -45,30 +37,35 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.example.draft.BrushNudge
 import com.example.draft.CandidateDraft
 import com.example.draft.DraftStateReducer
+import com.example.ui.design.AcCard
+import com.example.ui.design.AcField
+import com.example.ui.design.AcKey
+import com.example.ui.design.AcKeySize
+import com.example.ui.design.AcMediaKey
+import com.example.ui.design.AcMediaWell
+import com.example.ui.design.AcTokens
+import com.example.ui.design.AcType
 import com.example.ui.draft.DraftDeckUiState
 import com.example.ui.draft.DraftDeckViewModel
 import kotlin.math.roundToInt
+
 
 /** A paragraph of the active script with its absolute offset in the plain text. */
 private data class Para(val index: Int, val start: Int, val text: String) {
@@ -115,14 +112,9 @@ private fun clauseAt(candidate: CandidateDraft, offset: Int): Pair<String, Int>?
 }
 
 /**
- * 02 SCRIPT (Clip Studio v5):
- * - 56dp top bar: `01 · 02 SCRIPT · 03`, length key (`timer` + `1:00`), `keyboard` key, and `undo` (no settings gear).
- * - Sunken 3-way posture segmented control (`direct 148 · punchy 112 · story 161`).
- * - Expandable 52dp Length Row (`− shorter` / `0:59 · 148 words` / `longer +`, ±12 words).
- * - Sunken #000 scrollable script panel with first-tap hint, 56dp time gutter, 20/30sp Geist w370 text,
- *   single-tap phrase selection (`#EBEBEF` bg / `#000` text), and `#1E1E24` + 1dp white underline on pinned phrases.
- * - Raised `#1A1A1F` `SWAP THIS PHRASE` card (46dp options + `punchier` / `plainer` / `more` nudges).
- * - Context-switching dock (`pin` + `keep this` while a phrase is selected; `hold: say` + `make the video` otherwise).
+ * 02 SCRIPT (design v2): step header with new / length / keyboard / undo keys, posture keys,
+ * the length row, the script as Body text on cards, the phrase swap card, and the dock
+ * (`pin` + `keep this` while a phrase is selected; hold-to-say media key + `make the video` otherwise).
  */
 @Composable
 fun ScriptScreen(
@@ -151,92 +143,47 @@ fun ScriptScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Cs.Body)
+            .background(AcTokens.Chassis)
             .testTag("cs_script_root")
     ) {
         Column(Modifier.fillMaxSize()) {
-            CsTopBar(
-                activeStage = 2,
-                onNavigate = onNavigate
-            ) {
-                // Instant restart with a brand-new idea from 02 SCRIPT
-                CsKey(
+            StudioTopBar(activeStage = 2, onNavigate = onNavigate) {
+                AcKey(
+                    icon = Icons.Sharp.Add,
+                    contentDescription = "New idea",
                     onClick = onNewIdea,
-                    role = KeyRole.STD,
-                    radius = 11.dp,
-                    horizontalPadding = 7.dp,
-                    contentAlignment = Arrangement.spacedBy(3.dp),
-                    modifier = Modifier
-                        .height(40.dp)
-                        .testTag("cs_new_idea")
-                ) { tint ->
-                    Icon(
-                        imageVector = Icons.Sharp.Add,
-                        contentDescription = "New idea",
-                        tint = tint,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = "new",
-                        style = mono(11.5.sp, tint, FontWeight.Medium),
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
-
-                // Length key (`timer` + estimated runtime)
-                CsKey(
+                    size = AcKeySize.Small,
+                    modifier = Modifier.testTag("cs_new_idea")
+                )
+                AcKey(
+                    label = mmss(estimatedMs),
+                    icon = Icons.Sharp.Timer,
                     onClick = vm::toggleLengthRow,
-                    role = if (state.lengthRowOpen) KeyRole.DOWN else KeyRole.STD,
+                    selected = state.lengthRowOpen,
                     enabled = candidate != null,
-                    radius = 11.dp,
-                    horizontalPadding = 7.dp,
-                    contentAlignment = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier
-                        .height(40.dp)
-                        .testTag("cs_length_toggle")
-                ) { tint ->
-                    Icon(
-                        imageVector = Icons.Sharp.Timer,
-                        contentDescription = "Adjust script length",
-                        tint = tint,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = mmss(estimatedMs),
-                        style = mono(12.sp, tint, FontWeight.Medium),
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
-
-                // Full-script keyboard edit key
-                CsIconKey(
+                    size = AcKeySize.Small,
+                    modifier = Modifier.testTag("cs_length_toggle")
+                )
+                AcKey(
                     icon = Icons.Sharp.Keyboard,
                     contentDescription = "Edit full script",
                     onClick = vm::toggleRawKeyboardMode,
-                    active = state.rawKeyboardMode,
+                    selected = state.rawKeyboardMode,
                     enabled = candidate != null || doc.seedTranscript.isNotBlank(),
-                    size = 40.dp,
-                    radius = 11.dp,
-                    iconSize = 20.dp,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_keyboard")
                 )
-
-                // Undo key
-                CsIconKey(
+                AcKey(
                     icon = Icons.AutoMirrored.Sharp.Undo,
                     contentDescription = "Undo script change",
                     onClick = { vm.stepGlobalSnapshot(-1) },
                     enabled = candidate?.canUndoGlobal == true,
-                    size = 40.dp,
-                    radius = 11.dp,
-                    iconSize = 20.dp,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_script_undo")
                 )
             }
 
-            CsStatusLine(
+            StudioStatusLine(
                 error = state.errorMessage,
                 notice = state.statusNotice,
                 onDismissError = vm::dismissError,
@@ -244,36 +191,29 @@ fun ScriptScreen(
             )
 
             if (state.outlineChangedSinceScript && candidate != null && !state.rawKeyboardMode) {
-                Row(
+                AcCard(
+                    contentPadding = PaddingValues(start = 14.dp, top = 6.dp, end = 6.dp, bottom = 6.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 10.dp, end = 10.dp, bottom = 8.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Cs.RepairFill)
-                        .border(1.dp, Cs.RepairHi, RoundedCornerShape(12.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .testTag("cs_script_outline_stale"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        .padding(start = 14.dp, end = 14.dp, bottom = 8.dp)
+                        .testTag("cs_script_outline_stale")
                 ) {
-                    Text(
-                        text = "Outline changed in 01 SPARK",
-                        style = mono(11.5.sp, Cs.AmberBright, FontWeight.Medium),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    CsKeyLabel(
-                        label = "regenerate",
-                        onClick = vm::writeVideoScript,
-                        enabled = !state.isBusy,
-                        role = KeyRole.REPAIR,
-                        radius = 8.dp,
-                        size = 11.sp,
-                        modifier = Modifier
-                            .height(34.dp)
-                            .testTag("cs_script_regen_from_outline")
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Outline changed in 01 SPARK",
+                            style = AcType.BodySmall.copy(color = AcTokens.Red),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        AcKey(
+                            label = "regenerate",
+                            onClick = vm::writeVideoScript,
+                            enabled = !state.isBusy,
+                            size = AcKeySize.Small,
+                            modifier = Modifier.testTag("cs_script_regen_from_outline")
+                        )
+                    }
                 }
             }
 
@@ -285,107 +225,84 @@ fun ScriptScreen(
                     modifier = Modifier.weight(1f)
                 )
             } else {
-                // Sunken 3-way posture segmented control
                 if (doc.candidates.isNotEmpty()) {
-                    CsSegmentedRow(
-                        modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 14.dp, end = 14.dp, bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         doc.candidates.forEachIndexed { i, c ->
                             val selected = i == doc.activeCandidateIndex
                             val candWords = countWords(c.plainText())
-                            CsSegment(
-                                selected = selected,
+                            AcKey(
                                 onClick = { vm.selectCandidateSlot(i) },
-                                height = 48.dp,
-                                modifier = Modifier.testTag("cs_version_$i")
-                            ) { tint ->
-                                Text(
-                                    text = c.postureLabel.lowercase(),
-                                    style = mono(13.sp, tint, FontWeight.Medium),
-                                    maxLines = 1
-                                )
+                                selected = selected,
+                                size = AcKeySize.Small,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("cs_version_$i")
+                            ) { fg ->
+                                Text(c.postureLabel.lowercase(), style = AcType.Label.copy(color = fg), maxLines = 1)
                                 Text(
                                     text = candWords.toString(),
-                                    style = mono(11.sp, tint.copy(alpha = 0.65f)),
+                                    style = AcType.Caption.copy(color = fg),
                                     maxLines = 1,
-                                    modifier = if (selected && !state.lengthRowOpen) {
-                                        Modifier.testTag("cs_word_count")
-                                    } else {
-                                        Modifier
-                                    }
+                                    modifier = if (selected && !state.lengthRowOpen) Modifier.testTag("cs_word_count") else Modifier
                                 )
                             }
                         }
                     }
                 }
 
-                // Expandable 52dp Length Row (±12 words)
                 if (state.lengthRowOpen && candidate != null) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(start = 10.dp, end = 10.dp, bottom = 10.dp)
-                            .height(52.dp)
+                            .padding(start = 14.dp, end = 14.dp, bottom = 8.dp)
                             .testTag("cs_length_row"),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        CsKey(
+                        AcKey(
+                            label = "shorter",
+                            icon = Icons.Sharp.Remove,
                             onClick = { vm.stepScriptLength(-12) },
                             enabled = !state.isBusy,
-                            radius = 14.dp,
-                            horizontalPadding = 10.dp,
-                            contentAlignment = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
+                            size = AcKeySize.Small,
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp)
                                 .testTag("cs_length_shorter")
-                        ) { tint ->
-                            Icon(Icons.Sharp.Remove, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
-                            Text("shorter", style = mono(13.sp, tint), maxLines = 1)
-                        }
-
-                        Column(
-                            modifier = Modifier.weight(1.3f),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
+                        )
+                        Column(Modifier.weight(1.3f), horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(
                                 text = "${mmss(estimatedMs)} · $words words",
-                                style = mono(15.sp, Cs.Ink, FontWeight.Medium),
+                                style = AcType.Label,
                                 maxLines = 1,
                                 modifier = Modifier.testTag("cs_word_count")
                             )
-                            Text(
-                                text = "target ${mmss(targetSec * 1000L)}",
-                                style = mono(11.sp, Cs.Muted),
-                                maxLines = 1
-                            )
+                            Text("target ${mmss(targetSec * 1000L)}".uppercase(), style = AcType.Caption, maxLines = 1)
                         }
-
-                        CsKey(
+                        AcKey(
+                            label = "longer",
+                            trailingIcon = Icons.Sharp.Add,
                             onClick = { vm.stepScriptLength(12) },
                             enabled = !state.isBusy,
-                            radius = 14.dp,
-                            horizontalPadding = 10.dp,
-                            contentAlignment = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
+                            size = AcKeySize.Small,
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp)
                                 .testTag("cs_length_longer")
-                        ) { tint ->
-                            Text("longer", style = mono(13.sp, tint), maxLines = 1)
-                            Icon(Icons.Sharp.Add, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
-                        }
+                        )
                     }
                 }
 
-                // Sunken #000 scrollable script panel
-                Box(
+                AcCard(
+                    contentPadding = PaddingValues(0.dp),
+                    verticalArrangement = Arrangement.Top,
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp)
-                        .sunkenPanel(radius = 18.dp)
+                        .padding(horizontal = 14.dp)
                 ) {
                     if (candidate == null) {
                         Column(
@@ -395,18 +312,11 @@ fun ScriptScreen(
                             verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterVertically),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Text(
-                                text = "No script yet. Go to 01 SPARK and tap write the script.",
-                                style = sans(16.sp, Cs.Muted, 23.sp)
-                            )
-                            CsKeyLabel(
+                            Text("No script yet. Go to 01 SPARK and tap write the script.", style = AcType.Body.copy(color = AcTokens.Ink2))
+                            AcKey(
                                 label = "start a new idea",
                                 onClick = onNewIdea,
-                                role = KeyRole.STD,
-                                radius = 14.dp,
-                                modifier = Modifier
-                                    .height(44.dp)
-                                    .testTag("cs_script_empty_new_idea")
+                                modifier = Modifier.testTag("cs_script_empty_new_idea")
                             )
                         }
                     } else {
@@ -424,22 +334,14 @@ fun ScriptScreen(
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .hairlineBottom(Cs.RowDivider)
+                                            .hairlineBottom()
                                             .padding(horizontal = 16.dp, vertical = 12.dp)
                                             .testTag("cs_script_hint"),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Sharp.TouchApp,
-                                            contentDescription = null,
-                                            tint = Cs.Muted,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Text(
-                                            text = "Tap any phrase to swap or pin it.",
-                                            style = sans(14.sp, Cs.Muted, 19.sp)
-                                        )
+                                        Icon(Icons.Sharp.TouchApp, contentDescription = null, tint = AcTokens.Ink2, modifier = Modifier.size(20.dp))
+                                        Text("Tap any phrase to swap or pin it.", style = AcType.BodySmall)
                                     }
                                 }
                             }
@@ -474,62 +376,59 @@ fun ScriptScreen(
                     }
                 }
 
-                // Phrase Sheet (raised card above the dock while a phrase is selected)
                 val selectedRange = state.selectedPhrase
                 if (selectedRange != null && candidate != null) {
-                    PhraseSwapSheet(
-                        state = state,
-                        vm = vm
-                    )
+                    PhraseSwapSheet(state = state, vm = vm)
                 }
 
-                // Context-switching Bottom Dock
                 if (selectedRange != null && candidate != null) {
                     val pinned = vm.isRangeLocked(selectedRange)
-                    CsDock(
+                    StudioDock(
                         leading = {
-                            CsDockSideKey(
+                            AcKey(
                                 label = if (pinned) "pinned" else "pin",
                                 icon = Icons.Sharp.PushPin,
-                                active = pinned,
+                                selected = pinned,
                                 onClick = { vm.togglePhraseLock(selectedRange) },
                                 modifier = Modifier.testTag("cs_pin_phrase")
                             )
                         },
                         primaryLabel = "keep this",
-                        primaryTrailingIcon = Icons.Sharp.Check,
-                        primaryRole = KeyRole.COMMIT,
-                        primaryEnabled = true,
+                        primaryIcon = Icons.Sharp.Check,
                         primaryTag = "cs_keep_phrase",
                         onPrimaryClick = vm::keepSelectedPhrase
                     )
                 } else {
-                    CsDock(
+                    StudioDock(
                         leading = {
-                            CsVoiceDockKey(
-                                label = if (state.isRecordingSplice) "STOP" else "HOLD",
-                                icon = Icons.Sharp.Mic,
-                                held = state.isRecordingSplice,
-                                enabled = candidate != null && !state.isRecordingSeed && !state.isRecordingSteer,
-                                onPress = {
-                                    onRequestMic {
-                                        val c = candidate
-                                        val range = state.activeBrushRange
-                                        if (c != null && range != null) {
-                                            vm.focusClause(clauseAt(c, range.first)?.first)
-                                        } else {
-                                            vm.focusGap(null)
+                            AcMediaWell(padding = 6.dp) {
+                                AcMediaKey(
+                                    icon = Icons.Sharp.Mic,
+                                    contentDescription = null,
+                                    onPress = {
+                                        onRequestMic {
+                                            val c = candidate
+                                            val range = state.activeBrushRange
+                                            if (c != null && range != null) {
+                                                vm.focusClause(clauseAt(c, range.first)?.first)
+                                            } else {
+                                                vm.focusGap(null)
+                                            }
+                                            vm.startVoiceSplice()
                                         }
-                                        vm.startVoiceSplice()
-                                    }
-                                },
-                                onRelease = vm::stopVoiceSplice,
-                                modifier = Modifier.testTag("cs_speak_own_words")
-                            )
+                                    },
+                                    onRelease = vm::stopVoiceSplice,
+                                    held = state.isRecordingSplice,
+                                    enabled = candidate != null && !state.isRecordingSeed && !state.isRecordingSteer,
+                                    caption = if (state.isRecordingSplice) "stop" else "hold",
+                                    semanticsLabel = if (state.isRecordingSplice) "STOP" else "HOLD",
+                                    size = 54.dp,
+                                    modifier = Modifier.testTag("cs_speak_own_words")
+                                )
+                            }
                         },
                         primaryLabel = "make the video",
-                        primaryTrailingIcon = Icons.AutoMirrored.Sharp.ArrowForward,
-                        primaryRole = KeyRole.COMMIT,
+                        primaryIcon = Icons.AutoMirrored.Sharp.ArrowForward,
                         primaryEnabled = candidate != null && !state.isBusy,
                         primaryTag = "cs_create_video",
                         onPrimaryClick = { candidate?.let { onCreateVideo(it.plainText()) } },
@@ -541,14 +440,8 @@ fun ScriptScreen(
         }
 
         if (renderGlobalOverlays) {
-            CsToastOverlay(
-                message = state.toastMessage,
-                onDismiss = vm::dismissToast
-            )
-            VoiceGlowDitherOverlay(
-                active = state.isAnyRecording,
-                level = state.liveRmsLevel
-            )
+            StudioToast(message = state.toastMessage, onDismiss = vm::dismissToast)
+            VoiceGlowDitherOverlay(active = state.isAnyRecording, level = state.liveRmsLevel)
         }
     }
 }
@@ -586,13 +479,13 @@ private fun ScriptParagraphRow(
             localLocks.forEach { r ->
                 val endExcl = (r.last + 1).coerceAtMost(para.text.length)
                 if (r.first < endExcl) {
-                    addStyle(SpanStyle(background = Cs.Pinned), r.first, endExcl)
+                    addStyle(SpanStyle(background = AcTokens.Hairline), r.first, endExcl)
                 }
             }
             localSelection?.let { r ->
                 val endExcl = (r.last + 1).coerceAtMost(para.text.length)
                 if (r.first < endExcl) {
-                    addStyle(SpanStyle(background = Cs.Ink, color = Cs.Black), r.first, endExcl)
+                    addStyle(SpanStyle(background = AcTokens.Red, color = AcTokens.Ui), r.first, endExcl)
                 }
             }
         }
@@ -601,14 +494,14 @@ private fun ScriptParagraphRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .then(if (!isLast) Modifier.hairlineBottom(Cs.RowDivider) else Modifier)
+            .then(if (!isLast) Modifier.hairlineBottom() else Modifier)
             .padding(top = 14.dp, end = 14.dp, bottom = 14.dp)
             .testTag("cs_para_${para.index}"),
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Text(
             text = timeLabel,
-            style = mono(11.sp, Cs.Muted).copy(lineHeight = 30.sp),
+            style = AcType.Caption.copy(lineHeight = AcType.Body.lineHeight),
             maxLines = 1,
             modifier = Modifier
                 .width(56.dp)
@@ -618,7 +511,7 @@ private fun ScriptParagraphRow(
 
         Text(
             text = annotated,
-            style = sans(20.sp, Cs.Ink, 30.sp, FontWeight(370)),
+            style = AcType.Body,
             onTextLayout = { layout = it },
             modifier = Modifier
                 .weight(1f)
@@ -634,19 +527,11 @@ private fun ScriptParagraphRow(
                         val startLine = l.getLineForOffset(safeStart)
                         val endLine = l.getLineForOffset(safeEnd)
                         for (line in startLine..endLine) {
-                            val leftX = if (line == startLine) {
-                                l.getBoundingBox(safeStart).left
-                            } else {
-                                l.getLineLeft(line)
-                            }
-                            val rightX = if (line == endLine) {
-                                l.getBoundingBox(safeEnd).right
-                            } else {
-                                l.getLineRight(line)
-                            }
+                            val leftX = if (line == startLine) l.getBoundingBox(safeStart).left else l.getLineLeft(line)
+                            val rightX = if (line == endLine) l.getBoundingBox(safeEnd).right else l.getLineRight(line)
                             val y = l.getLineBottom(line) - strokePx
                             if (rightX > leftX) {
-                                drawLine(Cs.White, Offset(leftX, y), Offset(rightX, y), strokePx)
+                                drawLine(AcTokens.Ink, Offset(leftX, y), Offset(rightX, y), strokePx)
                             }
                         }
                     }
@@ -668,50 +553,31 @@ private fun PhraseSwapSheet(
     state: DraftDeckUiState,
     vm: DraftDeckViewModel
 ) {
-    Column(
+    AcCard(
+        tag = null,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 10.dp, top = 12.dp, end = 10.dp)
-            .raisedCard(radius = 18.dp)
-            .padding(12.dp)
+            .padding(start = 14.dp, top = 12.dp, end = 14.dp)
             .testTag("cs_phrase_sheet"),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("SWAP THIS PHRASE", style = SectionLabelStyle, modifier = Modifier.weight(1f))
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(role = Role.Button, onClick = vm::dismissBrushStrip)
-                    .testTag("cs_selection_close"),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Sharp.Close, contentDescription = "Close phrase options", tint = Cs.Muted, modifier = Modifier.size(22.dp))
-            }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            SectionCaption("Swap this phrase", modifier = Modifier.weight(1f))
+            AcKey(
+                icon = Icons.Sharp.Close,
+                contentDescription = "Close phrase options",
+                onClick = vm::dismissBrushStrip,
+                size = AcKeySize.Small,
+                modifier = Modifier.testTag("cs_selection_close")
+            )
         }
 
         if (state.brushAlternatives.isEmpty()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 46.dp)
-                    .neumorphicSurface(role = KeyRole.DOWN, pressed = true, radius = 14.dp, enabled = true)
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                if (state.isBusy) {
-                    ThinkingOrbSolving(size = 26.dp, tint = Cs.White)
-                }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (state.isBusy) ThinkingOrbSolving(size = 24.dp, tint = AcTokens.Ink)
                 Text(
                     text = if (state.isBusy) (state.busyLabel ?: "Finding alternatives…") else "No alternatives yet.",
-                    style = sans(15.sp, Cs.Muted, 20.sp),
+                    style = AcType.BodySmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -719,96 +585,49 @@ private fun PhraseSwapSheet(
         } else {
             state.brushAlternatives.take(4).forEachIndexed { i, alt ->
                 val isCurrent = i == state.brushActiveAltIndex
-                CsKey(
+                AcKey(
                     onClick = { vm.selectBrushAlternative(i) },
-                    role = if (isCurrent) KeyRole.DOWN else KeyRole.STD,
-                    radius = 14.dp,
-                    horizontalPadding = 14.dp,
-                    contentAlignment = Arrangement.spacedBy(10.dp),
+                    selected = isCurrent,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 46.dp)
                         .testTag("cs_option_$i")
-                ) { tint ->
-                    Text(
-                        text = if (isCurrent) "▶" else "${i + 1}",
-                        style = mono(13.sp, tint),
-                        modifier = Modifier.width(18.dp)
-                    )
+                ) { fg ->
+                    Text(if (isCurrent) "▶" else "${i + 1}", style = AcType.Label.copy(color = fg), modifier = Modifier.width(18.dp))
                     Text(
                         text = if (alt.isBlank()) "cut this phrase" else alt,
-                        style = sans(16.sp, tint, 21.sp),
+                        style = AcType.BodySmall.copy(color = fg),
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f).padding(vertical = 8.dp)
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(vertical = 8.dp)
                     )
                 }
             }
         }
 
-        // Three 44dp nudge pills: punchier (`sharper`), plainer (`simpler`), more (`more`)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            NudgePillKey(
-                label = "punchier",
-                icon = Icons.Sharp.Bolt,
-                active = state.activeBrushNudge == BrushNudge.SHARPER,
-                enabled = !state.isBusy,
-                onClick = { vm.performBrushNudge(BrushNudge.SHARPER) },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("cs_nudge_${BrushNudge.SHARPER.wire}")
-            )
-            NudgePillKey(
-                label = "plainer",
-                icon = Icons.AutoMirrored.Sharp.ShortText,
-                active = state.activeBrushNudge == BrushNudge.SIMPLER,
-                enabled = !state.isBusy,
-                onClick = { vm.performBrushNudge(BrushNudge.SIMPLER) },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("cs_nudge_${BrushNudge.SIMPLER.wire}")
-            )
-            NudgePillKey(
-                label = "more",
-                icon = Icons.Sharp.Refresh,
-                active = state.activeBrushNudge == BrushNudge.MORE,
-                enabled = !state.isBusy,
-                onClick = vm::refreshPhraseAlternatives,
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("cs_nudge_${BrushNudge.MORE.wire}")
-            )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(
+                Triple("punchier", Icons.Sharp.Bolt, BrushNudge.SHARPER),
+                Triple("plainer", Icons.AutoMirrored.Sharp.ShortText, BrushNudge.SIMPLER),
+                Triple("more", Icons.Sharp.Refresh, BrushNudge.MORE)
+            ).forEach { (label, icon, nudge) ->
+                AcKey(
+                    label = label,
+                    icon = icon,
+                    selected = state.activeBrushNudge == nudge,
+                    enabled = !state.isBusy,
+                    onClick = {
+                        if (nudge == BrushNudge.MORE) vm.refreshPhraseAlternatives() else vm.performBrushNudge(nudge)
+                    },
+                    size = AcKeySize.Small,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("cs_nudge_${nudge.wire}")
+                )
+            }
         }
-    }
-}
-
-@Composable
-private fun NudgePillKey(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    active: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    CsKey(
-        onClick = onClick,
-        role = if (active) KeyRole.ACTIVE else KeyRole.STD,
-        enabled = enabled,
-        radius = 12.dp,
-        pip = !active,
-        horizontalPadding = 8.dp,
-        contentAlignment = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
-        modifier = modifier.height(44.dp)
-    ) { tint ->
-        if (active) {
-            CsLedDot(color = Cs.Voice, size = 6.dp)
-        }
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
-        Text(label, style = mono(12.sp, tint), maxLines = 1, softWrap = false)
     }
 }
 
@@ -819,28 +638,24 @@ private fun FullScriptKeyboardEditor(
     onApply: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val fieldState = rememberTextFieldState(initialText = initialText)
+    var text by rememberSaveable { mutableStateOf(initialText) }
     LaunchedEffect(initialText) {
-        if (fieldState.text.isEmpty() && initialText.isNotEmpty()) {
-            fieldState.setTextAndPlaceCursorAtEnd(initialText)
-        }
+        if (text.isEmpty() && initialText.isNotEmpty()) text = initialText
     }
     Column(modifier = modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .padding(horizontal = 10.dp)
-                .sunkenPanel(radius = 18.dp)
-                .padding(16.dp),
+                .padding(horizontal = 14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text("EDIT FULL SCRIPT · PINNED WORDS STAY LOCKED", style = SectionLabelStyle)
-            BasicTextField(
-                state = fieldState,
-                textStyle = sans(20.sp, Cs.Ink, 30.sp, FontWeight(370)),
-                cursorBrush = SolidColor(Cs.Ink),
-                lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 6),
+            SectionCaption("Edit full script · pinned words stay locked")
+            AcField(
+                value = text,
+                onValueChange = { text = it },
+                minLines = 6,
+                textStyle = AcType.Body,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
@@ -848,9 +663,9 @@ private fun FullScriptKeyboardEditor(
             )
         }
 
-        CsDock(
+        StudioDock(
             leading = {
-                CsDockSideKey(
+                AcKey(
                     label = "cancel",
                     icon = Icons.Sharp.Close,
                     onClick = onCancel,
@@ -858,10 +673,10 @@ private fun FullScriptKeyboardEditor(
                 )
             },
             primaryLabel = "save script",
-            primaryTrailingIcon = Icons.Sharp.Check,
-            primaryEnabled = fieldState.text.toString().isNotBlank(),
+            primaryIcon = Icons.Sharp.Check,
+            primaryEnabled = text.isNotBlank(),
             primaryTag = "cs_raw_apply",
-            onPrimaryClick = { onApply(fieldState.text.toString()) }
+            onPrimaryClick = { onApply(text) }
         )
     }
 }

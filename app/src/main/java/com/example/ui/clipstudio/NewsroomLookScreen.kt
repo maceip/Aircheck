@@ -86,6 +86,16 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import java.io.File
 import kotlin.math.pow
+import com.example.ui.design.AcCard
+import com.example.ui.design.AcDisplay
+import com.example.ui.design.AcField
+import com.example.ui.design.AcKey
+import com.example.ui.design.AcKeySize
+import com.example.ui.design.AcMediaKey
+import com.example.ui.design.AcMediaWell
+import com.example.ui.design.AcPrimaryKey
+import com.example.ui.design.AcTokens
+import com.example.ui.design.AcType
 
 /**
  * Dedicated full-view Newsroom Overlays Editor:
@@ -178,66 +188,59 @@ fun NewsroomLookScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Cs.Body)
+            .background(AcTokens.Chassis)
             .testTag("cs_newsroom_root")
     ) {
         Column(Modifier.fillMaxSize()) {
-            // Header: Back, Title, Undo, Save
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp)
+                    .height(60.dp)
                     .padding(start = 8.dp, end = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                CsIconKey(
+                AcKey(
                     icon = Icons.AutoMirrored.Sharp.ArrowBack,
                     contentDescription = "Back to Cut",
                     onClick = onBack,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_newsroom_back")
                 )
                 Text(
                     text = "Newsroom Overlays",
-                    style = sans(17.sp, Cs.Ink, weight = FontWeight.Medium),
+                    style = AcType.Title,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                CsIconKey(
+                AcKey(
                     icon = Icons.AutoMirrored.Sharp.Undo,
                     contentDescription = "Undo overlay change",
                     enabled = state.coreUndoDepth > 0,
                     onClick = vm::undoCoreEdit,
-                    size = 40.dp,
-                    radius = 11.dp,
-                    iconSize = 20.dp,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_newsroom_undo")
                 )
-                CsKeyLabel(
+                AcKey(
                     label = "save",
                     onClick = {
                         vm.useLookAndReturn(draft.id, draftOverride = draft)
                         onBack()
                     },
                     enabled = !isLookBusy,
-                    role = KeyRole.STD,
-                    radius = 11.dp,
-                    size = 12.sp,
-                    modifier = Modifier
-                        .height(40.dp)
-                        .testTag("cs_save_look_only")
+                    size = AcKeySize.Small,
+                    modifier = Modifier.testTag("cs_save_look_only")
                 )
             }
 
-            CsStatusLine(
+            StudioStatusLine(
                 error = state.errorMessage,
                 notice = state.statusNotice,
                 onDismissError = vm::dismissError,
                 onDismissNotice = vm::dismissNotice
             )
 
-            // Live aspect-accurate broadcast preview canvas
             BroadcastOverlayLivePreview(
                 look = draft,
                 options = opts,
@@ -251,25 +254,28 @@ fun NewsroomLookScreen(
                 onTapCard = { tab = 1 }
             )
 
-            // 3 focused full-view tabs (`Labels` · `Overlays` · `Look`)
-            CsSegmentedRow(
-                modifier = Modifier.padding(start = 10.dp, top = 8.dp, end = 10.dp)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 14.dp, top = 8.dp, end = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                val tabs = listOf(
+                listOf(
                     Triple(0, "Labels", Icons.Sharp.Title),
                     Triple(1, "Overlays (${attachedOverlays.size})", Icons.Sharp.FormatQuote),
                     Triple(2, "Look", Icons.Sharp.Wallpaper)
-                )
-                tabs.forEach { (idx, label, icon) ->
-                    CsSegment(
+                ).forEach { (idx, label, icon) ->
+                    AcKey(
+                        label = label,
+                        icon = icon,
                         selected = tab == idx,
                         onClick = { tab = idx },
-                        height = 42.dp,
-                        modifier = Modifier.testTag("cs_newsroom_tab_$idx")
-                    ) { tint ->
-                        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
-                        Text(label, style = mono(11.5.sp, tint), maxLines = 1, softWrap = false)
-                    }
+                        size = AcKeySize.Small,
+                        role = Role.Tab,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_newsroom_tab_$idx")
+                    )
                 }
             }
 
@@ -278,7 +284,7 @@ fun NewsroomLookScreen(
                     .weight(1f)
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
-                    .padding(start = 10.dp, top = 10.dp, end = 10.dp, bottom = 10.dp),
+                    .padding(start = 14.dp, top = 10.dp, end = 14.dp, bottom = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 when (tab) {
@@ -310,15 +316,13 @@ fun NewsroomLookScreen(
                 }
             }
 
-            // Actionable Bottom Dock: saves & directly renders when talking head exists!
             val canRenderNow = session.hasTalkingHead && !state.isCoreStageBusy
-            CsDock(
+            StudioDock(
                 leading = {
-                    CsDockSideKey(
+                    AcKey(
                         label = "Tweak AI",
                         icon = Icons.Outlined.AutoAwesome,
                         enabled = !isLookBusy,
-                        horizontal = true,
                         onClick = {
                             vm.dismissToast()
                             aiTweakSheetOpen = true
@@ -327,17 +331,12 @@ fun NewsroomLookScreen(
                     )
                 },
                 primaryLabel = if (canRenderNow) "apply & render" else "save overlays",
-                primaryTrailingIcon = if (canRenderNow) Icons.Sharp.Movie else Icons.Sharp.Check,
-                primaryRole = KeyRole.COMMIT,
+                primaryIcon = if (canRenderNow) Icons.Sharp.Movie else Icons.Sharp.Check,
                 primaryEnabled = !isLookBusy && !state.isCoreStageBusy,
                 primaryTag = "cs_use_look",
                 onPrimaryClick = {
                     vm.useLookAndReturn(draft.id, draftOverride = draft)
-                    if (canRenderNow) {
-                        onTestOnClip(draft.id)
-                    } else {
-                        onBack()
-                    }
+                    if (canRenderNow) onTestOnClip(draft.id) else onBack()
                 },
                 isBusy = isLookBusy,
                 busyLabel = busyLabel
@@ -360,10 +359,7 @@ fun NewsroomLookScreen(
         }
 
         if (renderGlobalOverlays) {
-            CsToastOverlay(
-                message = state.toastMessage,
-                onDismiss = vm::dismissToast
-            )
+            StudioToast(message = state.toastMessage, onDismiss = vm::dismissToast)
         }
     }
 }
@@ -401,9 +397,9 @@ private fun BroadcastOverlayLivePreview(
 
     val ambientCenterColor = remember(look.light, gain) {
         val base = when (look.light) {
-            NewsroomLook.LIGHT_WARM -> Color(0xFF3A2A1C)
-            NewsroomLook.LIGHT_COOL -> Color(0xFF1C2A3A)
-            else -> Color(0xFF282830)
+            NewsroomLook.LIGHT_WARM -> androidx.compose.ui.graphics.lerp(AcTokens.Display, AcTokens.OpOrange, 0.22f)
+            NewsroomLook.LIGHT_COOL -> androidx.compose.ui.graphics.lerp(AcTokens.Display, AcTokens.OpBlue, 0.22f)
+            else -> AcTokens.MediaKey
         }
         Color(
             red = (base.red * gain).coerceIn(0f, 1f),
@@ -425,22 +421,21 @@ private fun BroadcastOverlayLivePreview(
     val kickerLabel = breakingStyle.bannerText
     val showKicker = kickerLabel.isNotBlank()
     val accentLuma = 0.2126f * accentColor.red + 0.7152f * accentColor.green + 0.0722f * accentColor.blue
-    val accentFg = if (accentLuma >= 0.6f) Cs.Black else Cs.White
+    val accentFg = if (accentLuma >= 0.6f) AcTokens.Display else AcTokens.Ui
     val (kickerBg, kickerFg) = when (breakingStyle) {
         BreakingNewsStyle.BREAKING, BreakingNewsStyle.ALERT_STAT -> accentColor to accentFg
-        BreakingNewsStyle.DEVELOPING -> Cs.AmberBright to Cs.Black
-        BreakingNewsStyle.EXCLUSIVE -> Cs.White to Cs.Black
-        BreakingNewsStyle.CLEAN -> Color.Transparent to Cs.White
+        BreakingNewsStyle.DEVELOPING -> AcTokens.OpOrange to AcTokens.Display
+        BreakingNewsStyle.EXCLUSIVE -> AcTokens.Ui to AcTokens.Display
+        BreakingNewsStyle.CLEAN -> Color.Transparent to AcTokens.Ui
     }
 
     val isVertical = options.aspect == CoreRenderOptions.ASPECT_VERTICAL
 
-    Box(
+    AcDisplay(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp)
+            .padding(horizontal = 14.dp)
             .height(194.dp)
-            .sunkenPanel(radius = 16.dp)
             .testTag("cs_look_canvas"),
         contentAlignment = Alignment.Center
     ) {
@@ -448,7 +443,7 @@ private fun BroadcastOverlayLivePreview(
         if (isVertical) {
             Text(
                 text = "9:16",
-                style = mono(10.sp, Cs.Dim, FontWeight.Medium),
+                style = AcType.Caption.copy(color = AcTokens.OpGrey),
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(10.dp)
@@ -461,7 +456,7 @@ private fun BroadcastOverlayLivePreview(
                 .padding(vertical = 6.dp)
                 .aspectRatio(9f / 16f)
                 .clip(RoundedCornerShape(10.dp))
-                .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(10.dp))
+                .border(1.dp, AcTokens.MediaKey, RoundedCornerShape(10.dp))
         } else {
             Modifier.fillMaxSize()
         }
@@ -495,7 +490,7 @@ private fun BroadcastOverlayLivePreview(
                         .fillMaxSize()
                         .background(
                             Brush.radialGradient(
-                                colors = listOf(ambientCenterColor, Color(0xFF0A0A0D)),
+                                colors = listOf(ambientCenterColor, AcTokens.Display),
                                 radius = 480f
                             )
                         )
@@ -507,7 +502,7 @@ private fun BroadcastOverlayLivePreview(
                     Modifier
                         .fillMaxSize()
                         .padding(6.dp)
-                        .border(1.5.dp, Color.White.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
+                        .border(1.5.dp, AcTokens.Ui.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
                 )
             }
 
@@ -518,10 +513,10 @@ private fun BroadcastOverlayLivePreview(
                         .align(Alignment.TopStart)
                         .padding(start = 8.dp, top = 8.dp)
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color.Black.copy(alpha = 0.82f))
+                        .background(AcTokens.Display.copy(alpha = 0.82f))
                         .border(
                             width = if (activeTab == 0) 1.dp else 0.5.dp,
-                            color = if (activeTab == 0) Cs.White else Color.White.copy(alpha = 0.25f),
+                            color = if (activeTab == 0) AcTokens.Ui else AcTokens.Ui.copy(alpha = 0.25f),
                             shape = RoundedCornerShape(6.dp)
                         )
                         .clickable(role = Role.Button, onClick = onTapLogoBug)
@@ -538,7 +533,7 @@ private fun BroadcastOverlayLivePreview(
                     )
                     Text(
                         text = options.cornerBugText.ifBlank { "AIRCHECK" },
-                        style = ndot(9.5.sp, Cs.White),
+                        style = AcType.Step.copy(color = AcTokens.Ui, fontSize = 9.5.sp),
                         maxLines = 1
                     )
                 }
@@ -552,7 +547,7 @@ private fun BroadcastOverlayLivePreview(
                         .padding(end = 8.dp, top = 8.dp)
                         .width(if (isVertical) 82.dp else 148.dp)
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color.Black.copy(alpha = 0.82f))
+                        .background(AcTokens.Display.copy(alpha = 0.82f))
                         .border(1.dp, accentColor, RoundedCornerShape(6.dp))
                         .clickable(role = Role.Button, onClick = onTapCard)
                         .padding(horizontal = 6.dp, vertical = 4.dp)
@@ -561,13 +556,13 @@ private fun BroadcastOverlayLivePreview(
                 ) {
                     Text(
                         text = cardOverlay.calloutStat.ifBlank { cardOverlay.kind.label }.uppercase(),
-                        style = mono(7.5.sp, accentColor, FontWeight.Bold),
+                        style = AcType.Caption.copy(color = accentColor, fontSize = 7.5.sp, letterSpacing = 0.sp),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = cardOverlay.headline,
-                        style = sans(9.5.sp, Cs.White, 12.sp, FontWeight.Medium),
+                        style = AcType.BodySmall.copy(color = AcTokens.Ui, fontSize = 9.5.sp, lineHeight = 12.sp),
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -595,7 +590,7 @@ private fun BroadcastOverlayLivePreview(
                         ) {
                             Text(
                                 text = kickerLabel,
-                                style = mono(8.sp, kickerFg, FontWeight.Bold),
+                                style = AcType.Caption.copy(color = kickerFg, fontSize = 8.sp, letterSpacing = 0.sp),
                                 maxLines = 1
                             )
                         }
@@ -611,7 +606,7 @@ private fun BroadcastOverlayLivePreview(
                                     bottomEnd = 6.dp
                                 )
                             )
-                            .background(Color.Black.copy(alpha = 0.86f))
+                            .background(AcTokens.Display.copy(alpha = 0.86f))
                             .border(
                                 width = 1.dp,
                                 color = accentColor.copy(alpha = 0.7f),
@@ -627,14 +622,14 @@ private fun BroadcastOverlayLivePreview(
                     ) {
                         Text(
                             text = displayTitle,
-                            style = sans(if (isVertical) 10.sp else 13.5.sp, Cs.White, if (isVertical) 13.sp else 17.sp, FontWeight.Medium),
+                            style = AcType.BodySmall.copy(color = AcTokens.Ui, fontSize = if (isVertical) 10.sp else 13.5.sp, lineHeight = if (isVertical) 13.sp else 17.sp),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
                         if (displaySubline.isNotBlank()) {
                             Text(
                                 text = displaySubline,
-                                style = mono(if (isVertical) 7.5.sp else 10.sp, accentColor),
+                                style = AcType.Caption.copy(color = accentColor, fontSize = if (isVertical) 7.5.sp else 10.sp, letterSpacing = 0.sp),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -690,11 +685,9 @@ private fun LabelsAndChyronTab(
             }
     }
 
-    Column(
+    AcCard(
         modifier = Modifier
-            .fillMaxWidth()
-            .sunkenPanel(radius = 16.dp)
-            .padding(12.dp),
+            .fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Row(
@@ -702,108 +695,65 @@ private fun LabelsAndChyronTab(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("LOWER-THIRD CHYRON", style = SectionLabelStyle)
-            CsKeyLabel(
+            Text("LOWER-THIRD CHYRON", style = AcType.Caption)
+            AcKey(
                 label = if (options.showLowerThird) "ON" else "OFF",
                 onClick = { vm.setCoreShowLowerThird(!options.showLowerThird) },
-                role = if (options.showLowerThird) KeyRole.ACTIVE else KeyRole.STD,
-                radius = 10.dp,
-                size = 11.5.sp,
+                selected = options.showLowerThird,
+                size = AcKeySize.Small,
                 modifier = Modifier
-                    .height(34.dp)
                     .testTag("cs_chyron_toggle")
             )
         }
 
         if (options.showLowerThird) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Cs.Body)
-                    .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
-                    .padding(start = 12.dp, top = 6.dp, end = 4.dp, bottom = 6.dp),
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                BasicTextField(
+                AcField(
                     state = titleFieldState,
-                    textStyle = sans(15.sp, Cs.Ink, 20.sp, FontWeight.Medium),
-                    cursorBrush = SolidColor(Cs.Ink),
-                    lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = 2),
+                    placeholder = "Headline on screen…",
+                    minLines = 1,
+                    maxLines = 2,
                     modifier = Modifier
                         .weight(1f)
-                        .testTag("cs_title_input"),
-                    decorator = { inner ->
-                        Box {
-                            if (titleFieldState.text.isEmpty()) {
-                                Text("Headline on screen…", style = sans(15.sp, Cs.Dim, 20.sp))
-                            }
-                            inner()
-                        }
-                    }
+                        .testTag("cs_title_input")
                 )
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clickable(
-                            enabled = !state.isRefreshingHeadline,
-                            role = Role.Button,
-                            onClick = vm::refreshHeadlineWithAi
-                        )
-                        .testTag("cs_title_refresh"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (state.isRefreshingHeadline) {
-                        ThinkingOrbSolving(size = 24.dp, tint = Cs.White)
-                    } else {
-                        Icon(
-                            imageVector = Icons.Outlined.AutoAwesome,
-                            contentDescription = "Polish headline with AI",
-                            tint = Cs.InkSub,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
+                AcKey(
+                    icon = Icons.Outlined.AutoAwesome,
+                    contentDescription = "Polish headline with AI",
+                    onClick = vm::refreshHeadlineWithAi,
+                    selected = state.isRefreshingHeadline,
+                    enabled = !state.isRefreshingHeadline,
+                    size = AcKeySize.Small,
+                    modifier = Modifier.testTag("cs_title_refresh")
+                )
             }
 
-            BasicTextField(
+            AcField(
                 state = sublineFieldState,
-                textStyle = mono(13.sp, Cs.InkSub),
-                cursorBrush = SolidColor(Cs.Ink),
-                lineLimits = TextFieldLineLimits.SingleLine,
+                placeholder = "Subline or source label (optional)…",
+                singleLine = true,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Cs.Body)
-                    .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
-                    .testTag("cs_subline_input"),
-                decorator = { inner ->
-                    Box {
-                        if (sublineFieldState.text.isEmpty()) {
-                            Text("Subline or source label (optional)…", style = mono(13.sp, Cs.Dim))
-                        }
-                        inner()
-                    }
-                }
+                    .testTag("cs_subline_input")
             )
 
-            Text("KICKER BADGE STYLE", style = SectionLabelStyle)
+            Text("KICKER BADGE STYLE", style = AcType.Caption)
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 BreakingNewsStyle.entries.forEach { style ->
                     val selected = breakingStyle == style
-                    CsKeyLabel(
+                    AcKey(
                         label = style.chipLabel,
                         onClick = { vm.setCoreBreakingStyle(style) },
-                        role = if (selected) KeyRole.ACTIVE else KeyRole.STD,
-                        radius = 10.dp,
-                        size = 11.5.sp,
+                        selected = selected,
+                        size = AcKeySize.Small,
                         modifier = Modifier
-                            .height(38.dp)
                             .testTag("cs_tag_${style.wire}")
                     )
                 }
@@ -831,11 +781,9 @@ private fun LabelsAndChyronTab(
             }
     }
 
-    Column(
+    AcCard(
         modifier = Modifier
-            .fillMaxWidth()
-            .sunkenPanel(radius = 16.dp)
-            .padding(12.dp),
+            .fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Row(
@@ -843,8 +791,8 @@ private fun LabelsAndChyronTab(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("TOP-LEFT CORNER BUG", style = SectionLabelStyle)
-            CsKeyLabel(
+            Text("TOP-LEFT CORNER BUG", style = AcType.Caption)
+            AcKey(
                 label = if (options.showBrandBug) "ON" else "OFF",
                 onClick = {
                     vm.setCoreBrandBug(
@@ -852,34 +800,19 @@ private fun LabelsAndChyronTab(
                         text = bugFieldState.text.toString()
                     )
                 },
-                role = if (options.showBrandBug) KeyRole.ACTIVE else KeyRole.STD,
-                radius = 10.dp,
-                size = 11.5.sp,
+                selected = options.showBrandBug,
+                size = AcKeySize.Small,
                 modifier = Modifier
-                    .height(34.dp)
                     .testTag("cs_bug_toggle")
             )
         }
-        BasicTextField(
+        AcField(
             state = bugFieldState,
-            textStyle = ndot(15.sp, Cs.White),
-            cursorBrush = SolidColor(Cs.Ink),
-            lineLimits = TextFieldLineLimits.SingleLine,
+            placeholder = "Channel label (e.g. AIRCHECK, LIVE)…",
+            singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(Cs.Body)
-                .border(1.dp, Cs.Hairline, RoundedCornerShape(12.dp))
-                .padding(horizontal = 12.dp, vertical = 10.dp)
-                .testTag("cs_bug_input"),
-            decorator = { inner ->
-                Box {
-                    if (bugFieldState.text.isEmpty()) {
-                        Text("Channel label (e.g. AIRCHECK, LIVE)…", style = mono(13.sp, Cs.Dim))
-                    }
-                    inner()
-                }
-            }
+                .testTag("cs_bug_input")
         )
     }
 }
@@ -902,36 +835,31 @@ private fun OverlaysManagerTab(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        CsKey(
+        AcKey(
             onClick = { creatingNew = !creatingNew },
-            role = if (creatingNew) KeyRole.ACTIVE else KeyRole.STD,
-            radius = 12.dp,
-            horizontalPadding = 12.dp,
-            contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            selected = creatingNew,
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            size = AcKeySize.Small,
             modifier = Modifier
                 .weight(1f)
-                .height(44.dp)
                 .testTag("cs_new_overlay_toggle")
         ) { tint ->
             Icon(Icons.Sharp.Add, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
-            Text("new overlay", style = mono(12.sp, tint, FontWeight.Medium), maxLines = 1)
+            Text("new overlay", style = AcType.Label.copy(color = tint), maxLines = 1)
         }
-        CsKey(
+        AcKey(
             onClick = { vm.generateNewsroomOverlaySet() },
             enabled = !state.isGeneratingOverlaySet,
-            role = KeyRole.STD,
-            radius = 12.dp,
-            horizontalPadding = 12.dp,
-            contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            size = AcKeySize.Small,
             modifier = Modifier
                 .weight(1f)
-                .height(44.dp)
                 .testTag("cs_generate_overlay_set")
         ) { tint ->
             Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = tint, modifier = Modifier.size(17.dp))
             Text(
                 text = if (state.isGeneratingOverlaySet) "generating…" else "AI 3-pack",
-                style = mono(12.sp, tint),
+                style = AcType.Label.copy(color = tint),
                 maxLines = 1
             )
         }
@@ -972,25 +900,23 @@ private fun OverlaysManagerTab(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("OVERLAYS ON THIS CLIP", style = SectionLabelStyle)
+            Text("OVERLAYS ON THIS CLIP", style = AcType.Caption)
             Text(
                 text = "${attachedOverlays.size} active",
-                style = mono(11.5.sp, if (attachedOverlays.isNotEmpty()) Cs.Mint else Cs.Muted)
+                style = AcType.Caption.copy(color = if (attachedOverlays.isNotEmpty()) AcTokens.Red else AcTokens.Ink2)
             )
         }
 
         if (allOverlays.isEmpty()) {
-            Column(
+            AcCard(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .sunkenPanel(radius = 14.dp)
-                    .padding(16.dp),
+                    .fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text("No saved overlays yet.", style = sans(15.sp, Cs.Ink))
+                Text("No saved overlays yet.", style = AcType.BodySmall.copy(color = AcTokens.Ink))
                 Text(
                     text = "Tap 'new overlay' to build a custom lower-third, stat card, or quote card, or generate a 3-pack with AI.",
-                    style = sans(13.5.sp, Cs.Muted, 19.sp)
+                    style = AcType.BodySmall.copy(color = AcTokens.Ink2)
                 )
             }
         } else {
@@ -1014,69 +940,61 @@ private fun OverlaysManagerTab(
                         onCancel = { editingId = null }
                     )
                 } else {
-                    Row(
+                    AcCard(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .sunkenPanel(radius = 14.dp)
-                            .border(
-                                width = 1.dp,
-                                color = if (attached) Cs.Mint.copy(alpha = 0.55f) else Color.Transparent,
-                                shape = RoundedCornerShape(14.dp)
-                            )
                             .clickable(role = Role.Button) { vm.toggleSavedOverlayForPipeline(ovl.id) }
-                            .padding(horizontal = 12.dp, vertical = 10.dp)
-                            .testTag("cs_overlay_${ovl.id}"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            .testTag("cs_overlay_${ovl.id}")
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (attached) Cs.Mint else Cs.Track),
-                            contentAlignment = Alignment.Center
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(
-                                imageVector = if (attached) Icons.Sharp.Check else Icons.Sharp.Add,
-                                contentDescription = if (attached) "Attached" else "Attach",
-                                tint = if (attached) Cs.Black else Cs.Muted,
-                                modifier = Modifier.size(16.dp)
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (attached) AcTokens.Red else AcTokens.Chassis),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (attached) Icons.Sharp.Check else Icons.Sharp.Add,
+                                    contentDescription = if (attached) "Attached" else "Attach",
+                                    tint = if (attached) AcTokens.Ui else AcTokens.Ink2,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = ovl.headline,
+                                    style = AcType.BodySmall.copy(color = AcTokens.Ink),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "${ovl.kind.label} · ${ovl.durationSec}s",
+                                    style = AcType.Caption.copy(color = AcTokens.Ink2),
+                                    maxLines = 1
+                                )
+                            }
+                            AcKey(
+                                icon = Icons.Sharp.Edit,
+                                contentDescription = "Edit overlay",
+                                onClick = { editingId = ovl.id },
+                                size = AcKeySize.Small,
+                                modifier = Modifier.testTag("cs_overlay_edit_${ovl.id}")
+                            )
+                            AcKey(
+                                icon = Icons.Sharp.Delete,
+                                contentDescription = "Delete overlay",
+                                onClick = { vm.deleteSavedNewsroomOverlay(ovl.id) },
+                                size = AcKeySize.Small,
+                                modifier = Modifier.testTag("cs_overlay_delete_${ovl.id}")
                             )
                         }
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            Text(
-                                text = ovl.headline,
-                                style = sans(14.5.sp, Cs.Ink, 19.sp, FontWeight.Medium),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = "${ovl.kind.label} · ${ovl.durationSec}s",
-                                style = mono(11.sp, Cs.Muted),
-                                maxLines = 1
-                            )
-                        }
-                        CsIconKey(
-                            icon = Icons.Sharp.Edit,
-                            contentDescription = "Edit overlay",
-                            size = 38.dp,
-                            radius = 10.dp,
-                            iconSize = 18.dp,
-                            onClick = { editingId = ovl.id },
-                            modifier = Modifier.testTag("cs_overlay_edit_${ovl.id}")
-                        )
-                        CsIconKey(
-                            icon = Icons.Sharp.Delete,
-                            contentDescription = "Delete overlay",
-                            size = 38.dp,
-                            radius = 10.dp,
-                            iconSize = 18.dp,
-                            onClick = { vm.deleteSavedNewsroomOverlay(ovl.id) },
-                            modifier = Modifier.testTag("cs_overlay_delete_${ovl.id}")
-                        )
                     }
                 }
             }
@@ -1098,74 +1016,47 @@ private fun NewOverlayCreatorCard(
     val sublineState = rememberTextFieldState()
     val statState = rememberTextFieldState()
 
-    Column(
+    AcCard(
         modifier = Modifier
             .fillMaxWidth()
-            .sunkenPanel(radius = 16.dp)
-            .border(1.dp, Cs.Cobalt.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
-            .padding(12.dp)
             .testTag("cs_new_overlay_card"),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text("CREATE NEW OVERLAY", style = SectionLabelStyle)
+        Text("CREATE NEW OVERLAY", style = AcType.Caption)
 
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             OverlayObjectKind.entries.forEach { k ->
-                CsKeyLabel(
+                AcKey(
                     label = k.label,
                     onClick = { kind = k },
-                    role = if (kind == k) KeyRole.ACTIVE else KeyRole.STD,
-                    radius = 10.dp,
-                    size = 11.sp,
+                    selected = kind == k,
+                    size = AcKeySize.Small,
                     modifier = Modifier
                         .weight(1f)
-                        .height(36.dp)
                         .testTag("cs_new_ovl_kind_${k.name}")
                 )
             }
         }
 
-        BasicTextField(
+        AcField(
             state = headlineState,
-            textStyle = sans(14.5.sp, Cs.Ink, 20.sp),
-            cursorBrush = SolidColor(Cs.Ink),
-            lineLimits = TextFieldLineLimits.SingleLine,
+            placeholder = "Headline text…",
+            singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(Cs.Body)
-                .border(1.dp, Cs.Hairline, RoundedCornerShape(10.dp))
-                .padding(10.dp)
-                .testTag("cs_new_ovl_headline"),
-            decorator = { inner ->
-                Box {
-                    if (headlineState.text.isEmpty()) Text("Headline text…", style = sans(14.5.sp, Cs.Dim))
-                    inner()
-                }
-            }
+                .testTag("cs_new_ovl_headline")
         )
 
-        BasicTextField(
+        AcField(
             state = sublineState,
-            textStyle = sans(13.5.sp, Cs.InkSub, 19.sp),
-            cursorBrush = SolidColor(Cs.Ink),
-            lineLimits = TextFieldLineLimits.SingleLine,
+            placeholder = "Subline / caption (optional)…",
+            singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(Cs.Body)
-                .border(1.dp, Cs.Hairline, RoundedCornerShape(10.dp))
-                .padding(10.dp)
-                .testTag("cs_new_ovl_subline"),
-            decorator = { inner ->
-                Box {
-                    if (sublineState.text.isEmpty()) Text("Subline / caption (optional)…", style = sans(13.5.sp, Cs.Dim))
-                    inner()
-                }
-            }
+                .testTag("cs_new_ovl_subline")
         )
 
         Row(
@@ -1173,33 +1064,20 @@ private fun NewOverlayCreatorCard(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            BasicTextField(
+            AcField(
                 state = statState,
-                textStyle = mono(13.sp, Cs.AmberBright, FontWeight.SemiBold),
-                cursorBrush = SolidColor(Cs.Ink),
-                lineLimits = TextFieldLineLimits.SingleLine,
+                placeholder = "Stat / badge (e.g. 42%)…",
+                singleLine = true,
                 modifier = Modifier
                     .weight(1f)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Cs.Body)
-                    .border(1.dp, Cs.Hairline, RoundedCornerShape(10.dp))
-                    .padding(10.dp)
-                    .testTag("cs_new_ovl_stat"),
-                decorator = { inner ->
-                    Box {
-                        if (statState.text.isEmpty()) Text("Stat / badge (e.g. 42%)…", style = mono(12.sp, Cs.Dim))
-                        inner()
-                    }
-                }
+                    .testTag("cs_new_ovl_stat")
             )
             listOf(3, 5, 8).forEach { sec ->
-                CsKeyLabel(
+                AcKey(
                     label = "${sec}s",
                     onClick = { durationSec = sec },
-                    role = if (durationSec == sec) KeyRole.ACTIVE else KeyRole.STD,
-                    radius = 10.dp,
-                    size = 11.5.sp,
-                    modifier = Modifier.height(38.dp)
+                    selected = durationSec == sec,
+                    size = AcKeySize.Small
                 )
             }
         }
@@ -1209,19 +1087,17 @@ private fun NewOverlayCreatorCard(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             BreakingNewsStyle.entries.forEach { st ->
-                CsKeyLabel(
+                AcKey(
                     label = st.chipLabel,
                     onClick = { style = st },
-                    role = if (style == st) KeyRole.ACTIVE else KeyRole.STD,
-                    radius = 8.dp,
-                    size = 11.sp,
-                    modifier = Modifier.height(34.dp)
+                    selected = style == st,
+                    size = AcKeySize.Small
                 )
             }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CsKeyLabel(
+            AcKey(
                 label = "create & attach",
                 onClick = {
                     onCreate(
@@ -1234,22 +1110,15 @@ private fun NewOverlayCreatorCard(
                     )
                 },
                 enabled = headlineState.text.toString().isNotBlank(),
-                role = KeyRole.COMMIT,
-                radius = 10.dp,
-                size = 12.sp,
-                weight = FontWeight.SemiBold,
+                size = AcKeySize.Small,
                 modifier = Modifier
                     .weight(1f)
-                    .height(42.dp)
                     .testTag("cs_new_ovl_create")
             )
-            CsKeyLabel(
+            AcKey(
                 label = "cancel",
                 onClick = onCancel,
-                role = KeyRole.STD,
-                radius = 10.dp,
-                size = 12.sp,
-                modifier = Modifier.height(42.dp)
+                size = AcKeySize.Small
             )
         }
     }
@@ -1269,95 +1138,61 @@ private fun InlineOverlayEditorCard(
     val subState = rememberTextFieldState(initialText = overlay.subline)
     val statState = rememberTextFieldState(initialText = overlay.calloutStat)
 
-    Column(
+    AcCard(
         modifier = Modifier
             .fillMaxWidth()
-            .sunkenPanel(radius = 14.dp)
-            .border(1.dp, Cs.Amber, RoundedCornerShape(14.dp))
-            .padding(12.dp)
             .testTag("cs_card_inline_editor_${overlay.id}"),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text("EDIT OVERLAY", style = SectionLabelStyle)
+        Text("EDIT OVERLAY", style = AcType.Caption)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             OverlayObjectKind.entries.forEach { k ->
-                CsKeyLabel(
+                AcKey(
                     label = k.label,
                     onClick = { kind = k },
-                    role = if (kind == k) KeyRole.ACTIVE else KeyRole.STD,
-                    radius = 8.dp,
-                    size = 11.sp,
+                    selected = kind == k,
+                    size = AcKeySize.Small,
                     modifier = Modifier
                         .weight(1f)
-                        .height(34.dp)
                 )
             }
         }
-        BasicTextField(
+        AcField(
             state = headState,
-            textStyle = sans(14.5.sp, Cs.Ink, 20.sp),
-            cursorBrush = SolidColor(Cs.Ink),
-            lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = 2),
+            minLines = 1,
+            maxLines = 2,
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(Cs.Body)
-                .border(1.dp, Cs.Hairline, RoundedCornerShape(10.dp))
-                .padding(10.dp)
                 .testTag("cs_card_headline_field_${overlay.id}")
         )
-        BasicTextField(
+        AcField(
             state = subState,
-            textStyle = sans(13.5.sp, Cs.InkSub, 19.sp),
-            cursorBrush = SolidColor(Cs.Ink),
-            lineLimits = TextFieldLineLimits.SingleLine,
+            placeholder = "Subline…",
+            singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(Cs.Body)
-                .border(1.dp, Cs.Hairline, RoundedCornerShape(10.dp))
-                .padding(10.dp),
-            decorator = { inner ->
-                Box {
-                    if (subState.text.isEmpty()) Text("Subline…", style = sans(13.5.sp, Cs.Dim))
-                    inner()
-                }
-            }
         )
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            BasicTextField(
+            AcField(
                 state = statState,
-                textStyle = mono(13.sp, Cs.AmberBright, FontWeight.SemiBold),
-                cursorBrush = SolidColor(Cs.Ink),
-                lineLimits = TextFieldLineLimits.SingleLine,
+                placeholder = "Stat / badge…",
+                singleLine = true,
                 modifier = Modifier
                     .weight(1f)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Cs.Body)
-                    .border(1.dp, Cs.Hairline, RoundedCornerShape(10.dp))
-                    .padding(10.dp),
-                decorator = { inner ->
-                    Box {
-                        if (statState.text.isEmpty()) Text("Stat / badge…", style = mono(12.sp, Cs.Dim))
-                        inner()
-                    }
-                }
             )
             listOf(3, 5, 8).forEach { sec ->
-                CsKeyLabel(
+                AcKey(
                     label = "${sec}s",
                     onClick = { durationSec = sec },
-                    role = if (durationSec == sec) KeyRole.ACTIVE else KeyRole.STD,
-                    radius = 8.dp,
-                    size = 11.5.sp,
-                    modifier = Modifier.height(36.dp)
+                    selected = durationSec == sec,
+                    size = AcKeySize.Small
                 )
             }
         }
@@ -1366,18 +1201,16 @@ private fun InlineOverlayEditorCard(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             BreakingNewsStyle.entries.forEach { st ->
-                CsKeyLabel(
+                AcKey(
                     label = st.chipLabel,
                     onClick = { style = st },
-                    role = if (style == st) KeyRole.ACTIVE else KeyRole.STD,
-                    radius = 8.dp,
-                    size = 11.sp,
-                    modifier = Modifier.height(32.dp)
+                    selected = style == st,
+                    size = AcKeySize.Small
                 )
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CsKeyLabel(
+            AcKey(
                 label = "save overlay",
                 onClick = {
                     onSave(
@@ -1389,20 +1222,16 @@ private fun InlineOverlayEditorCard(
                         style
                     )
                 },
-                role = KeyRole.ACTIVE,
-                radius = 10.dp,
+                size = AcKeySize.Small,
                 modifier = Modifier
                     .weight(1f)
-                    .height(40.dp)
                     .testTag("cs_card_save_${overlay.id}")
             )
-            CsKeyLabel(
+            AcKey(
                 label = "cancel",
                 onClick = onCancel,
-                role = KeyRole.STD,
-                radius = 10.dp,
+                size = AcKeySize.Small,
                 modifier = Modifier
-                    .height(40.dp)
                     .testTag("cs_card_cancel_${overlay.id}")
             )
         }
@@ -1421,28 +1250,28 @@ private fun StudioLookTab(
 ) {
     // 1. Accent Color Palette
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("ACCENT COLOR", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+        Text("ACCENT COLOR", style = AcType.Caption, modifier = Modifier.padding(horizontal = 4.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // Swatches show the overlay's real accent hex (rendered into the video), not UI colors.
             val accents = listOf(
-                Triple("crimson", NewsroomLook.ACCENT_CRIMSON, Cs.Red),
-                Triple("amber", NewsroomLook.ACCENT_AMBER, Cs.Amber),
-                Triple("cobalt", NewsroomLook.ACCENT_COBALT, Cs.Cobalt),
-                Triple("mint", NewsroomLook.ACCENT_MINT, Cs.Mint)
+                "crimson" to NewsroomLook.ACCENT_CRIMSON,
+                "amber" to NewsroomLook.ACCENT_AMBER,
+                "cobalt" to NewsroomLook.ACCENT_COBALT,
+                "mint" to NewsroomLook.ACCENT_MINT
             )
-            accents.forEach { (name, hex, color) ->
+            accents.forEach { (name, hex) ->
+                val color = parseAccentHex(hex)
                 val selected = draft.accentHex.equals(hex, ignoreCase = true)
-                CsKey(
+                AcKey(
                     onClick = { onUpdateDraft(draft.copy(accentHex = hex)) },
-                    role = if (selected) KeyRole.ACTIVE else KeyRole.STD,
-                    radius = 10.dp,
-                    horizontalPadding = 8.dp,
-                    contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                    selected = selected,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                    size = AcKeySize.Small,
                     modifier = Modifier
                         .weight(1f)
-                        .height(40.dp)
                         .testTag("cs_accent_$name")
                 ) { tint ->
                     Box(
@@ -1451,7 +1280,7 @@ private fun StudioLookTab(
                             .clip(CircleShape)
                             .background(color)
                     )
-                    Text(name, style = mono(11.sp, tint), maxLines = 1)
+                    Text(name, style = AcType.Caption.copy(color = tint), maxLines = 1)
                 }
             }
         }
@@ -1459,7 +1288,7 @@ private fun StudioLookTab(
 
     // 2. Studio Lighting + Film Grain / Frame Border
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("LIGHTING & FINISH", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
+        Text("LIGHTING & FINISH", style = AcType.Caption, modifier = Modifier.padding(horizontal = 4.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1469,15 +1298,13 @@ private fun StudioLookTab(
                 NewsroomLook.LIGHT_NEUTRAL to "neutral",
                 NewsroomLook.LIGHT_COOL to "cool"
             ).forEach { (wire, label) ->
-                CsKeyLabel(
+                AcKey(
                     label = label,
                     onClick = { onUpdateDraft(draft.copy(light = wire)) },
-                    role = if (draft.light == wire) KeyRole.ACTIVE else KeyRole.STD,
-                    radius = 10.dp,
-                    size = 12.sp,
+                    selected = draft.light == wire,
+                    size = AcKeySize.Small,
                     modifier = Modifier
                         .weight(1f)
-                        .height(40.dp)
                         .testTag("cs_light_$label")
                 )
             }
@@ -1486,33 +1313,29 @@ private fun StudioLookTab(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            CsKeyLabel(
+            AcKey(
                 label = if (draft.grain) "film grain: ON" else "film grain: OFF",
                 onClick = { onUpdateDraft(draft.copy(grain = !draft.grain)) },
-                role = if (draft.grain) KeyRole.ACTIVE else KeyRole.STD,
-                radius = 10.dp,
-                size = 11.5.sp,
+                selected = draft.grain,
+                size = AcKeySize.Small,
                 modifier = Modifier
                     .weight(1f)
-                    .height(40.dp)
                     .testTag("cs_look_grain")
             )
-            CsKeyLabel(
+            AcKey(
                 label = if (draft.border) "frame border: ON" else "frame border: OFF",
                 onClick = { onUpdateDraft(draft.copy(border = !draft.border)) },
-                role = if (draft.border) KeyRole.ACTIVE else KeyRole.STD,
-                radius = 10.dp,
-                size = 11.5.sp,
+                selected = draft.border,
+                size = AcKeySize.Small,
                 modifier = Modifier
                     .weight(1f)
-                    .height(40.dp)
                     .testTag("cs_look_border")
             )
         }
     }
 
     // 3. Blur & Brightness Rulers
-    CsTickRuler(
+    StudioTickRuler(
         label = "BACKDROP BLUR",
         valueText = "${draft.blurPercent}%",
         normalizedValue = (draft.blurPercent / 100f).coerceIn(0f, 1f),
@@ -1524,7 +1347,7 @@ private fun StudioLookTab(
     )
 
     val evLabel = "${if (draft.brightnessEv > 0) "+" else ""}${"%.1f".format(draft.brightnessEv)} EV"
-    CsTickRuler(
+    StudioTickRuler(
         label = "EXPOSURE",
         valueText = evLabel,
         normalizedValue = (((draft.brightnessEv + 3.0) / 6.0).toFloat()).coerceIn(0f, 1f),
@@ -1544,67 +1367,62 @@ private fun StudioLookTab(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("PRESENTER PHOTO", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
-        Row(
+        Text("PRESENTER PHOTO", style = AcType.Caption, modifier = Modifier.padding(horizontal = 4.dp))
+        AcCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 56.dp)
-                .sunkenPanel(radius = 14.dp)
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Cs.Track),
-                contentAlignment = Alignment.Center
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                if (anchorPhotoFile != null && anchorPhotoFile.isFile) {
-                    AsyncImage(
-                        model = anchorPhotoFile,
-                        contentDescription = "Presenter photo",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Icon(Icons.Sharp.PhotoCamera, contentDescription = null, tint = Cs.Muted, modifier = Modifier.size(18.dp))
-                }
-            }
-            Text(
-                text = if (anchorPhotoFile != null) "Custom phone photo" else "Default studio portrait",
-                style = sans(13.5.sp, Cs.Ink),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            if (anchorPhotoFile != null) {
-                CsKeyLabel(
-                    label = "reset",
-                    onClick = vm::clearAnchorPhoto,
-                    role = KeyRole.STD,
-                    radius = 10.dp,
-                    size = 11.5.sp,
+                Box(
                     modifier = Modifier
-                        .height(38.dp)
-                        .testTag("cs_reset_photo")
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(AcTokens.Chassis),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (anchorPhotoFile != null && anchorPhotoFile.isFile) {
+                        AsyncImage(
+                            model = anchorPhotoFile,
+                            contentDescription = "Presenter photo",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(Icons.Sharp.PhotoCamera, contentDescription = null, tint = AcTokens.Ink2, modifier = Modifier.size(18.dp))
+                    }
+                }
+                Text(
+                    text = if (anchorPhotoFile != null) "Custom phone photo" else "Default studio portrait",
+                    style = AcType.BodySmall.copy(color = AcTokens.Ink),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (anchorPhotoFile != null) {
+                    AcKey(
+                        label = "reset",
+                        onClick = vm::clearAnchorPhoto,
+                        size = AcKeySize.Small,
+                        modifier = Modifier
+                            .testTag("cs_reset_photo")
+                    )
+                }
+                AcKey(
+                    label = "choose photo",
+                    onClick = {
+                        photoPickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    size = AcKeySize.Small,
+                    modifier = Modifier
+                        .testTag("cs_choose_photo")
                 )
             }
-            CsKeyLabel(
-                label = "choose photo",
-                onClick = {
-                    photoPickerLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
-                },
-                role = KeyRole.ACTIVE,
-                radius = 10.dp,
-                size = 11.5.sp,
-                modifier = Modifier
-                    .height(38.dp)
-                    .testTag("cs_choose_photo")
-            )
         }
     }
 
@@ -1617,51 +1435,40 @@ private fun StudioLookTab(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("STUDIO BACKDROP PLATE", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
-        Row(
+        Text("STUDIO BACKDROP PLATE", style = AcType.Caption, modifier = Modifier.padding(horizontal = 4.dp))
+        AcCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 52.dp)
-                .sunkenPanel(radius = 14.dp)
-                .padding(start = 12.dp, top = 4.dp, end = 6.dp, bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            BasicTextField(
-                state = promptState,
-                textStyle = sans(14.sp, Cs.Ink, 20.sp),
-                cursorBrush = SolidColor(Cs.Ink),
-                lineLimits = TextFieldLineLimits.SingleLine,
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("cs_backdrop_prompt"),
-                decorator = { inner ->
-                    Box {
-                        if (promptState.text.isEmpty()) {
-                            Text("Describe a studio backdrop…", style = sans(14.sp, Cs.Dim, 20.sp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AcField(
+                    state = promptState,
+                    placeholder = "Describe a studio backdrop…",
+                    singleLine = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("cs_backdrop_prompt")
+                )
+                AcKey(
+                    label = if (state.isGeneratingBackdrop) "working…" else "generate",
+                    onClick = {
+                        val lookId = if (looks.any { it.id == draft.id }) {
+                            draft.id
+                        } else {
+                            vm.createNewsroomLook(draft.name).also(onSelectLook)
                         }
-                        inner()
-                    }
-                }
-            )
-            CsKeyLabel(
-                label = if (state.isGeneratingBackdrop) "working…" else "generate",
-                onClick = {
-                    val lookId = if (looks.any { it.id == draft.id }) {
-                        draft.id
-                    } else {
-                        vm.createNewsroomLook(draft.name).also(onSelectLook)
-                    }
-                    vm.generateBackdropForLook(lookId, promptState.text.toString())
-                },
-                enabled = promptState.text.toString().isNotBlank() && !state.isGeneratingBackdrop,
-                role = KeyRole.ACTIVE,
-                radius = 10.dp,
-                size = 11.5.sp,
-                modifier = Modifier
-                    .height(40.dp)
-                    .testTag("cs_backdrop_generate")
-            )
+                        vm.generateBackdropForLook(lookId, promptState.text.toString())
+                    },
+                    enabled = promptState.text.toString().isNotBlank() && !state.isGeneratingBackdrop,
+                    size = AcKeySize.Small,
+                    modifier = Modifier
+                        .testTag("cs_backdrop_generate")
+                )
+            }
         }
 
         Row(
@@ -1671,14 +1478,15 @@ private fun StudioLookTab(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             looks.forEach { item ->
-                CsPill(
+                AcKey(
                     label = item.name,
                     selected = item.id == draft.id,
                     onClick = { onSelectLook(item.id) },
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_look_tile_${item.id}")
                 )
             }
-            CsPill(
+            AcKey(
                 label = "new preset",
                 selected = false,
                 icon = Icons.Sharp.Add,
@@ -1686,15 +1494,17 @@ private fun StudioLookTab(
                     val createdId = vm.createNewsroomLook("LOOK_%02d".format(looks.size + 1))
                     onSelectLook(createdId)
                 },
+                size = AcKeySize.Small,
                 modifier = Modifier.testTag("cs_look_new")
             )
-            CsPill(
+            AcKey(
                 label = "duplicate",
                 selected = false,
                 onClick = {
                     val dupId = vm.duplicateNewsroomLook(draft.id)
                     if (dupId != null) onSelectLook(dupId)
                 },
+                size = AcKeySize.Small,
                 modifier = Modifier.testTag("cs_look_duplicate")
             )
         }
@@ -1712,7 +1522,7 @@ private fun AiLookTweakSheet(
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.62f))
+                .background(AcTokens.Ink.copy(alpha = 0.45f))
                 .clickable(onClick = onDismiss)
         )
         Column(
@@ -1720,7 +1530,7 @@ private fun AiLookTweakSheet(
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
-                .background(Cs.Sheet)
+                .background(AcTokens.Chassis)
                 .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 24.dp)
                 .testTag("cs_ai_tweak_sheet"),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -1732,51 +1542,38 @@ private fun AiLookTweakSheet(
                 Icon(
                     imageVector = Icons.Outlined.AutoAwesome,
                     contentDescription = null,
-                    tint = Cs.Ink,
+                    tint = AcTokens.Ink,
                     modifier = Modifier.size(22.dp)
                 )
                 Text(
                     text = "  Tweak overlays & look with AI",
-                    style = sans(18.sp, Cs.Ink, 24.sp, FontWeight.Medium),
+                    style = AcType.Title.copy(color = AcTokens.Ink),
                     modifier = Modifier.weight(1f)
                 )
-                CsIconKey(
+                AcKey(
                     icon = Icons.Sharp.Close,
                     contentDescription = "Close AI tweak sheet",
                     onClick = onDismiss,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_ai_tweak_close")
                 )
             }
             Text(
                 text = "Change accent color, top-left bug, lighting, blur, breaking style, or chyron headline in plain English.",
-                style = sans(13.5.sp, Cs.Muted, 19.sp)
+                style = AcType.BodySmall.copy(color = AcTokens.Ink2)
             )
-            BasicTextField(
+            AcField(
                 state = fieldState,
-                textStyle = sans(15.5.sp, Cs.Ink, 22.sp),
-                cursorBrush = SolidColor(Cs.Ink),
-                lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 3, maxHeightInLines = 6),
+                placeholder = "e.g. \"Cobalt accent, top-left logo RYAN LIVE, developing style, +0.4 EV\"",
+                minLines = 3,
+                maxLines = 6,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 96.dp)
-                    .sunkenPanel(radius = 14.dp)
-                    .padding(12.dp)
-                    .testTag("cs_ai_tweak_input"),
-                decorator = { inner ->
-                    Box {
-                        if (fieldState.text.isEmpty()) {
-                            Text(
-                                "e.g. \"Cobalt accent, top-left logo RYAN LIVE, developing style, +0.4 EV\"",
-                                style = sans(14.5.sp, Cs.Dim, 20.sp)
-                            )
-                        }
-                        inner()
-                    }
-                }
+                    .testTag("cs_ai_tweak_input")
             )
-            CsDock(
+            StudioDock(
                 primaryLabel = "apply AI tweak",
-                primaryTrailingIcon = Icons.Outlined.AutoAwesome,
+                primaryIcon = Icons.Outlined.AutoAwesome,
                 primaryEnabled = fieldState.text.toString().isNotBlank() && !isBusy,
                 primaryTag = "cs_ai_tweak_submit",
                 onPrimaryClick = { onSubmit(fieldState.text.toString()) },

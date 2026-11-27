@@ -26,6 +26,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -446,7 +448,7 @@ private fun BoxScope.AcMediaKeyContent(
             }
         }
         if (caption != null) {
-            Text(caption.uppercase(), style = MediaCaptionStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(caption, style = MediaCaptionStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -689,6 +691,54 @@ fun AcField(
             ) {
                 Box(Modifier.weight(1f)) {
                     if (value.isEmpty() && placeholder != null) {
+                        Text(placeholder, style = textStyle.copy(color = AcTokens.Ink2))
+                    }
+                    inner()
+                }
+                trailing?.invoke(this)
+            }
+        }
+    )
+}
+
+/** [AcField] backed by a [TextFieldState] (for fields observed with snapshotFlow). */
+@Composable
+fun AcField(
+    state: TextFieldState,
+    modifier: Modifier = Modifier,
+    placeholder: String? = null,
+    enabled: Boolean = true,
+    singleLine: Boolean = false,
+    minLines: Int = 1,
+    maxLines: Int = if (singleLine) 1 else Int.MAX_VALUE,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    textStyle: TextStyle = FieldTextStyle,
+    trailing: (@Composable RowScope.() -> Unit)? = null
+) {
+    val shape = RoundedCornerShape(16.dp)
+    BasicTextField(
+        state = state,
+        modifier = modifier,
+        enabled = enabled,
+        lineLimits = if (singleLine) TextFieldLineLimits.SingleLine else TextFieldLineLimits.MultiLine(minLines, maxLines),
+        keyboardOptions = keyboardOptions,
+        textStyle = textStyle.copy(color = if (enabled) AcTokens.Ink else AcTokens.Ink2),
+        cursorBrush = SolidColor(AcTokens.Red),
+        decorator = { inner ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .clip(shape)
+                    .background(AcTokens.Chassis)
+                    .innerShadow(shape, Shadow(radius = 6.dp, color = AcTokens.Ink2.copy(alpha = 0.35f), offset = DpOffset(2.dp, 3.dp)))
+                    .innerShadow(shape, Shadow(radius = 5.dp, color = Color.White.copy(alpha = 0.8f), offset = DpOffset((-2).dp, (-2).dp)))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(Modifier.weight(1f)) {
+                    if (state.text.isEmpty() && placeholder != null) {
                         Text(placeholder, style = textStyle.copy(color = AcTokens.Ink2))
                     }
                     inner()

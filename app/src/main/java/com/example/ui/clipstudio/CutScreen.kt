@@ -102,6 +102,16 @@ import com.example.ui.StudioUiState
 import com.example.ui.StudioViewModel
 import java.io.File
 import kotlinx.coroutines.delay
+import androidx.compose.ui.text.withStyle
+import com.example.ui.design.AcCard
+import com.example.ui.design.AcDisplay
+import com.example.ui.design.AcField
+import com.example.ui.design.AcKey
+import com.example.ui.design.AcKeySize
+import com.example.ui.design.AcMediaKey
+import com.example.ui.design.AcMediaWell
+import com.example.ui.design.AcTokens
+import com.example.ui.design.AcType
 
 /**
  * 03 CUT:
@@ -205,24 +215,20 @@ fun CutScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Cs.Body)
+            .background(AcTokens.Chassis)
             .testTag("cs_cut_root")
     ) {
         Column(Modifier.fillMaxSize()) {
-            CsTopBar(
+            StudioTopBar(
                 activeStage = 2,
                 onNavigate = onNavigate,
                 leds = com.example.ui.pipelineLedStateFor(state)
             ) {
                 if (unsynced.isNotEmpty()) {
-                    val badgeText = if (unsynced.size == 1) {
-                        "1 LINE NEEDS RE-VOICE"
-                    } else {
-                        "${unsynced.size} LINES NEED RE-VOICE"
-                    }
+                    val badgeText = if (unsynced.size == 1) "1 LINE NEEDS RE-VOICE" else "${unsynced.size} LINES NEED RE-VOICE"
                     Text(
                         text = badgeText,
-                        style = ndot(10.sp, Cs.Amber),
+                        style = AcType.Caption.copy(color = AcTokens.Red),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
@@ -230,56 +236,32 @@ fun CutScreen(
                             .padding(horizontal = 2.dp)
                             .testTag("cs_cut_badge")
                     )
-                    CsIconKey(
-                        icon = Icons.Sharp.Add,
-                        contentDescription = "New idea",
-                        onClick = onNewIdea,
-                        size = 40.dp,
-                        radius = 11.dp,
-                        iconSize = 20.dp,
-                        modifier = Modifier.testTag("cs_cut_new_idea")
-                    )
-                } else {
-                    CsKey(
-                        onClick = onNewIdea,
-                        role = KeyRole.STD,
-                        radius = 11.dp,
-                        horizontalPadding = 8.dp,
-                        contentAlignment = Arrangement.spacedBy(3.dp),
-                        modifier = Modifier
-                            .height(40.dp)
-                            .testTag("cs_cut_new_idea")
-                    ) { tint ->
-                        Icon(
-                            imageVector = Icons.Sharp.Add,
-                            contentDescription = "New idea",
-                            tint = tint,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "new",
-                            style = mono(11.5.sp, tint, FontWeight.Medium),
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
                 }
-                CsIconKey(
+                AcKey(
+                    icon = Icons.Sharp.Add,
+                    contentDescription = "New idea",
+                    onClick = onNewIdea,
+                    size = AcKeySize.Small,
+                    modifier = Modifier.testTag("cs_cut_new_idea")
+                )
+                AcKey(
                     icon = Icons.AutoMirrored.Sharp.Undo,
                     contentDescription = "Undo cut edit",
                     onClick = vm::undoCoreEdit,
                     enabled = state.coreUndoDepth > 0,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_cut_undo")
                 )
-                CsIconKey(
+                AcKey(
                     icon = Icons.Sharp.Settings,
                     contentDescription = "Settings",
                     onClick = onOpenSettings,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_cut_settings")
                 )
             }
 
-            CsStatusLine(
+            StudioStatusLine(
                 error = state.errorMessage,
                 notice = state.statusNotice,
                 onDismissError = vm::dismissError,
@@ -290,7 +272,6 @@ fun CutScreen(
             val signature = session.cutSignature(defaultLook, state.savedOverlays)
             val cutCurrent = session.hasFinalVideo && session.lastCutSignature == signature
 
-            // Pipeline progress strip + explicit stale/re-render guidance
             CutPipelineProgressStrip(
                 hasTtsAudio = session.hasTtsAudio,
                 hasTalkingHead = session.hasTalkingHead,
@@ -305,12 +286,8 @@ fun CutScreen(
                     val unit = if (unsynced.size == 1) "line" else "lines"
                     "${unsynced.size} $unit edited — tap re-voice below to sync voice & video"
                 }
-                session.hasFinalVideo && !cutCurrent -> {
-                    "Overlays, B-roll, or cut settings changed — tap render the video to apply"
-                }
-                session.hasTalkingHead && !session.hasFinalVideo -> {
-                    "Talking head ready — customize overlays or B-roll, then tap render the video"
-                }
+                session.hasFinalVideo && !cutCurrent -> "Overlays, B-roll, or cut settings changed — tap render the video to apply"
+                session.hasTalkingHead && !session.hasFinalVideo -> "Talking head ready — customize overlays or B-roll, then tap render the video"
                 else -> null
             }
             if (dirtyReason != null) {
@@ -318,15 +295,7 @@ fun CutScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 10.dp, end = 10.dp, bottom = 6.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (isWarning) Cs.Amber.copy(alpha = 0.14f) else Cs.Raised)
-                        .border(
-                            1.dp,
-                            if (isWarning) Cs.Amber.copy(alpha = 0.45f) else Cs.Hairline,
-                            RoundedCornerShape(10.dp)
-                        )
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .padding(start = 16.dp, end = 16.dp, bottom = 6.dp)
                         .testTag("cs_cut_dirty_banner"),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(7.dp)
@@ -334,12 +303,12 @@ fun CutScreen(
                     Icon(
                         imageVector = if (isWarning) Icons.Sharp.SyncProblem else Icons.Sharp.Movie,
                         contentDescription = null,
-                        tint = if (isWarning) Cs.Amber else Cs.Ink,
+                        tint = if (isWarning) AcTokens.Red else AcTokens.Ink2,
                         modifier = Modifier.size(15.dp)
                     )
                     Text(
                         text = dirtyReason,
-                        style = sans(12.sp, if (isWarning) Cs.Amber else Cs.Ink, 16.sp, FontWeight.Medium),
+                        style = AcType.BodySmall.copy(color = if (isWarning) AcTokens.Red else AcTokens.Ink2),
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
@@ -347,7 +316,6 @@ fun CutScreen(
                 }
             }
 
-            // 206dp sunken #000 ExoPlayer monitor that visibly reshapes for 9:16 vs 16:9
             VideoMonitorPanel(
                 player = player,
                 sourceUri = sourceUri,
@@ -370,89 +338,84 @@ fun CutScreen(
                 }
             )
 
-            // Clean dark-graphite 2-row Cut Controls Deck (every button backed by real persisted state)
             val isVertical = opts.aspect == CoreRenderOptions.ASPECT_VERTICAL
             val gapCount = if (session.silenceGapsJobId == session.talkingHeadJobId) session.silenceGaps.size else 0
             val activeOverlayCount = (if (opts.showLowerThird) 1 else 0) +
                 (if (opts.showBrandBug && opts.cornerBugText.isNotBlank()) 1 else 0) +
                 session.selectedOverlayIds.size
             val brollCutawayCount = session.clauses.count { it.segmentMode == BrollSegmentMode.BROLL_CUTAWAY }
-            val lookAccentColor = remember(defaultLook?.accentHex) { parseAccentHex(defaultLook?.accentHex) }
 
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 10.dp, top = 8.dp, end = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                    .padding(start = 14.dp, top = 10.dp, end = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    CutToggleKey(
-                        label = "Captions",
+                AcMediaWell(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AcMediaKey(
                         icon = Icons.Sharp.ClosedCaption,
-                        active = opts.captions,
-                        accent = HwLed.Blue,
+                        contentDescription = null,
+                        caption = "Captions",
+                        toggle = opts.captions,
                         onClick = { vm.setCoreCaptions(!opts.captions) },
+                        size = 56.dp,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("cs_cut_captions")
                     )
-                    CutToggleKey(
-                        label = if (gapCount > 0) "Trim ($gapCount)" else "Trim",
+                    AcMediaKey(
                         icon = Icons.Sharp.ContentCut,
-                        active = opts.stripSilence,
-                        accent = HwLed.Orange,
+                        contentDescription = null,
+                        caption = if (gapCount > 0) "Trim ($gapCount)" else "Trim",
+                        toggle = opts.stripSilence,
                         onClick = { vm.setCoreStripSilence(!opts.stripSilence) },
+                        size = 56.dp,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("cs_cut_strip_silence")
                     )
-                    CutToggleKey(
-                        label = "Auto Zoom",
+                    AcMediaKey(
                         icon = Icons.Sharp.ZoomIn,
-                        active = opts.punchIn,
-                        accent = HwLed.Green,
+                        contentDescription = null,
+                        caption = "Auto Zoom",
+                        toggle = opts.punchIn,
                         onClick = { vm.setCorePunchIn(!opts.punchIn) },
+                        size = 56.dp,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("cs_cut_punch_in")
                     )
-                    CutToggleKey(
-                        label = if (isVertical) "9:16" else "16:9",
+                    AcMediaKey(
                         icon = if (isVertical) Icons.Sharp.CropPortrait else Icons.Sharp.CropLandscape,
-                        active = true,
-                        accent = if (isVertical) HwLed.Orange else HwLed.Blue,
+                        contentDescription = null,
+                        caption = if (isVertical) "9:16" else "16:9",
                         onClick = {
-                            vm.setCoreAspect(
-                                if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL
-                            )
+                            vm.setCoreAspect(if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL)
                         },
+                        size = 56.dp,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("cs_cut_aspect")
                     )
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    CutStudioActionKey(
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AcKey(
                         label = if (activeOverlayCount > 0) "Overlays ($activeOverlayCount)" else "Overlays",
                         icon = Icons.Sharp.Layers,
-                        accent = lookAccentColor,
+                        trailingIcon = Icons.Sharp.ChevronRight,
                         onClick = onOpenNewsroom,
+                        size = AcKeySize.Small,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("cs_cut_look")
                     )
-                    CutStudioActionKey(
+                    AcKey(
                         label = if (brollCutawayCount > 0) "B-Roll ($brollCutawayCount)" else "B-Roll & Cuts",
                         icon = Icons.Sharp.Movie,
-                        accent = HwLed.Green,
+                        trailingIcon = Icons.Sharp.ChevronRight,
                         onClick = onOpenBrollStudio,
+                        size = AcKeySize.Small,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("cs_cut_broll_studio")
@@ -460,42 +423,39 @@ fun CutScreen(
                 }
             }
 
-            // Unified Sunken #000 Transcript / B-roll Workspace
-            Column(
+            AcCard(
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                verticalArrangement = Arrangement.Top,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(start = 10.dp, top = 8.dp, end = 10.dp)
-                    .sunkenPanel(radius = 18.dp)
+                    .padding(start = 14.dp, top = 10.dp, end = 14.dp)
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(44.dp)
-                        .background(Color(0xFF0A0A0E))
-                        .hairlineBottom(Cs.RowDivider),
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    CutWorkspaceTab(
+                    AcKey(
                         label = "words",
                         icon = Icons.AutoMirrored.Sharp.Notes,
                         selected = mode == "transcript",
                         onClick = { mode = "transcript" },
+                        size = AcKeySize.Small,
+                        role = Role.Tab,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("cs_cut_mode_transcript")
                     )
-                    Box(
-                        modifier = Modifier
-                            .width(1.dp)
-                            .height(20.dp)
-                            .background(Cs.RowDivider)
-                    )
-                    CutWorkspaceTab(
+                    AcKey(
                         label = "b-roll",
                         icon = Icons.Sharp.Movie,
                         selected = mode == "timeline",
                         onClick = { mode = "timeline" },
+                        size = AcKeySize.Small,
+                        role = Role.Tab,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("cs_cut_mode_timeline")
@@ -506,6 +466,7 @@ fun CutScreen(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
+                        .hairlineTop()
                 ) {
                     if (session.clauses.isEmpty()) {
                         Box(
@@ -514,10 +475,7 @@ fun CutScreen(
                                 .padding(20.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = "No story loaded yet. Go to 01 SPARK and tap make the video.",
-                                style = sans(15.sp, Cs.Muted, 21.sp)
-                            )
+                            Text("No story loaded yet. Go to 01 SPARK and tap make the video.", style = AcType.Body.copy(color = AcTokens.Ink2))
                         }
                     } else if (mode == "transcript") {
                         TranscriptWordsPane(
@@ -540,7 +498,6 @@ fun CutScreen(
                 }
             }
 
-            // Single sequential primary pipeline dock key
             val isCutBusy = state.isCoreStageBusy || state.exportState == ExportState.EXPORTING
             val busyLabel = when {
                 state.exportState == ExportState.EXPORTING -> "exporting…"
@@ -560,10 +517,9 @@ fun CutScreen(
                 vm = vm
             )
 
-            CsDock(
+            StudioDock(
                 primaryLabel = dockSpec.label,
-                primaryLeadingIcon = dockSpec.icon,
-                primaryRole = dockSpec.role,
+                primaryIcon = dockSpec.icon,
                 primaryEnabled = dockSpec.enabled && !isCutBusy,
                 primaryTag = "cs_cut_primary",
                 onPrimaryClick = dockSpec.onClick,
@@ -574,10 +530,7 @@ fun CutScreen(
         }
 
         if (renderGlobalOverlays) {
-            CsToastOverlay(
-                message = state.toastMessage,
-                onDismiss = vm::dismissToast
-            )
+            StudioToast(message = state.toastMessage, onDismiss = vm::dismissToast)
         }
     }
 }
@@ -585,47 +538,9 @@ fun CutScreen(
 private data class CutPrimarySpec(
     val label: String,
     val icon: ImageVector,
-    val role: KeyRole,
     val enabled: Boolean,
     val onClick: () -> Unit
 )
-
-@Composable
-private fun CutWorkspaceTab(
-    label: String,
-    icon: ImageVector,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val tint = if (selected) Cs.White else Cs.Muted
-    Row(
-        modifier = modifier
-            .fillMaxHeight()
-            .clickable(role = Role.Tab, onClick = onClick)
-            .drawBehind {
-                if (selected) {
-                    val barW = (size.width * 0.42f).coerceIn(36.dp.toPx(), 72.dp.toPx())
-                    val barH = 2.dp.toPx()
-                    drawRect(
-                        color = Cs.InkBright,
-                        topLeft = Offset((size.width - barW) / 2f, size.height - barH),
-                        size = Size(barW, barH)
-                    )
-                }
-            }
-            .padding(horizontal = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(imageVector = icon, contentDescription = null, tint = tint, modifier = Modifier.size(17.dp))
-        Text(
-            text = label,
-            style = mono(12.5.sp, tint, if (selected) FontWeight.SemiBold else FontWeight.Normal),
-            maxLines = 1
-        )
-    }
-}
 
 private fun resolveCutPrimarySpec(
     hasClauses: Boolean,
@@ -638,58 +553,26 @@ private fun resolveCutPrimarySpec(
     vm: StudioViewModel
 ): CutPrimarySpec {
     return when {
-        !hasClauses -> CutPrimarySpec(
-            label = "voice the script",
-            icon = Icons.Sharp.RecordVoiceOver,
-            role = KeyRole.COMMIT,
-            enabled = false,
-            onClick = {}
-        )
-        !hasTtsAudio -> CutPrimarySpec(
-            label = "voice the script",
-            icon = Icons.Sharp.RecordVoiceOver,
-            role = KeyRole.COMMIT,
-            enabled = true,
-            onClick = vm::runCoreStage1Tts
-        )
+        !hasClauses -> CutPrimarySpec("voice the script", Icons.Sharp.RecordVoiceOver, false) {}
+        !hasTtsAudio -> CutPrimarySpec("voice the script", Icons.Sharp.RecordVoiceOver, true, vm::runCoreStage1Tts)
         unsyncedCount > 0 -> CutPrimarySpec(
-            label = "re-voice $unsyncedCount edited line${if (unsyncedCount == 1) "" else "s"}",
-            icon = Icons.Sharp.Sync,
-            role = KeyRole.REPAIR,
-            enabled = true,
-            onClick = vm::resyncEditedVoice
+            "re-voice $unsyncedCount edited line${if (unsyncedCount == 1) "" else "s"}",
+            Icons.Sharp.Sync,
+            true,
+            vm::resyncEditedVoice
         )
-        !hasTalkingHead -> CutPrimarySpec(
-            label = "render talking head",
-            icon = Icons.Sharp.Person,
-            role = KeyRole.COMMIT,
-            enabled = true,
-            onClick = vm::runCoreStage3SpeechToHead
-        )
-        !cutCurrent -> CutPrimarySpec(
-            label = "render the video",
-            icon = Icons.Sharp.Movie,
-            role = KeyRole.COMMIT,
-            enabled = true,
-            onClick = { vm.runCoreStage4ChopBroll() }
-        )
-        exportState != ExportState.EXPORTED -> CutPrimarySpec(
-            label = "export & share",
-            icon = Icons.Sharp.Share,
-            role = KeyRole.COMMIT,
-            enabled = clip != null,
-            onClick = { clip?.let { vm.exportClip(it, openShareSheet = true) } }
-        )
-        else -> CutPrimarySpec(
-            label = "share again",
-            icon = Icons.Sharp.Share,
-            role = KeyRole.STD,
-            enabled = clip != null,
-            onClick = { clip?.let { vm.exportClip(it, openShareSheet = true) } }
-        )
+        !hasTalkingHead -> CutPrimarySpec("render talking head", Icons.Sharp.Person, true, vm::runCoreStage3SpeechToHead)
+        !cutCurrent -> CutPrimarySpec("render the video", Icons.Sharp.Movie, true) { vm.runCoreStage4ChopBroll() }
+        exportState != ExportState.EXPORTED -> CutPrimarySpec("export & share", Icons.Sharp.Share, clip != null) {
+            clip?.let { vm.exportClip(it, openShareSheet = true) }
+        }
+        else -> CutPrimarySpec("share again", Icons.Sharp.Share, clip != null) {
+            clip?.let { vm.exportClip(it, openShareSheet = true) }
+        }
     }
 }
 
+/** 1.Voice · 2.Head · 3.Cut · 4.Export progress, drawn on a display (op colors). */
 @Composable
 private fun CutPipelineProgressStrip(
     hasTtsAudio: Boolean,
@@ -705,142 +588,41 @@ private fun CutPipelineProgressStrip(
         Triple("3.Cut", cutCurrent, hasFinalVideo && !cutCurrent),
         Triple("4.Export", exported, false)
     )
-    Row(
+    AcDisplay(
+        radius = 10.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 10.dp, end = 10.dp, bottom = 6.dp)
-            .sunkenPanel(radius = 12.dp, fill = Cs.SunkenTrack)
-            .padding(horizontal = 10.dp, vertical = 6.dp)
-            .testTag("cs_cut_pipeline_strip"),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        steps.forEach { (label, done, stale) ->
-            val tint = when {
-                stale -> Cs.Amber
-                done -> HwLed.Green
-                else -> Cs.Dim
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Icon(
-                    imageVector = when {
-                        stale -> Icons.Sharp.SyncProblem
-                        done -> Icons.Sharp.CheckCircle
-                        else -> Icons.Sharp.ChevronRight
-                    },
-                    contentDescription = null,
-                    tint = tint,
-                    modifier = Modifier.size(13.dp)
-                )
-                Text(
-                    text = label,
-                    style = mono(10.5.sp, tint, if (done || stale) FontWeight.SemiBold else FontWeight.Normal),
-                    maxLines = 1,
-                    softWrap = false
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun CutToggleKey(
-    label: String,
-    icon: ImageVector,
-    active: Boolean,
-    accent: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val role = if (active) KeyRole.ACTIVE else KeyRole.STD
-    val tint = if (active) Cs.White else Cs.Muted
-    Column(
-        modifier = modifier
-            .height(52.dp)
-            .neumorphicSurface(
-                role = role,
-                pressed = false,
-                radius = 13.dp,
-                enabled = true,
-                accentBarColor = if (active) accent else null
-            )
-            .clip(RoundedCornerShape(13.dp))
-            .clickable(role = Role.Switch, onClick = onClick)
-            .padding(horizontal = 6.dp, vertical = 5.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterVertically)
+            .padding(start = 14.dp, end = 14.dp, bottom = 6.dp)
+            .testTag("cs_cut_pipeline_strip")
     ) {
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            if (active) {
-                CsLedDot(color = accent, size = 5.dp)
+            steps.forEach { (label, done, stale) ->
+                val tint = when {
+                    stale -> AcTokens.OpOrange
+                    done -> AcTokens.OpGreen
+                    else -> AcTokens.OpGrey
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(
+                        imageVector = when {
+                            stale -> Icons.Sharp.SyncProblem
+                            done -> Icons.Sharp.CheckCircle
+                            else -> Icons.Sharp.ChevronRight
+                        },
+                        contentDescription = null,
+                        tint = tint,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Text(label, style = AcType.Caption.copy(color = tint, letterSpacing = 0.sp), maxLines = 1, softWrap = false)
+                }
             }
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = if (active) Cs.White else Cs.Muted,
-                modifier = Modifier.size(17.dp)
-            )
         }
-        Text(
-            text = label,
-            style = mono(10.5.sp, tint, if (active) FontWeight.SemiBold else FontWeight.Normal),
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
-@Composable
-private fun CutStudioActionKey(
-    label: String,
-    icon: ImageVector,
-    accent: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier
-            .height(44.dp)
-            .neumorphicSurface(
-                role = KeyRole.STD,
-                pressed = false,
-                radius = 13.dp,
-                enabled = true,
-                accentBarColor = accent
-            )
-            .clip(RoundedCornerShape(13.dp))
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(start = 12.dp, end = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(7.dp)
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = accent,
-            modifier = Modifier.size(17.dp)
-        )
-        Text(
-            text = label,
-            style = mono(11.5.sp, Cs.Ink, FontWeight.SemiBold),
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-        Icon(
-            imageVector = Icons.Sharp.ChevronRight,
-            contentDescription = null,
-            tint = Cs.Muted,
-            modifier = Modifier.size(16.dp)
-        )
     }
 }
 
@@ -864,17 +646,15 @@ private fun VideoMonitorPanel(
     }
     val isVertical = aspect == CoreRenderOptions.ASPECT_VERTICAL
 
-    Box(
+    AcDisplay(
+        contentAlignment = Alignment.Center,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp)
+            .padding(horizontal = 14.dp)
             .height(206.dp)
-            .sunkenPanel(radius = 18.dp)
             .clickable(enabled = sourceUri != null, role = Role.Button, onClick = onTogglePlay)
-            .testTag("cs_cut_monitor"),
-        contentAlignment = Alignment.Center
+            .testTag("cs_cut_monitor")
     ) {
-        // Aspect-accurate inner frame so switching 9:16 <-> 16:9 visibly reshapes the preview immediately.
         val frameModifier = if (isVertical) {
             Modifier
                 .padding(vertical = 8.dp)
@@ -889,9 +669,8 @@ private fun VideoMonitorPanel(
 
         Box(
             modifier = frameModifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF0A0A0F))
-                .border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(6.dp))
+                .border(1.dp, AcTokens.MediaKey, RoundedCornerShape(6.dp))
                 .clipToBounds()
                 .testTag(if (isVertical) "cs_cut_frame_vertical" else "cs_cut_frame_horizontal"),
             contentAlignment = Alignment.Center
@@ -907,14 +686,8 @@ private fun VideoMonitorPanel(
                             setKeepContentOnPlayerReset(false)
                         }
                     },
-                    update = { view ->
-                        if (view.player !== player) {
-                            view.player = player
-                        }
-                    },
-                    onRelease = { view ->
-                        view.player = null
-                    },
+                    update = { view -> if (view.player !== player) view.player = player },
+                    onRelease = { view -> view.player = null },
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
@@ -947,14 +720,14 @@ private fun VideoMonitorPanel(
                     ) {
                         val count = waveformPeaks.size
                         val step = size.width / count.coerceAtLeast(1).toFloat()
-                        val strokeW = (step * 0.56f).coerceIn(1.5.dp.toPx(), 4.dp.toPx())
+                        val strokeW = 1.5.dp.toPx()
                         val centerY = size.height / 2f
                         waveformPeaks.forEachIndexed { idx, rawPeak ->
                             val frac = idx.toFloat() / count.coerceAtLeast(1).toFloat()
                             val barH = (size.height * (0.14f + 0.82f * rawPeak.coerceIn(0f, 1f)))
                             val x = idx * step + step / 2f
                             drawLine(
-                                color = if (frac <= progressFraction) Cs.Red else Color.White.copy(alpha = 0.34f),
+                                color = if (frac <= progressFraction) AcTokens.OpRed else AcTokens.OpGrey,
                                 start = Offset(x, centerY - barH / 2f),
                                 end = Offset(x, centerY + barH / 2f),
                                 strokeWidth = strokeW,
@@ -965,11 +738,10 @@ private fun VideoMonitorPanel(
                 }
             }
 
-            // Live caption positioned cleanly inside the active aspect frame
             if (liveCaption.isNotBlank()) {
                 Text(
                     text = liveCaption,
-                    style = sans(12.5.sp, Cs.White, 17.sp, FontWeight.Medium),
+                    style = AcType.BodySmall.copy(color = AcTokens.Ui),
                     textAlign = TextAlign.Center,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -977,25 +749,26 @@ private fun VideoMonitorPanel(
                         .align(Alignment.BottomCenter)
                         .padding(start = 8.dp, end = 8.dp, bottom = 10.dp)
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color.Black.copy(alpha = 0.62f))
+                        .background(AcTokens.Display.copy(alpha = 0.62f))
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                         .testTag("cs_cut_live_caption")
                 )
             }
         }
 
-        // Top-left timecode (`m:ss / m:ss`)
         Text(
-            text = "${mmss(positionMs)} / ${mmss(durationMs)}",
-            style = mono(11.sp, Cs.Muted),
+            text = buildAnnotatedString {
+                append(mmss(positionMs))
+                withStyle(SpanStyle(color = AcTokens.OpGrey, fontSize = 13.sp)) { append(" / ${mmss(durationMs)}") }
+            },
+            style = AcType.numeral(20.sp),
             maxLines = 1,
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 14.dp, top = 10.dp)
+                .padding(start = 12.dp, top = 8.dp)
                 .testTag("cs_cut_timecode")
         )
 
-        // Top-right single status label (aspect + voice readiness)
         val topRightLabel = buildString {
             if (sourceUri != null && !sourceHasVideo) append("VOICE · ")
             append(if (isVertical) "9:16" else "16:9")
@@ -1003,55 +776,42 @@ private fun VideoMonitorPanel(
         }
         Text(
             text = topRightLabel,
-            style = mono(10.sp, if (sourceUri != null && !sourceHasVideo) HwLed.Green else Cs.Muted, FontWeight.Medium),
+            style = AcType.Caption.copy(color = if (sourceUri != null && !sourceHasVideo) AcTokens.OpGreen else AcTokens.OpGrey),
             maxLines = 1,
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(end = 14.dp, top = 10.dp)
+                .padding(end = 12.dp, top = 12.dp)
                 .testTag("cs_cut_monitor_mode")
         )
 
-        // Centered 56dp circular Play/Pause button (auto-hides during active video playback so face stays clear)
         if (!isPlaying || !sourceHasVideo) {
-            Box(
-                modifier = Modifier
-                    .size(56.dp)
-                    .clip(CircleShape)
-                    .background(Cs.Raised.copy(alpha = 0.88f))
-                    .border(1.dp, Color.White.copy(alpha = 0.12f), CircleShape)
-                    .clickable(
-                        enabled = sourceUri != null,
-                        role = Role.Button,
-                        onClick = onTogglePlay
-                    )
-                    .testTag("cs_cut_play"),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
+            AcMediaWell(padding = 5.dp) {
+                AcMediaKey(
+                    icon = if (isPlaying) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
                     contentDescription = if (isPlaying) "Pause" else "Play",
-                    tint = if (sourceUri != null) Cs.Ink else Cs.Dim,
-                    modifier = Modifier.size(32.dp)
+                    onClick = onTogglePlay,
+                    active = isPlaying,
+                    enabled = sourceUri != null,
+                    size = 52.dp,
+                    modifier = Modifier.testTag("cs_cut_play")
                 )
             }
         }
 
-        // 3dp progress bar (#D71921 over #2C2C32)
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(start = 18.dp, end = 18.dp, bottom = 5.dp)
                 .fillMaxWidth()
-                .height(3.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(Cs.Hairline)
+                .height(1.5.dp)
+                .background(AcTokens.MediaKey)
         ) {
             if (progressFraction > 0f) {
                 Box(
                     modifier = Modifier
                         .fillMaxHeight()
                         .fillMaxWidth(progressFraction)
-                        .background(Cs.Red)
+                        .background(AcTokens.OpRed)
                 )
             }
         }
@@ -1104,22 +864,8 @@ private fun TranscriptWordsPane(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(if (isActive) Cs.ActiveClauseBg else Color.Transparent)
-                    .drawBehind {
-                        if (dirty) {
-                            drawRect(
-                                color = Cs.Amber,
-                                topLeft = Offset.Zero,
-                                size = Size(2.dp.toPx(), size.height)
-                            )
-                        }
-                        drawLine(
-                            color = Cs.ClauseDivider,
-                            start = Offset(0f, size.height - 0.5f),
-                            end = Offset(size.width, size.height - 0.5f),
-                            strokeWidth = 1.dp.toPx()
-                        )
-                    }
+                    .background(if (isActive) AcTokens.Chassis.copy(alpha = 0.5f) else AcTokens.Ui.copy(alpha = 0f))
+                    .hairlineBottom()
                     .then(
                         if (editingClause != idx) {
                             Modifier.clickable(role = Role.Button) {
@@ -1133,17 +879,13 @@ private fun TranscriptWordsPane(
                     .padding(start = 12.dp, top = 12.dp, end = 14.dp, bottom = 12.dp)
                     .testTag("cs_clause_$idx")
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = mmss(clause.startMs),
-                        style = mono(11.sp, Cs.Muted).copy(lineHeight = 25.sp),
+                        style = AcType.Caption.copy(lineHeight = AcType.Body.lineHeight),
                         maxLines = 1,
                         modifier = Modifier.width(44.dp)
                     )
-
                     if (editingClause == idx) {
                         InlineClauseWordsEditor(
                             idx = idx,
@@ -1174,35 +916,21 @@ private fun TranscriptWordsPane(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Sharp.SyncProblem,
-                            contentDescription = null,
-                            tint = Cs.Amber,
-                            modifier = Modifier.size(16.dp)
-                        )
+                        Icon(Icons.Sharp.SyncProblem, contentDescription = null, tint = AcTokens.Red, modifier = Modifier.size(16.dp))
                         Text(
                             text = if (broll) "edited · voice not synced · b-roll" else "edited · voice not synced",
-                            style = mono(12.sp, Cs.Amber),
+                            style = AcType.Caption.copy(color = AcTokens.Red),
                             maxLines = 1
                         )
                     }
                 } else if (broll && editingClause != idx) {
                     Row(
-                        modifier = Modifier
-                            .padding(start = 52.dp, top = 6.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Cs.Track)
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.padding(start = 52.dp, top = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Sharp.Movie,
-                            contentDescription = null,
-                            tint = Cs.Ink,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text("B-ROLL", style = mono(11.sp, Cs.Ink), maxLines = 1)
+                        Icon(Icons.Sharp.Movie, contentDescription = null, tint = AcTokens.Ink2, modifier = Modifier.size(16.dp))
+                        SectionCaption("B-roll")
                     }
                 }
 
@@ -1213,27 +941,21 @@ private fun TranscriptWordsPane(
                             .padding(start = 52.dp, top = 10.dp, bottom = 2.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        VideoEditOledKey(
+                        AcKey(
                             label = "edit words",
                             icon = Icons.Sharp.Edit,
-                            active = dirty,
-                            ledColor = HwLed.Orange,
                             onClick = { onEdit(idx) },
-                            height = 44.dp,
-                            fontSize = 12.sp,
+                            size = AcKeySize.Small,
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("cs_clause_edit_btn_$idx")
                         )
-
-                        VideoEditOledKey(
+                        AcKey(
                             label = if (broll) "back to face" else "b-roll here",
                             icon = Icons.Sharp.Movie,
-                            active = broll,
-                            ledColor = HwLed.Green,
+                            selected = broll,
                             onClick = { vm.toggleCutClauseBroll(idx) },
-                            height = 44.dp,
-                            fontSize = 12.sp,
+                            size = AcKeySize.Small,
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("cs_clause_broll_btn_$idx")
@@ -1256,11 +978,9 @@ private fun ClauseKaraokeWords(
 ) {
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
 
-    data class WordSpanRange(val charRange: IntRange, val active: Boolean)
-
     val built: Pair<AnnotatedString, IntRange?> = remember(spokenText, words, positionMs, clauseStartMs, dirty) {
         if (words.isEmpty()) {
-            val color = if (dirty || positionMs >= clauseStartMs) Cs.Ink else Cs.Muted
+            val color = if (dirty || positionMs >= clauseStartMs) AcTokens.Ink else AcTokens.Ink2
             buildAnnotatedString {
                 pushStyle(SpanStyle(color = color))
                 append(spokenText)
@@ -1273,13 +993,11 @@ private fun ClauseKaraokeWords(
                     val startChar = length
                     val spoken = dirty || positionMs >= w.startMs
                     val isCurrent = !dirty && positionMs >= w.startMs && positionMs < w.endMs
-                    pushStyle(SpanStyle(color = if (spoken) Cs.Ink else Cs.Muted))
+                    pushStyle(SpanStyle(color = if (spoken) AcTokens.Ink else AcTokens.Ink2))
                     append(w.word)
                     pop()
                     val endCharExcl = length
-                    if (isCurrent && endCharExcl > startChar) {
-                        activeRange = startChar until endCharExcl
-                    }
+                    if (isCurrent && endCharExcl > startChar) activeRange = startChar until endCharExcl
                     if (idx < words.lastIndex) append(" ")
                 }
             }
@@ -1290,7 +1008,7 @@ private fun ClauseKaraokeWords(
     val activeRange = built.second
     Text(
         text = built.first,
-        style = sans(17.sp, Cs.Ink, 25.sp),
+        style = AcType.Body,
         onTextLayout = { layout = it },
         modifier = modifier.drawBehind {
             val l = layout ?: return@drawBehind
@@ -1302,7 +1020,7 @@ private fun ClauseKaraokeWords(
             val b = l.getBoundingBox(safeEnd)
             val y = maxOf(a.bottom, b.bottom) - 1.dp.toPx()
             if (b.right > a.left) {
-                drawLine(Cs.Red, Offset(a.left, y), Offset(b.right, y), 2.dp.toPx())
+                drawLine(AcTokens.Red, Offset(a.left, y), Offset(b.right, y), 2.dp.toPx())
             }
         }
     )
@@ -1316,42 +1034,31 @@ private fun InlineClauseWordsEditor(
     onCancel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val fieldState = rememberTextFieldState(initialText = initialText)
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        BasicTextField(
-            state = fieldState,
-            textStyle = sans(17.sp, Cs.Ink, 25.sp),
-            cursorBrush = SolidColor(Cs.Ink),
-            lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 2, maxHeightInLines = 5),
+    var text by rememberSaveable { mutableStateOf(initialText) }
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        AcField(
+            value = text,
+            onValueChange = { text = it },
+            minLines = 2,
+            maxLines = 5,
+            textStyle = AcType.Body,
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(Cs.Body)
-                .border(1.dp, Cs.Amber, RoundedCornerShape(12.dp))
-                .padding(10.dp)
                 .testTag("cs_clause_editor_$idx")
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            VideoEditOledKey(
+            AcKey(
                 label = "save words",
-                active = fieldState.text.toString().isNotBlank(),
-                ledColor = HwLed.Green,
-                onClick = { onSave(fieldState.text.toString()) },
-                enabled = fieldState.text.toString().isNotBlank(),
-                height = 44.dp,
+                onClick = { onSave(text) },
+                enabled = text.isNotBlank(),
+                size = AcKeySize.Small,
                 modifier = Modifier.testTag("cs_clause_apply_$idx")
             )
-            CsKeyLabel(
+            AcKey(
                 label = "cancel",
                 onClick = onCancel,
-                role = KeyRole.STD,
-                radius = 12.dp,
-                modifier = Modifier
-                    .height(44.dp)
-                    .testTag("cs_clause_cancel_$idx")
+                size = AcKeySize.Small,
+                modifier = Modifier.testTag("cs_clause_cancel_$idx")
             )
         }
     }
@@ -1369,39 +1076,19 @@ private fun BrollModePane(
             .fillMaxSize()
             .padding(8.dp)
             .testTag("cs_timeline"),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         item(key = "broll_studio_banner") {
-            Row(
+            AcKey(
+                label = "Open B-Roll & Transition Studio",
+                icon = Icons.Sharp.Movie,
+                trailingIcon = Icons.Sharp.ChevronRight,
+                onClick = onOpenBrollStudio,
+                size = AcKeySize.Small,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(HwLed.Green.copy(alpha = 0.12f))
-                    .border(1.dp, HwLed.Green.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                    .clickable(role = Role.Button, onClick = onOpenBrollStudio)
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
-                    .testTag("cs_open_broll_studio_inline"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Sharp.Movie,
-                    contentDescription = null,
-                    tint = HwLed.Green,
-                    modifier = Modifier.size(18.dp)
-                )
-                Text(
-                    text = "Open B-Roll & Transition Studio",
-                    style = sans(13.5.sp, Cs.Ink, 18.sp, FontWeight.Medium),
-                    modifier = Modifier.weight(1f)
-                )
-                Icon(
-                    imageVector = Icons.Sharp.ChevronRight,
-                    contentDescription = null,
-                    tint = HwLed.Green,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
+                    .testTag("cs_open_broll_studio_inline")
+            )
         }
 
         itemsIndexed(clauses, key = { _, c -> c.id }) { idx, clause ->
@@ -1411,48 +1098,28 @@ private fun BrollModePane(
                 modifier = Modifier
                     .fillMaxWidth()
                     .defaultMinSize(minHeight = 56.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Cs.BrollRow)
+                    .hairlineBottom()
                     .clickable(role = Role.Button) {
                         vm.playerController.seekTo(clause.startMs)
                         onSeekLocal(clause.startMs)
                     }
-                    .padding(start = 12.dp, top = 6.dp, end = 6.dp, bottom = 6.dp),
+                    .padding(start = 8.dp, top = 6.dp, end = 2.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(
-                    text = mmss(clause.startMs),
-                    style = mono(11.sp, Cs.Muted),
-                    maxLines = 1,
-                    modifier = Modifier.width(40.dp)
-                )
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    Text(
-                        text = clause.spokenText,
-                        style = sans(14.sp, Cs.Ink, 19.sp),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                Text(mmss(clause.startMs), style = AcType.Caption, maxLines = 1, modifier = Modifier.width(40.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(clause.spokenText, style = AcType.BodySmall.copy(color = AcTokens.Ink), maxLines = 2, overflow = TextOverflow.Ellipsis)
                     if (idx > 0 && transition != ClipTransitionType.CUT) {
-                        Text(
-                            text = "Transition: ${transition.label} (${clause.transitionDurationMs}ms)",
-                            style = mono(10.5.sp, HwLed.Blue),
-                            maxLines = 1
-                        )
+                        SectionCaption("Transition: ${transition.label} (${clause.transitionDurationMs}ms)")
                     }
                 }
-                VideoEditOledKey(
+                AcKey(
                     label = if (broll) "b-roll" else "face",
                     icon = if (broll) Icons.Sharp.Movie else Icons.Sharp.Person,
-                    active = broll,
-                    ledColor = HwLed.Green,
+                    selected = broll,
                     onClick = { vm.toggleCutClauseBroll(idx) },
-                    height = 44.dp,
-                    fontSize = 11.5.sp,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_timeline_toggle_$idx")
                 )
             }

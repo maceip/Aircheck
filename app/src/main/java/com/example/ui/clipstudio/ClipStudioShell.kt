@@ -165,7 +165,7 @@ fun ClipStudioShell(
     Box(
         modifier
             .fillMaxSize()
-            .background(Cs.Body)
+            .background(com.example.ui.design.AcTokens.Chassis)
             .testTag("clip_studio_shell")
     ) {
         Box(
@@ -228,7 +228,7 @@ fun ClipStudioShell(
                 )
             }
 
-            CsToastOverlay(
+            StudioToast(
                 message = activeToast,
                 onDismiss = {
                     if (draftState.toastMessage != null) {

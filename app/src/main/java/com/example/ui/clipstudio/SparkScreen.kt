@@ -2,31 +2,23 @@ package com.example.ui.clipstudio
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.input.TextFieldLineLimits
-import androidx.compose.foundation.text.input.rememberTextFieldState
-import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.sharp.ArrowForward
@@ -35,10 +27,10 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.sharp.Add
 import androidx.compose.material.icons.sharp.Anchor
 import androidx.compose.material.icons.sharp.Check
-import androidx.compose.material.icons.sharp.Close
 import androidx.compose.material.icons.sharp.Edit
 import androidx.compose.material.icons.sharp.ExpandLess
 import androidx.compose.material.icons.sharp.ExpandMore
+import androidx.compose.material.icons.sharp.FiberManualRecord
 import androidx.compose.material.icons.sharp.Forum
 import androidx.compose.material.icons.sharp.Keyboard
 import androidx.compose.material.icons.sharp.Layers
@@ -47,36 +39,27 @@ import androidx.compose.material.icons.sharp.Pause
 import androidx.compose.material.icons.sharp.PlayArrow
 import androidx.compose.material.icons.sharp.Refresh
 import androidx.compose.material.icons.sharp.Settings
+import androidx.compose.material.icons.sharp.Stop
 import androidx.compose.material.icons.sharp.Update
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.onClick
-import androidx.compose.ui.semantics.role
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -84,19 +67,28 @@ import coil3.compose.AsyncImage
 import com.example.data.LastVideoSummary
 import com.example.draft.ArcBeat
 import com.example.draft.DraftTone
-import com.example.draft.ShotSpec
-import com.example.draft.ShotType
+import com.example.ui.design.AcCard
+import com.example.ui.design.AcDisplay
+import com.example.ui.design.AcField
+import com.example.ui.design.AcKey
+import com.example.ui.design.AcKeySize
+import com.example.ui.design.AcMediaKey
+import com.example.ui.design.AcMediaWell
+import com.example.ui.design.AcPanel
+import com.example.ui.design.AcPrimaryKey
+import com.example.ui.design.AcTokens
+import com.example.ui.design.AcType
 import com.example.ui.draft.DraftDeckUiState
 import com.example.ui.draft.DraftDeckViewModel
+import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 
 /**
- * 01 SPARK (Clip Studio v5):
- * - First-run empty state: tone selector, 76dp press-and-hold red mic key, "type it instead" modal,
- *   and real "OR CONTINUE YOUR LAST VIDEO" card + 2-up split directions + Follow-Up sheet.
- * - Populated outline state: single-row note strip (real MediaPlayer audio playback + Note Edit sheet),
- *   top-bar `anchors` badge + Anchors bottom sheet, sunken 4-beat outline panel with immediate rig
- *   shot previews (`face -> pip -> broll -> card`) + per-beat sparkle rewrite, and 2-key dock.
+ * 01 SPARK (design v2):
+ * - Empty state: tone keys, the Recorder panel (live waveform display + media well with hold-to-record,
+ *   play and stop), "type it instead", and the "continue your last video" card + follow-up directions.
+ * - Outline state: note strip, anchors key + Anchors sheet, 4 beat cards (Body 17 text, edit + AI keys),
+ *   and the dock (hold-to-steer media key + "make the video" primary key).
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -114,7 +106,7 @@ fun SparkScreen(
 ) {
     val doc = state.document
     // Stay on the empty hold-to-record surface while actively holding the seed mic (so incremental
-    // VAD chunks never unmount the red button out from under the user's thumb mid-sentence).
+    // VAD chunks never unmount the record key out from under the user's thumb mid-sentence).
     val sparkEmpty = (doc.seedTranscript.isBlank() || state.isRecordingSeed) && !state.followupLoaded && doc.arcBeats.isEmpty()
 
     var typedSheetOpen by rememberSaveable { mutableStateOf(false) }
@@ -129,63 +121,48 @@ fun SparkScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Cs.Body)
+            .background(AcTokens.Chassis)
             .testTag("cs_spark_root")
     ) {
         Column(Modifier.fillMaxSize()) {
-            CsTopBar(
+            StudioTopBar(
                 activeStage = 1,
                 onNavigate = onNavigate
             ) {
                 if (!sparkEmpty) {
-                    CsKey(
-                        onClick = onNewIdea,
-                        role = KeyRole.STD,
-                        radius = 11.dp,
-                        horizontalPadding = 8.dp,
-                        contentAlignment = Arrangement.spacedBy(3.dp),
-                        modifier = Modifier
-                            .height(40.dp)
-                            .testTag("cs_spark_new_idea")
-                    ) { tint ->
-                        Icon(
-                            imageVector = Icons.Sharp.Add,
-                            contentDescription = "New idea",
-                            tint = tint,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "new",
-                            style = mono(11.5.sp, tint, FontWeight.Medium),
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                    AnchorsTopKey(
-                        count = state.selectedAnchorCount,
-                        open = state.anchorsSheetOpen,
-                        onClick = vm::toggleAnchorsSheet
+                    AcKey(
+                        label = "anchors · ${state.selectedAnchorCount}",
+                        onClick = vm::toggleAnchorsSheet,
+                        selected = state.anchorsSheetOpen,
+                        size = AcKeySize.Small,
+                        modifier = Modifier.testTag("cs_anchors_button")
                     )
-                    CsIconKey(
+                    AcKey(
                         icon = Icons.AutoMirrored.Sharp.Undo,
                         contentDescription = "Undo beat edit",
                         onClick = vm::undoArcShotEdit,
                         enabled = doc.canUndoArc,
-                        size = 40.dp,
-                        radius = 11.dp,
-                        iconSize = 20.dp,
+                        size = AcKeySize.Small,
                         modifier = Modifier.testTag("cs_spark_undo")
                     )
+                    AcKey(
+                        icon = Icons.Sharp.Add,
+                        contentDescription = "New idea",
+                        onClick = onNewIdea,
+                        size = AcKeySize.Small,
+                        modifier = Modifier.testTag("cs_spark_new_idea")
+                    )
                 }
-                CsIconKey(
+                AcKey(
                     icon = Icons.Sharp.Settings,
                     contentDescription = "Settings",
                     onClick = onOpenSettings,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_spark_settings")
                 )
             }
 
-            CsStatusLine(
+            StudioStatusLine(
                 error = state.errorMessage,
                 notice = state.statusNotice,
                 onDismissError = vm::dismissError,
@@ -234,73 +211,21 @@ fun SparkScreen(
         }
 
         if (state.anchorsSheetOpen && !sparkEmpty) {
-            AnchorsBottomSheet(
-                state = state,
-                vm = vm
-            )
+            AnchorsBottomSheet(state = state, vm = vm)
         }
 
         if (state.continueSheetOpen && activeFollowupVideo != null) {
-            FollowupBottomSheet(
-                state = state,
-                video = activeFollowupVideo,
-                vm = vm
-            )
+            FollowupBottomSheet(state = state, video = activeFollowupVideo, vm = vm)
         }
 
         if (renderGlobalOverlays) {
-            CsToastOverlay(
-                message = state.toastMessage,
-                onDismiss = vm::dismissToast
-            )
-            VoiceGlowDitherOverlay(
-                active = state.isAnyRecording,
-                level = state.liveRmsLevel
-            )
+            StudioToast(message = state.toastMessage, onDismiss = vm::dismissToast)
+            VoiceGlowDitherOverlay(active = state.isAnyRecording, level = state.liveRmsLevel)
         }
     }
 }
 
-@Composable
-private fun AnchorsTopKey(
-    count: Int,
-    open: Boolean,
-    onClick: () -> Unit
-) {
-    val role = if (open) KeyRole.DOWN else KeyRole.STD
-    CsKey(
-        onClick = onClick,
-        role = role,
-        radius = 12.dp,
-        horizontalPadding = 10.dp,
-        contentAlignment = Arrangement.spacedBy(6.dp),
-        modifier = Modifier
-            .height(44.dp)
-            .testTag("cs_anchors_button")
-    ) { tint ->
-        Icon(
-            imageVector = Icons.Sharp.Anchor,
-            contentDescription = null,
-            tint = tint,
-            modifier = Modifier.size(20.dp)
-        )
-        Text("anchors", style = mono(12.sp, tint), maxLines = 1)
-        Box(
-            modifier = Modifier
-                .size(20.dp)
-                .clip(CircleShape)
-                .background(Cs.Ink),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = count.toString(),
-                style = mono(11.sp, Cs.Black, FontWeight.Medium),
-                maxLines = 1
-            )
-        }
-    }
-}
-
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SparkEmptyContent(
     state: DraftDeckUiState,
@@ -316,177 +241,174 @@ private fun SparkEmptyContent(
                 .weight(1f)
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(top = 4.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterVertically)
+                .padding(start = 14.dp, top = 4.dp, end = 14.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text("STEP 1 OF 2 · YOUR IDEA", style = SectionLabelStyle)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SectionCaption("Step 1 of 2 · your idea")
+                Text("What's the clip about?", style = AcType.Headline)
                 Text(
-                    text = "What's the clip about?",
-                    style = sans(26.sp, Cs.Ink, 32.sp, FontWeight.Medium)
-                )
-                Text(
-                    text = "Pick a tone, then hold the red key and talk. Rough is fine. Length is set from what you say.",
-                    style = sans(16.sp, Cs.Muted, 23.sp)
+                    "Pick a tone, then hold record and talk. Rough is fine. Length is set from what you say.",
+                    style = AcType.BodySmall
                 )
             }
 
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = "TONE",
-                    style = SectionLabelStyle,
-                    modifier = Modifier.padding(horizontal = 20.dp)
-                )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 20.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    DraftTone.entries.forEach { tone ->
-                        CsPill(
-                            label = tone.label,
-                            selected = state.tone == tone,
-                            onClick = { vm.setTone(tone) },
-                            modifier = Modifier.testTag("cs_tone_${tone.wireValue}")
-                        )
-                    }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                DraftTone.entries.forEach { tone ->
+                    AcKey(
+                        label = tone.label,
+                        onClick = { vm.setTone(tone) },
+                        selected = state.tone == tone,
+                        size = AcKeySize.Small,
+                        modifier = Modifier.testTag("cs_tone_${tone.wireValue}")
+                    )
                 }
             }
 
-            Box(Modifier.padding(horizontal = 20.dp)) {
-                SeedRecordHeroKey(
-                    isRecording = state.isRecordingSeed,
-                    elapsedMs = state.recordingElapsedMs,
-                    isBusy = state.isBusy || state.isExtractingAngles,
-                    busyLabel = state.busyLabel,
-                    enabled = !state.isRecordingSteer && !state.isRecordingSplice,
-                    onPress = {
-                        onRequestMic { vm.startSeedLatch() }
-                    },
-                    onRelease = {
-                        vm.stopSeedLatch()
-                    }
-                )
-            }
+            RecorderPanel(state = state, vm = vm, onRequestMic = onRequestMic)
 
-            CsKey(
-                onClick = onOpenTypedSheet,
-                role = KeyRole.STD,
-                enabled = !state.isBusy && !state.isAnyRecording,
-                radius = 16.dp,
-                contentAlignment = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
-                modifier = Modifier
-                    .padding(horizontal = 20.dp)
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .testTag("cs_type_instead")
-            ) { tint ->
-                Icon(
-                    imageVector = Icons.Sharp.Keyboard,
-                    contentDescription = null,
-                    tint = tint,
-                    modifier = Modifier.size(22.dp)
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                AcKey(
+                    label = "type it instead",
+                    icon = Icons.Sharp.Keyboard,
+                    onClick = onOpenTypedSheet,
+                    enabled = !state.isBusy && !state.isAnyRecording,
+                    modifier = Modifier.testTag("cs_type_instead")
                 )
-                Text("type it instead", style = mono(14.sp, tint), maxLines = 1)
             }
         }
 
         if (lastCompletedVideo != null) {
-            ContinueLastVideoBlock(
-                state = state,
-                video = lastCompletedVideo,
-                vm = vm
-            )
+            ContinueLastVideoBlock(state = state, video = lastCompletedVideo, vm = vm)
         }
     }
 }
 
+/** Recorder block: live waveform display + media well (hold to record, play, stop). */
 @Composable
-private fun SeedRecordHeroKey(
-    isRecording: Boolean,
-    elapsedMs: Long,
-    isBusy: Boolean,
-    busyLabel: String?,
-    enabled: Boolean,
-    onPress: () -> Unit,
-    onRelease: () -> Unit
+private fun RecorderPanel(
+    state: DraftDeckUiState,
+    vm: DraftDeckViewModel,
+    onRequestMic: (() -> Unit) -> Unit
 ) {
-    val press by rememberUpdatedState(onPress)
-    val release by rememberUpdatedState(onRelease)
-
-    if (isBusy) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(76.dp)
-                .neumorphicSurface(role = KeyRole.DOWN, pressed = true, radius = 20.dp, enabled = true)
-                .clip(RoundedCornerShape(20.dp))
-                .padding(horizontal = 20.dp)
-                .testTag("cs_seed_hold_record"),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            ThinkingOrbSolving(size = 34.dp, tint = Cs.White)
-            Text(
-                text = busyLabel ?: "outlining your idea…",
-                style = mono(15.sp, Cs.White, FontWeight.Bold),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+    AcPanel(raised = true, contentPadding = PaddingValues(12.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            SectionCaption("Recorder", color = AcTokens.Red, modifier = Modifier.weight(1f))
+            if (state.isRecordingSeed) {
+                SectionCaption("● rec", color = AcTokens.Red)
+            }
         }
-        return
+        RecorderWaveformDisplay(
+            recording = state.isRecordingSeed,
+            elapsedMs = state.recordingElapsedMs,
+            rmsFlow = vm.liveRmsFlow
+        )
+        val busy = state.isBusy || state.isExtractingAngles
+        if (busy) {
+            StudioProgressDisplay(
+                label = state.busyLabel ?: "outlining your idea…",
+                progressFraction = null,
+                height = 72.dp,
+                tag = "cs_seed_hold_record",
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            val canPlay = !state.lastSeedAudioPath.isNullOrBlank()
+            val recordLabel = if (state.isRecordingSeed) "recording ${mmss(state.recordingElapsedMs)}" else "hold to record your idea"
+            AcMediaWell(modifier = Modifier.fillMaxWidth()) {
+                AcMediaKey(
+                    icon = Icons.Sharp.FiberManualRecord,
+                    contentDescription = null,
+                    onPress = { onRequestMic { vm.startSeedLatch() } },
+                    onRelease = { vm.stopSeedLatch() },
+                    held = state.isRecordingSeed,
+                    enabled = !state.isRecordingSteer && !state.isRecordingSplice,
+                    caption = if (state.isRecordingSeed) "release when done" else "hold to record",
+                    semanticsLabel = recordLabel,
+                    size = 72.dp,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("cs_seed_hold_record")
+                )
+                AcMediaKey(
+                    icon = Icons.Sharp.PlayArrow,
+                    contentDescription = "Play voice note",
+                    onClick = { if (!state.isPlayingSeedAudio) vm.togglePlaySeedAudio() },
+                    active = state.isPlayingSeedAudio,
+                    enabled = canPlay && !state.isRecordingSeed,
+                    size = 72.dp,
+                    modifier = Modifier.testTag("cs_recorder_play")
+                )
+                AcMediaKey(
+                    icon = Icons.Sharp.Stop,
+                    contentDescription = "Stop voice note",
+                    onClick = { if (state.isPlayingSeedAudio) vm.togglePlaySeedAudio() },
+                    enabled = state.isPlayingSeedAudio,
+                    size = 72.dp,
+                    modifier = Modifier.testTag("cs_recorder_stop")
+                )
+            }
+        }
     }
+}
 
-    val mainLabel = if (isRecording) "recording ${mmss(elapsedMs)}" else "hold to record your idea"
-    val subLabel = if (isRecording) "release when done" else "press and hold"
-
-    Row(
+/**
+ * Live waveform of the real mic RMS while recording (thin white lines, red playhead), plus the
+ * elapsed timecode. Collects the RMS flow only while recording, so idle Spark never recomposes at 50 Hz.
+ */
+@Composable
+private fun RecorderWaveformDisplay(
+    recording: Boolean,
+    elapsedMs: Long,
+    rmsFlow: StateFlow<Float>
+) {
+    val samples = remember { mutableStateListOf<Float>() }
+    LaunchedEffect(recording) {
+        if (recording) {
+            samples.clear()
+            rmsFlow.collect { rms ->
+                samples.add(mapMicRmsToVoiceEnergy(rms))
+                if (samples.size > 160) samples.removeAt(0)
+            }
+        }
+    }
+    AcDisplay(
         modifier = Modifier
             .fillMaxWidth()
-            .height(80.dp)
-            .offset(y = if (isRecording) 1.dp else 0.dp)
-            .neumorphicDockKey(role = KeyRole.VOICE, pressed = isRecording, radius = 22.dp, enabled = enabled)
-            .clip(RoundedCornerShape(22.dp))
-            .semantics(mergeDescendants = true) {
-                this.role = Role.Button
-                onClick(label = mainLabel) {
-                    if (isRecording) release() else press()
-                    true
-                }
-            }
-            .pointerInput(enabled) {
-                if (!enabled) return@pointerInput
-                detectHoldGesture(onPress = { press() }, onRelease = { release() })
-            }
-            .padding(horizontal = 20.dp)
-            .testTag("cs_seed_hold_record"),
-        horizontalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically
+            .height(96.dp)
+            .testTag("cs_recorder_waveform")
     ) {
-        val fg = if (enabled) Cs.White else Cs.Dim
-        Icon(
-            imageVector = Icons.Sharp.Mic,
-            contentDescription = null,
-            tint = fg,
-            modifier = Modifier.size(28.dp)
+        Box(
+            Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .drawBehind {
+                    val mid = size.height / 2f
+                    val pitch = 4.dp.toPx()
+                    val stroke = 1.5.dp.toPx()
+                    val maxBars = (size.width * 0.7f / pitch).toInt().coerceAtLeast(1)
+                    val shown = samples.takeLast(maxBars)
+                    shown.forEachIndexed { i, v ->
+                        val x = i * pitch
+                        val h = (v.coerceIn(0f, 1f) * size.height * 0.9f).coerceAtLeast(stroke)
+                        drawLine(AcTokens.Ui, Offset(x, mid - h / 2f), Offset(x, mid + h / 2f), stroke)
+                    }
+                    val headX = shown.size * pitch
+                    drawLine(AcTokens.MediaKeyHi, Offset(headX, mid), Offset(size.width, mid), 1.dp.toPx())
+                    drawLine(AcTokens.OpRed, Offset(headX, 4.dp.toPx()), Offset(headX, size.height - 4.dp.toPx()), stroke)
+                    drawCircle(AcTokens.OpRed, radius = 3.5.dp.toPx(), center = Offset(headX, 4.dp.toPx()))
+                }
         )
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                text = mainLabel,
-                style = mono(15.sp, fg, FontWeight.Bold),
-                maxLines = 1
-            )
-            Text(
-                text = subLabel,
-                style = mono(12.sp, fg.copy(alpha = 0.85f), FontWeight.SemiBold),
-                maxLines = 1
-            )
-        }
+        Text(
+            text = mmss(if (recording) elapsedMs else 0L),
+            style = AcType.numeral(18.sp),
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 8.dp, end = 12.dp)
+        )
     }
 }
 
@@ -500,68 +422,40 @@ private fun ContinueLastVideoBlock(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 10.dp, end = 10.dp, bottom = 8.dp)
-                .height(94.dp)
+                .padding(start = 14.dp, end = 14.dp, bottom = 10.dp)
                 .testTag("cs_continue_directions"),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             val cards = state.followupDirections
             if (cards.isNotEmpty()) {
                 cards.take(2).forEach { dir ->
-                    Column(
+                    AcCard(
+                        tag = dir.theme,
+                        onClick = { vm.selectFollowupDirection(dir.id) },
                         modifier = Modifier
                             .weight(1f)
-                            .height(94.dp)
-                            .neumorphicSurface(
-                                role = KeyRole.STD,
-                                pressed = false,
-                                radius = 18.dp,
-                                enabled = true,
-                                accentBarColor = if (dir.id == "shitpost") Cs.Amber else Cs.Mint
-                            )
-                            .clip(RoundedCornerShape(18.dp))
-                            .clickable(role = Role.Button) {
-                                vm.selectFollowupDirection(dir.id)
-                            }
-                            .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp)
-                            .testTag("cs_continue_dir_${dir.id}"),
-                        verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically)
+                            .heightIn(min = 94.dp)
+                            .testTag("cs_continue_dir_${dir.id}")
                     ) {
-                        Text(dir.theme, style = SectionLabelStyle, maxLines = 1)
-                        Text(
-                            text = dir.words,
-                            style = sans(14.5.sp, Cs.Ink, 19.sp, FontWeight.Medium),
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Text(dir.words, style = AcType.BodySmall.copy(color = AcTokens.Ink), maxLines = 3, overflow = TextOverflow.Ellipsis)
                     }
                 }
             } else {
                 listOf("shitpost" to "SHITPOST", "solarpunk" to "SOLARPUNK").forEach { (id, theme) ->
-                    Column(
+                    AcCard(
+                        tag = theme,
+                        onClick = {
+                            vm.openContinueSheet(video)
+                            vm.selectFollowupDirection(id)
+                        },
                         modifier = Modifier
                             .weight(1f)
-                            .height(94.dp)
-                            .neumorphicSurface(
-                                role = KeyRole.STD,
-                                pressed = false,
-                                radius = 18.dp,
-                                enabled = true,
-                                accentBarColor = if (id == "shitpost") Cs.Amber else Cs.Mint
-                            )
-                            .clip(RoundedCornerShape(18.dp))
-                            .clickable(role = Role.Button) {
-                                vm.openContinueSheet(video)
-                                vm.selectFollowupDirection(id)
-                            }
-                            .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp)
-                            .testTag("cs_continue_dir_$id"),
-                        verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically)
+                            .heightIn(min = 94.dp)
+                            .testTag("cs_continue_dir_$id")
                     ) {
-                        Text(theme, style = SectionLabelStyle, maxLines = 1)
                         Text(
                             text = if (state.isDraftingFollowup) "drafting…" else "draft $id angle",
-                            style = sans(14.5.sp, if (state.isDraftingFollowup) Cs.Muted else Cs.Ink, 19.sp, FontWeight.Medium),
+                            style = AcType.BodySmall.copy(color = if (state.isDraftingFollowup) AcTokens.Ink2 else AcTokens.Ink),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -571,58 +465,42 @@ private fun ContinueLastVideoBlock(
         }
     }
 
-    Row(
+    AcCard(
+        onClick = { vm.toggleDirectionsPanel(video) },
+        contentPadding = PaddingValues(10.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 10.dp, end = 10.dp, bottom = 6.dp)
-            .neumorphicSurface(
-                role = KeyRole.STD,
-                pressed = false,
-                radius = 18.dp,
-                enabled = true
-            )
-            .clip(RoundedCornerShape(18.dp))
-            .clickable(role = Role.Button) { vm.toggleDirectionsPanel(video) }
-            .padding(12.dp)
-            .testTag("cs_continue_card"),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(start = 14.dp, end = 14.dp, bottom = 12.dp)
+            .testTag("cs_continue_card")
     ) {
-        VideoThumbBox(
-            thumbPath = video.thumbFilePath,
-            remoteUrl = video.remoteThumbUrl,
-            durationMs = video.durationMs,
-            modifier = Modifier
-                .width(52.dp)
-                .height(68.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .clickable(role = Role.Button) { vm.openContinueSheet(video) }
-                .testTag("cs_continue_open_sheet")
-        )
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(3.dp)
-        ) {
-            Text("OR CONTINUE YOUR LAST VIDEO", style = SectionLabelStyle, maxLines = 1)
-            Text(
-                text = video.title,
-                style = sans(15.sp, Cs.Ink, 20.sp, FontWeight.Medium),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            VideoThumbBox(
+                thumbPath = video.thumbFilePath,
+                remoteUrl = video.remoteThumbUrl,
+                durationMs = video.durationMs,
+                modifier = Modifier
+                    .width(48.dp)
+                    .height(60.dp)
+                    .clickable(role = Role.Button) { vm.openContinueSheet(video) }
+                    .testTag("cs_continue_open_sheet")
             )
-            val statusSub = when {
-                state.isDraftingFollowup -> "drafting follow-up…"
-                state.followupBeats.isNotEmpty() -> "follow-up script drafted"
-                else -> "tap for follow-up angles"
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                SectionCaption("Or continue your last video")
+                Text(video.title, style = AcType.Body.copy(fontSize = 15.sp, lineHeight = 20.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val statusSub = when {
+                    state.isDraftingFollowup -> "drafting follow-up…"
+                    state.followupBeats.isNotEmpty() -> "follow-up script drafted"
+                    else -> "tap for follow-up angles"
+                }
+                Text(statusSub, style = AcType.BodySmall, maxLines = 1)
             }
-            Text(statusSub, style = mono(12.sp, Cs.Muted), maxLines = 1)
+            AcKey(
+                icon = if (state.directionsOpen) Icons.Sharp.ExpandMore else Icons.Sharp.ExpandLess,
+                contentDescription = "Toggle follow-up directions",
+                onClick = { vm.toggleDirectionsPanel(video) },
+                size = AcKeySize.Small
+            )
         }
-        Icon(
-            imageVector = if (state.directionsOpen) Icons.Sharp.ExpandMore else Icons.Sharp.ExpandLess,
-            contentDescription = "Toggle follow-up directions",
-            tint = Cs.Ink,
-            modifier = Modifier.size(24.dp)
-        )
     }
 }
 
@@ -639,11 +517,7 @@ private fun VideoThumbBox(
         !remoteUrl.isNullOrBlank() -> remoteUrl
         else -> null
     }
-    Box(
-        modifier = modifier
-            .background(Color(0xFF16212E)),
-        contentAlignment = Alignment.Center
-    ) {
+    AcDisplay(modifier = modifier, radius = 10.dp, contentAlignment = Alignment.Center) {
         if (model != null) {
             AsyncImage(
                 model = model,
@@ -653,20 +527,15 @@ private fun VideoThumbBox(
             )
         }
         if (showPlayIcon) {
-            Icon(
-                imageVector = Icons.Sharp.PlayArrow,
-                contentDescription = null,
-                tint = Cs.Ink,
-                modifier = Modifier.size(26.dp)
-            )
+            Icon(Icons.Sharp.PlayArrow, contentDescription = null, tint = AcTokens.Ui, modifier = Modifier.size(26.dp))
         } else if (durationMs > 0L) {
             Text(
                 text = mmss(durationMs),
-                style = mono(9.sp, Cs.Ink, FontWeight.Medium),
+                style = AcType.Caption.copy(color = AcTokens.Ui, fontSize = 9.sp),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 4.dp)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
+                    .background(AcTokens.Display.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
                     .padding(horizontal = 4.dp, vertical = 1.dp),
                 maxLines = 1
             )
@@ -685,72 +554,55 @@ private fun SparkOutlineContent(
 ) {
     val doc = state.document
     Column(modifier = modifier.fillMaxSize()) {
-        // Single-row Note Strip
+        // Note strip: play the real voice note, read the quote, edit it.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, top = 2.dp, end = 12.dp, bottom = 10.dp),
+                .padding(start = 14.dp, top = 2.dp, end = 10.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             val canPlay = !state.lastSeedAudioPath.isNullOrBlank() || state.isPlayingSeedAudio
-            CsIconKey(
-                icon = if (state.isPlayingSeedAudio) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
-                contentDescription = if (state.isPlayingSeedAudio) "Pause voice note" else "Play voice note",
-                onClick = vm::togglePlaySeedAudio,
-                enabled = canPlay,
-                size = 40.dp,
-                radius = 12.dp,
-                iconSize = 22.dp,
-                modifier = Modifier.testTag("cs_note_play")
-            )
-
-            Row(
+            AcMediaWell(padding = 4.dp) {
+                AcMediaKey(
+                    icon = if (state.isPlayingSeedAudio) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
+                    contentDescription = if (state.isPlayingSeedAudio) "Pause voice note" else "Play voice note",
+                    onClick = vm::togglePlaySeedAudio,
+                    active = state.isPlayingSeedAudio,
+                    enabled = canPlay,
+                    size = 48.dp,
+                    modifier = Modifier.testTag("cs_note_play")
+                )
+            }
+            Column(
                 modifier = Modifier
                     .weight(1f)
                     .testTag("cs_voice_note_preview"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 val (tagText, tagColor) = when {
-                    state.isRecordingSeed -> "● RECORDING · ${mmss(state.recordingElapsedMs)}:" to Cs.Red
-                    state.followupLoaded -> "FOLLOW-UP:" to Cs.Muted
-                    state.lastSeedDurationSec > 0 -> "● YOUR IDEA · ${mmss(state.lastSeedDurationSec * 1000L)}:" to Cs.Red
-                    else -> "● YOUR IDEA:" to Cs.Red
+                    state.isRecordingSeed -> "● RECORDING · ${mmss(state.recordingElapsedMs)}:" to AcTokens.Red
+                    state.followupLoaded -> "FOLLOW-UP:" to AcTokens.Ink2
+                    state.lastSeedDurationSec > 0 -> "● YOUR IDEA · ${mmss(state.lastSeedDurationSec * 1000L)}:" to AcTokens.Red
+                    else -> "● YOUR IDEA:" to AcTokens.Red
                 }
                 val quoteText = if (state.followupLoaded && state.followupSourceLabel.isNotBlank()) {
                     state.followupSourceLabel
                 } else {
                     "\"${doc.seedTranscript}\""
                 }
-                Text(
-                    text = tagText,
-                    style = mono(11.sp, tagColor, FontWeight.Medium, 0.06f),
-                    maxLines = 1,
-                    softWrap = false
-                )
-                Text(
-                    text = quoteText,
-                    style = sans(14.sp, Cs.InkSub),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
+                Text(tagText, style = AcType.Caption.copy(color = tagColor), maxLines = 1, softWrap = false)
+                Text(quoteText, style = AcType.BodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-
-            CsIconKey(
+            AcKey(
                 icon = Icons.Sharp.Edit,
                 contentDescription = "Edit voice note",
                 onClick = onOpenNoteEdit,
-                size = 40.dp,
-                radius = 12.dp,
-                iconSize = 20.dp,
+                size = AcKeySize.Small,
                 modifier = Modifier.testTag("cs_note_edit")
             )
         }
 
-        // Scrollable 4-beat Outline Panel — spacious full-text beat cards; tap any beat text or Edit
-        // to edit directly inline; per-beat sparkle rewrites ONLY that beat without blocking others.
         var editingBeatIndex by rememberSaveable { mutableStateOf<Int?>(null) }
         BackHandler(enabled = editingBeatIndex != null) { editingBeatIndex = null }
         LaunchedEffect(doc.id, doc.arcBeats.size) {
@@ -763,86 +615,77 @@ private fun SparkOutlineContent(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .padding(horizontal = 10.dp)
                 .verticalScroll(rememberScrollState())
+                .padding(horizontal = 14.dp, vertical = 4.dp)
                 .testTag("cs_outline_panel"),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             val activeAnchors = (doc.extractedAngles + doc.blindspotAngles).filter { it.selected }
             if (doc.arcBeats.isNotEmpty()) {
-                Row(
+                AcCard(
+                    onClick = vm::toggleAnchorsSheet,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Cs.SunkenTrack)
-                        .border(1.dp, Color(0xFF23232B), RoundedCornerShape(12.dp))
-                        .clickable(role = Role.Button, onClick = vm::toggleAnchorsSheet)
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .testTag("cs_active_anchors_bar"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        .testTag("cs_active_anchors_bar")
                 ) {
-                    Icon(
-                        imageVector = Icons.Sharp.Anchor,
-                        contentDescription = null,
-                        tint = if (activeAnchors.isNotEmpty()) Cs.Amber else Cs.Muted,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Text(
-                        text = if (activeAnchors.isEmpty()) {
-                            "No locked anchors · tap to add"
-                        } else {
-                            "Keeping: " + activeAnchors.joinToString(" · ") { it.label }
-                        },
-                        style = mono(11.5.sp, if (activeAnchors.isNotEmpty()) Cs.InkSub else Cs.Muted),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(
+                            Icons.Sharp.Anchor,
+                            contentDescription = null,
+                            tint = if (activeAnchors.isNotEmpty()) AcTokens.Red else AcTokens.Ink2,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = if (activeAnchors.isEmpty()) {
+                                "No locked anchors · tap to add"
+                            } else {
+                                "Keeping: " + activeAnchors.joinToString(" · ") { it.label }
+                            },
+                            style = AcType.BodySmall.copy(color = if (activeAnchors.isNotEmpty()) AcTokens.Ink else AcTokens.Ink2),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
 
             if (doc.arcBeats.isEmpty()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 260.dp)
-                        .sunkenPanel(radius = 18.dp)
-                        .padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterVertically),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    if (state.isBusy || state.isExtractingAngles) {
-                        ThinkingOrbSolving(size = 60.dp, tint = Cs.White)
-                    }
-                    Text(
-                        text = if (state.isBusy || state.isExtractingAngles) {
-                            state.busyLabel ?: "Outlining your idea into 4 beats…"
-                        } else {
-                            "No 4-beat outline yet."
-                        },
-                        style = sans(16.sp, Cs.Muted, 22.sp)
-                    )
-                    if (!state.isBusy && doc.seedTranscript.isNotBlank()) {
-                        CsKeyLabel(
-                            label = "propose 4-beat outline",
-                            onClick = vm::generateArc,
-                            role = KeyRole.STD,
-                            radius = 14.dp,
-                            modifier = Modifier
-                                .height(44.dp)
-                                .testTag("cs_arc_generate")
+                AcCard(modifier = Modifier.fillMaxWidth().heightIn(min = 240.dp)) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        if (state.isBusy || state.isExtractingAngles) {
+                            ThinkingOrbSolving(size = 56.dp, tint = AcTokens.Ink)
+                        }
+                        Text(
+                            text = if (state.isBusy || state.isExtractingAngles) {
+                                state.busyLabel ?: "Outlining your idea into 4 beats…"
+                            } else {
+                                "No 4-beat outline yet."
+                            },
+                            style = AcType.Body.copy(color = AcTokens.Ink2),
+                            textAlign = TextAlign.Center
                         )
+                        if (!state.isBusy && doc.seedTranscript.isNotBlank()) {
+                            AcKey(
+                                label = "propose 4-beat outline",
+                                onClick = vm::generateArc,
+                                modifier = Modifier.testTag("cs_arc_generate")
+                            )
+                        }
                     }
                 }
             } else {
                 doc.arcBeats.forEachIndexed { i, beat ->
-                    val isRerolling = i in state.rerollingBeatIndices
                     val isEditing = editingBeatIndex == i
-                    OutlineBeatRow(
+                    OutlineBeatCard(
                         index = i,
                         beat = beat,
-                        isRerolling = isRerolling,
+                        isRerolling = i in state.rerollingBeatIndices,
                         isEditing = isEditing,
                         isWholeArcBusy = state.isBusy,
                         onStartEdit = { editingBeatIndex = i },
@@ -854,52 +697,24 @@ private fun SparkOutlineContent(
                         onReroll = {
                             if (editingBeatIndex == i) editingBeatIndex = null
                             vm.rerollArcBeat(i)
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .sunkenPanel(radius = 16.dp)
-                            .then(
-                                when {
-                                    isEditing -> Modifier.border(1.5.dp, Cs.Amber, RoundedCornerShape(16.dp))
-                                    isRerolling -> Modifier.border(1.5.dp, Cs.Cobalt, RoundedCornerShape(16.dp))
-                                    else -> Modifier
-                                }
-                            )
+                        }
                     )
                 }
 
-                // One-tap regenerate all beats without losing your idea note
-                Row(
+                AcKey(
+                    label = "rewrite all 4 beats",
+                    icon = Icons.Sharp.Refresh,
+                    onClick = vm::generateArc,
+                    enabled = !state.isBusy && doc.seedTranscript.isNotBlank(),
+                    size = AcKeySize.Small,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 2.dp, bottom = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    CsKey(
-                        onClick = vm::generateArc,
-                        enabled = !state.isBusy && doc.seedTranscript.isNotBlank(),
-                        role = KeyRole.STD,
-                        radius = 12.dp,
-                        horizontalPadding = 12.dp,
-                        contentAlignment = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(42.dp)
-                            .testTag("cs_arc_rewrite_all")
-                    ) { tint ->
-                        Icon(
-                            imageVector = Icons.Sharp.Refresh,
-                            contentDescription = null,
-                            tint = tint,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text("rewrite all 4 beats", style = mono(12.sp, tint), maxLines = 1)
-                    }
-                }
+                        .padding(bottom = 4.dp)
+                        .testTag("cs_arc_rewrite_all")
+                )
             }
         }
 
-        // Streamlined 2-Key Dock: [Mic HOLD] to steer beats + [make the video ->] straight into Cut!
         val beatsScriptText = remember(doc.arcBeats, doc.seedTranscript) {
             if (doc.arcBeats.isNotEmpty()) {
                 doc.arcBeats.map { it.text.trim() }.filter { it.isNotEmpty() }.joinToString("\n\n")
@@ -908,29 +723,29 @@ private fun SparkOutlineContent(
             }
         }
         val directToVideo = onCreateVideo != null
-        CsDock(
+        StudioDock(
             leading = {
-                CsVoiceDockKey(
-                    label = if (state.isRecordingSteer) "STOP" else "HOLD",
-                    icon = Icons.Sharp.Mic,
-                    held = state.isRecordingSteer,
-                    enabled = !state.isRecordingSeed && !state.isRecordingSplice,
-                    onPress = { onRequestMic { vm.startSteerClutch() } },
-                    onRelease = vm::stopSteerClutch,
-                    modifier = Modifier.testTag("cs_hold_direction")
-                )
+                AcMediaWell(padding = 6.dp) {
+                    AcMediaKey(
+                        icon = Icons.Sharp.Mic,
+                        contentDescription = null,
+                        onPress = { onRequestMic { vm.startSteerClutch() } },
+                        onRelease = vm::stopSteerClutch,
+                        held = state.isRecordingSteer,
+                        enabled = !state.isRecordingSeed && !state.isRecordingSplice,
+                        caption = if (state.isRecordingSteer) "stop" else "hold",
+                        semanticsLabel = if (state.isRecordingSteer) "STOP" else "HOLD",
+                        size = 54.dp,
+                        modifier = Modifier.testTag("cs_hold_direction")
+                    )
+                }
             },
             primaryLabel = if (directToVideo) "make the video" else "write the script",
-            primaryTrailingIcon = Icons.AutoMirrored.Sharp.ArrowForward,
-            primaryRole = KeyRole.COMMIT,
+            primaryIcon = Icons.AutoMirrored.Sharp.ArrowForward,
             primaryEnabled = beatsScriptText.isNotBlank() && !state.isBusy && state.rerollingBeatIndices.isEmpty(),
             primaryTag = if (directToVideo) "cs_create_video" else "cs_write_script",
             onPrimaryClick = {
-                if (onCreateVideo != null) {
-                    onCreateVideo(beatsScriptText)
-                } else {
-                    vm.writeVideoScript()
-                }
+                if (onCreateVideo != null) onCreateVideo(beatsScriptText) else vm.writeVideoScript()
             },
             isBusy = state.isBusy,
             busyLabel = state.busyLabel ?: "outlining beats…"
@@ -939,7 +754,7 @@ private fun SparkOutlineContent(
 }
 
 @Composable
-private fun OutlineBeatRow(
+private fun OutlineBeatCard(
     index: Int,
     beat: ArcBeat,
     isRerolling: Boolean,
@@ -948,208 +763,85 @@ private fun OutlineBeatRow(
     onStartEdit: () -> Unit,
     onSaveEdit: (String) -> Unit,
     onCancelEdit: () -> Unit,
-    onReroll: () -> Unit,
-    modifier: Modifier = Modifier
+    onReroll: () -> Unit
 ) {
     val beatInteractive = !isWholeArcBusy && !isRerolling
-    Column(
-        modifier = modifier
-            .padding(start = 14.dp, top = 12.dp, end = 12.dp, bottom = 14.dp)
-            .testTag("cs_arc_beat_$index"),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+    val window = beat.window.ifBlank { "${beat.startSec}–${beat.endSec}s" }
+    AcCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("cs_arc_beat_$index")
     ) {
-        // Enlarged beat name header (zero tiny pen icon, zero clipped sidebar, single calm rewrite key
-        // that ONLY sparkles while THIS tapped beat is actively rewriting!).
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                text = beat.label,
-                style = ndot(16.sp, Cs.White),
-                maxLines = 1,
-                softWrap = false
-            )
-            Text(
-                text = beat.window.ifBlank { "${beat.startSec}–${beat.endSec}s" },
-                style = mono(11.5.sp, Cs.Muted),
-                maxLines = 1,
-                softWrap = false,
-                modifier = Modifier.weight(1f)
-            )
-            // Only sparkle when actively tapped/rerolling THIS beat; calm static icon otherwise!
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .neumorphicSurface(
-                        role = if (isRerolling) KeyRole.ACTIVE else KeyRole.STD,
-                        pressed = false,
-                        radius = 11.dp,
-                        enabled = beatInteractive || isRerolling
-                    )
-                    .clip(RoundedCornerShape(11.dp))
-                    .clickable(enabled = beatInteractive, role = Role.Button, onClick = onReroll)
-                    .testTag("cs_reroll_beat_$index"),
-                contentAlignment = Alignment.Center
-            ) {
-                if (isRerolling) {
-                    ShimmerSparkleIcon(
-                        contentDescription = "Rewriting beat ${index + 1}",
-                        enabled = true,
-                        size = 22.dp,
-                        phaseOffsetDeg = index * 75f
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Outlined.AutoAwesome,
-                        contentDescription = "Rewrite beat ${index + 1}",
-                        tint = if (beatInteractive) Cs.InkSub else Cs.Dim,
-                        modifier = Modifier.size(20.dp)
+        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SectionCaption("${beat.label} · $window")
+                if (!isEditing) {
+                    Text(
+                        text = if (isRerolling) "Rewriting ${beat.label.lowercase()}…" else beat.text,
+                        style = AcType.Body.copy(color = if (isRerolling) AcTokens.Ink2 else AcTokens.Ink),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = beatInteractive, role = Role.Button, onClick = onStartEdit)
+                            .testTag("cs_beat_text_$index")
                     )
                 }
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                AcKey(
+                    icon = Icons.Sharp.Edit,
+                    contentDescription = "Edit beat ${index + 1}",
+                    onClick = onStartEdit,
+                    selected = isEditing,
+                    enabled = beatInteractive,
+                    size = AcKeySize.Small,
+                    modifier = Modifier.testTag("cs_beat_edit_$index")
+                )
+                AcKey(
+                    icon = Icons.Outlined.AutoAwesome,
+                    contentDescription = if (isRerolling) "Rewriting beat ${index + 1}" else "Rewrite beat ${index + 1}",
+                    onClick = onReroll,
+                    selected = isRerolling,
+                    enabled = beatInteractive || isRerolling,
+                    size = AcKeySize.Small,
+                    modifier = Modifier.testTag("cs_reroll_beat_$index")
+                )
+            }
         }
-
         if (isEditing) {
-            val fieldState = rememberTextFieldState(initialText = beat.text)
-            BasicTextField(
-                state = fieldState,
-                textStyle = sans(16.sp, Cs.White, 23.sp),
-                cursorBrush = SolidColor(Cs.White),
-                lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 2, maxHeightInLines = 6),
+            var text by rememberSaveable(beat.text) { mutableStateOf(beat.text) }
+            AcField(
+                value = text,
+                onValueChange = { text = it },
+                minLines = 2,
+                maxLines = 6,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Cs.Body)
-                    .border(1.dp, Cs.Amber, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
                     .testTag("cs_beat_editor_$index")
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                CsKeyLabel(
+                AcKey(
                     label = "save",
-                    onClick = { onSaveEdit(fieldState.text.toString()) },
-                    role = KeyRole.ACTIVE,
-                    radius = 10.dp,
-                    size = 12.sp,
-                    weight = FontWeight.SemiBold,
-                    enabled = fieldState.text.toString().isNotBlank(),
-                    modifier = Modifier
-                        .height(38.dp)
-                        .testTag("cs_beat_save_$index")
+                    icon = Icons.Sharp.Check,
+                    onClick = { onSaveEdit(text) },
+                    enabled = text.isNotBlank(),
+                    size = AcKeySize.Small,
+                    modifier = Modifier.testTag("cs_beat_save_$index")
                 )
-                CsKeyLabel(
+                AcKey(
                     label = "clear",
-                    onClick = { fieldState.setTextAndPlaceCursorAtEnd("") },
-                    role = KeyRole.STD,
-                    radius = 10.dp,
-                    size = 12.sp,
-                    modifier = Modifier
-                        .height(38.dp)
-                        .testTag("cs_beat_clear_$index")
+                    onClick = { text = "" },
+                    size = AcKeySize.Small,
+                    modifier = Modifier.testTag("cs_beat_clear_$index")
                 )
-                CsKeyLabel(
+                AcKey(
                     label = "cancel",
                     onClick = onCancelEdit,
-                    role = KeyRole.STD,
-                    radius = 10.dp,
-                    size = 12.sp,
-                    modifier = Modifier
-                        .height(38.dp)
-                        .testTag("cs_beat_cancel_$index")
+                    size = AcKeySize.Small,
+                    modifier = Modifier.testTag("cs_beat_cancel_$index")
                 )
-            }
-        } else {
-            Text(
-                text = if (isRerolling) "Rewriting ${beat.label.lowercase()}…" else beat.text,
-                style = sans(16.sp, if (isRerolling) Cs.Cobalt else Cs.Ink, 23.sp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = beatInteractive, role = Role.Button, onClick = onStartEdit)
-                    .testTag("cs_beat_text_$index")
-            )
-        }
-    }
-}
-
-@Composable
-private fun ShotThumbnailKey(
-    shot: ShotSpec,
-    previewPath: String?,
-    isLoading: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val fileModel = previewPath?.takeIf { it.isNotBlank() }?.let(::File)?.takeIf(File::exists)
-    Box(
-        modifier = modifier
-            .width(30.dp)
-            .height(42.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(Cs.Body)
-            .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(6.dp))
-            .clickable(role = Role.Button, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        when {
-            fileModel != null -> {
-                AsyncImage(
-                    model = fileModel,
-                    contentDescription = shot.type.label,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-            isLoading -> {
-                ThinkingOrbSolving(size = 18.dp, tint = Cs.InkSub)
-            }
-            else -> {
-                OfflineShotFallbackGlyph(type = shot.type)
             }
         }
     }
-}
-
-@Composable
-private fun OfflineShotFallbackGlyph(type: ShotType) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .drawBehind {
-                when (type) {
-                    ShotType.FACE -> {
-                        drawRect(Color(0xFF1E1E24))
-                        drawCircle(Color(0xFF5A5A66), radius = 5.dp.toPx(), center = Offset(size.width * 0.5f, size.height * 0.38f))
-                        drawRoundRect(
-                            Color(0xFF2C2C32),
-                            topLeft = Offset(size.width * 0.2f, size.height * 0.56f),
-                            size = Size(size.width * 0.6f, size.height * 0.38f),
-                            cornerRadius = CornerRadius(5.dp.toPx())
-                        )
-                    }
-                    ShotType.PIP -> {
-                        drawRect(Color(0xFF16212E))
-                        drawLine(Color(0xFF1C2A3A), Offset(0f, size.height * 0.35f), Offset(size.width, 0f), 4.dp.toPx())
-                        drawLine(Color(0xFF1C2A3A), Offset(0f, size.height * 0.85f), Offset(size.width, size.height * 0.5f), 4.dp.toPx())
-                        drawCircle(Color(0xFF8E8E96), radius = 4.dp.toPx(), center = Offset(size.width * 0.74f, size.height * 0.78f))
-                    }
-                    ShotType.BROLL -> {
-                        drawRect(Color(0xFF16212E))
-                        drawLine(Color(0xFF1C2A3A), Offset(0f, size.height * 0.35f), Offset(size.width, 0f), 4.dp.toPx())
-                        drawLine(Color(0xFF1C2A3A), Offset(0f, size.height * 0.85f), Offset(size.width, size.height * 0.5f), 4.dp.toPx())
-                    }
-                    ShotType.CARD -> {
-                        drawRect(Color(0xFF1A1A1E))
-                        drawRect(
-                            Color(0xFFD71921),
-                            topLeft = Offset(0f, size.height * 0.54f),
-                            size = Size(size.width, size.height * 0.12f)
-                        )
-                    }
-                }
-            }
-    )
 }
 
 @Composable
@@ -1158,72 +850,34 @@ private fun TypedIdeaBottomSheet(
     onDismiss: () -> Unit,
     onSubmit: (String) -> Unit
 ) {
-    val fieldState = rememberTextFieldState(initialText = initialText)
-    Box(Modifier.fillMaxSize()) {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.6f))
-                .clickable(onClick = onDismiss)
-        )
-        Column(
+    var text by rememberSaveable { mutableStateOf(initialText) }
+    StudioSheet(
+        title = "Type your idea",
+        onDismiss = onDismiss,
+        closeTag = "cs_typed_note_close",
+        closeDescription = "Close",
+        modifier = Modifier
+            .padding(bottom = 12.dp)
+            .testTag("cs_typed_note_sheet")
+    ) {
+        AcField(
+            value = text,
+            onValueChange = { text = it },
+            placeholder = "Rough notes are fine. What's the clip about?",
+            minLines = 4,
+            maxLines = 8,
             modifier = Modifier
-                .align(Alignment.BottomCenter)
+                .padding(horizontal = 14.dp)
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp))
-                .background(Cs.Sheet)
-                .padding(start = 16.dp, end = 16.dp, bottom = 24.dp)
-                .testTag("cs_typed_note_sheet"),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            SheetDragHandle()
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Type your idea",
-                    style = sans(20.sp, Cs.Ink, 26.sp, FontWeight.Medium),
-                    modifier = Modifier.weight(1f)
-                )
-                CsIconKey(
-                    icon = Icons.Sharp.Close,
-                    contentDescription = "Close",
-                    onClick = onDismiss,
-                    modifier = Modifier.testTag("cs_typed_note_close")
-                )
-            }
-            BasicTextField(
-                state = fieldState,
-                textStyle = sans(16.sp, Cs.Ink, 23.sp),
-                cursorBrush = SolidColor(Cs.Ink),
-                lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 4, maxHeightInLines = 8),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 120.dp)
-                    .sunkenPanel(radius = 16.dp)
-                    .padding(14.dp)
-                    .testTag("cs_voice_note_editor"),
-                decorator = { inner ->
-                    Box {
-                        if (fieldState.text.isEmpty()) {
-                            Text(
-                                "Rough notes are fine. What's the clip about?",
-                                style = sans(16.sp, Cs.Dim, 23.sp)
-                            )
-                        }
-                        inner()
-                    }
-                }
-            )
-            CsDock(
-                primaryLabel = "outline this idea",
-                primaryTrailingIcon = Icons.AutoMirrored.Sharp.ArrowForward,
-                primaryEnabled = fieldState.text.toString().isNotBlank(),
-                primaryTag = "cs_typed_note_submit",
-                onPrimaryClick = { onSubmit(fieldState.text.toString()) }
-            )
-        }
+                .testTag("cs_voice_note_editor")
+        )
+        StudioDock(
+            primaryLabel = "outline this idea",
+            primaryIcon = Icons.AutoMirrored.Sharp.ArrowForward,
+            primaryEnabled = text.isNotBlank(),
+            primaryTag = "cs_typed_note_submit",
+            onPrimaryClick = { onSubmit(text) }
+        )
     }
 }
 
@@ -1235,79 +889,51 @@ private fun NoteEditBottomSheet(
     onClose: () -> Unit
 ) {
     val doc = state.document
-    val fieldState = rememberTextFieldState(initialText = doc.seedTranscript)
+    var text by rememberSaveable { mutableStateOf(doc.seedTranscript) }
     LaunchedEffect(doc.seedTranscript) {
-        if (fieldState.text.toString() != doc.seedTranscript) {
-            fieldState.setTextAndPlaceCursorAtEnd(doc.seedTranscript)
-        }
+        if (text != doc.seedTranscript) text = doc.seedTranscript
     }
 
-    Box(Modifier.fillMaxSize()) {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.6f))
-                .clickable(onClick = onClose)
-        )
-        Column(
+    StudioSheet(
+        title = "Edit your note",
+        onDismiss = onClose,
+        closeTag = "cs_note_edit_close",
+        closeDescription = "Close note editor",
+        modifier = Modifier
+            .padding(bottom = 12.dp)
+            .testTag("cs_note_edit_sheet")
+    ) {
+        AcField(
+            value = text,
+            onValueChange = { text = it },
+            minLines = 3,
+            maxLines = 7,
             modifier = Modifier
-                .align(Alignment.BottomCenter)
+                .padding(horizontal = 14.dp)
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp))
-                .background(Cs.Sheet)
-                .padding(start = 16.dp, end = 16.dp, bottom = 24.dp)
-                .testTag("cs_note_edit_sheet"),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .testTag("cs_voice_note_editor")
+        )
+
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            SheetDragHandle()
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Edit your note",
-                    style = sans(20.sp, Cs.Ink, 26.sp, FontWeight.Medium),
-                    modifier = Modifier.weight(1f)
-                )
-                CsIconKey(
-                    icon = Icons.Sharp.Close,
-                    contentDescription = "Close note editor",
-                    onClick = onClose,
-                    modifier = Modifier.testTag("cs_note_edit_close")
-                )
-            }
-
-            BasicTextField(
-                state = fieldState,
-                textStyle = sans(15.sp, Cs.Ink, 22.sp),
-                cursorBrush = SolidColor(Cs.Ink),
-                lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 3, maxHeightInLines = 7),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 100.dp)
-                    .sunkenPanel(radius = 16.dp)
-                    .padding(14.dp)
-                    .testTag("cs_voice_note_editor")
+            AcKey(
+                label = "keep last 15s",
+                onClick = {
+                    vm.distillLast15Seconds()
+                    onClose()
+                },
+                enabled = !state.isBusy && doc.seedTranscript.isNotBlank(),
+                modifier = Modifier.testTag("cs_keep_15s")
             )
-
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                CsKeyLabel(
-                    label = "keep last 15s",
-                    onClick = {
-                        vm.distillLast15Seconds()
-                        onClose()
-                    },
-                    enabled = !state.isBusy && doc.seedTranscript.isNotBlank(),
-                    radius = 14.dp,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                        .testTag("cs_keep_15s")
-                )
-                CsHoldKey(
+            AcMediaWell(padding = 6.dp, modifier = Modifier.weight(1f)) {
+                AcMediaKey(
+                    icon = Icons.Sharp.Mic,
+                    contentDescription = null,
                     label = if (state.isRecordingSeed) "recording…" else "hold to re-record",
                     onPress = {
                         onRequestMic {
@@ -1322,38 +948,36 @@ private fun NoteEditBottomSheet(
                     },
                     held = state.isRecordingSeed,
                     enabled = !state.isRecordingSteer && !state.isRecordingSplice,
-                    radius = 14.dp,
-                    size = 12.sp,
+                    size = 54.dp,
                     modifier = Modifier
                         .weight(1f)
-                        .height(48.dp)
                         .testTag("cs_rerecord")
                 )
             }
-
-            CsDock(
-                leading = {
-                    CsDockSideKey(
-                        label = "new idea",
-                        icon = Icons.Sharp.Add,
-                        onClick = {
-                            vm.resetNewDraft()
-                            onClose()
-                        },
-                        modifier = Modifier.testTag("cs_reset_draft")
-                    )
-                },
-                primaryLabel = "save & re-outline",
-                primaryTrailingIcon = Icons.Sharp.Check,
-                primaryEnabled = fieldState.text.toString().isNotBlank() && !state.isBusy,
-                primaryTag = "cs_note_save",
-                onPrimaryClick = {
-                    val edited = fieldState.text.toString()
-                    onClose()
-                    vm.submitTypedNote(edited)
-                }
-            )
         }
+
+        StudioDock(
+            leading = {
+                AcKey(
+                    label = "new idea",
+                    icon = Icons.Sharp.Add,
+                    onClick = {
+                        vm.resetNewDraft()
+                        onClose()
+                    },
+                    modifier = Modifier.testTag("cs_reset_draft")
+                )
+            },
+            primaryLabel = "save & re-outline",
+            primaryIcon = Icons.Sharp.Check,
+            primaryEnabled = text.isNotBlank() && !state.isBusy,
+            primaryTag = "cs_note_save",
+            onPrimaryClick = {
+                val edited = text
+                onClose()
+                vm.submitTypedNote(edited)
+            }
+        )
     }
 }
 
@@ -1365,195 +989,129 @@ private fun AnchorsBottomSheet(
 ) {
     val doc = state.document
     val count = state.selectedAnchorCount
-    Box(Modifier.fillMaxSize()) {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.6f))
-                .clickable { vm.setAnchorsSheetOpen(false) }
-        )
+    StudioSheet(
+        title = "Anchors",
+        subtitle = "Points the script has to keep. Everything else can change.",
+        onDismiss = { vm.setAnchorsSheetOpen(false) },
+        closeTag = "cs_anchors_close",
+        closeDescription = "Close anchors",
+        modifier = Modifier.testTag("cs_anchors_sheet")
+    ) {
         Column(
             modifier = Modifier
-                .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp))
-                .background(Cs.Sheet)
+                .heightIn(max = 560.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(start = 14.dp, end = 14.dp, bottom = 28.dp)
-                .testTag("cs_anchors_sheet"),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .padding(horizontal = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            SheetDragHandle()
+            Text(
+                "Red keys are kept. Turning a point on or off changes nothing until you tap the red key below; " +
+                    "then all 4 beats are rewritten to keep the red points.",
+                style = AcType.BodySmall,
+                modifier = Modifier.testTag("cs_anchors_explainer")
+            )
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Top,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Sharp.Anchor,
-                    contentDescription = null,
-                    tint = Cs.Ink,
-                    modifier = Modifier
-                        .padding(top = 2.dp)
-                        .size(26.dp)
-                )
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    Text("Anchors", style = sans(20.sp, Cs.Ink, 26.sp, FontWeight.Medium))
-                    Text(
-                        "Points the script has to keep. Everything else can change.",
-                        style = sans(14.sp, Cs.Muted, 20.sp)
-                    )
-                }
-                CsIconKey(
-                    icon = Icons.Sharp.Close,
-                    contentDescription = "Close anchors",
-                    onClick = { vm.setAnchorsSheetOpen(false) },
-                    modifier = Modifier.testTag("cs_anchors_close")
-                )
-            }
-
-            Text("FROM YOUR NOTE", style = SectionLabelStyle)
+            SectionCaption("From your note")
             if (doc.extractedAngles.isEmpty()) {
                 Text(
                     text = if (state.isExtractingAngles) "Extracting points from your note…" else "No extracted points yet.",
-                    style = sans(14.sp, Cs.Muted, 20.sp)
+                    style = AcType.BodySmall
                 )
             } else {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     doc.extractedAngles.forEach { chip ->
-                        CsPill(
+                        AcKey(
                             label = chip.label,
-                            selected = chip.selected,
                             icon = if (chip.selected) Icons.Sharp.Anchor else Icons.Sharp.Add,
+                            selected = chip.selected,
                             onClick = { vm.toggleAngleChip(chip.id) },
+                            size = AcKeySize.Small,
                             modifier = Modifier.testTag("cs_keep_${chip.id}")
                         )
                     }
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("SUGGESTED", style = SectionLabelStyle, modifier = Modifier.weight(1f))
-                CsPill(
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                SectionCaption("Suggested", modifier = Modifier.weight(1f))
+                AcKey(
                     label = "more",
-                    selected = false,
                     icon = Icons.Sharp.Refresh,
                     enabled = doc.seedTranscript.isNotBlank() && !state.isBusy,
                     onClick = vm::refreshAnglesFromSeed,
+                    size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_fresh_angles")
                 )
             }
 
             if (doc.blindspotAngles.isEmpty() && doc.steeringConstraints.isEmpty()) {
-                Text("No suggested angles yet.", style = sans(14.sp, Cs.Muted, 20.sp))
+                Text("No suggested angles yet.", style = AcType.BodySmall)
             } else {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     doc.blindspotAngles.forEach { chip ->
-                        CsPill(
+                        AcKey(
                             label = chip.label,
-                            selected = chip.selected,
                             icon = if (chip.selected) Icons.Sharp.Anchor else Icons.Sharp.Add,
+                            selected = chip.selected,
                             onClick = { vm.toggleAngleChip(chip.id) },
+                            size = AcKeySize.Small,
                             modifier = Modifier.testTag("cs_angle_${chip.id}")
                         )
                     }
                     doc.steeringConstraints.forEachIndexed { idx, steer ->
-                        CsPill(
+                        AcKey(
                             label = steer,
-                            selected = true,
                             icon = Icons.Sharp.Anchor,
+                            selected = true,
                             onClick = { vm.removeSteeringConstraint(idx) },
+                            size = AcKeySize.Small,
                             modifier = Modifier.testTag("cs_steer_$idx")
                         )
                     }
                 }
             }
 
-            val customAnchorState = rememberTextFieldState()
-            Row(
+            var custom by rememberSaveable { mutableStateOf("") }
+            AcField(
+                value = custom,
+                onValueChange = { custom = it },
+                placeholder = "Add a point you want included…",
+                singleLine = true,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .sunkenPanel(radius = 12.dp)
-                    .padding(start = 12.dp, top = 4.dp, end = 4.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                BasicTextField(
-                    state = customAnchorState,
-                    textStyle = sans(14.sp, Cs.Ink, 20.sp),
-                    cursorBrush = SolidColor(Cs.Ink),
-                    lineLimits = TextFieldLineLimits.SingleLine,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("cs_anchor_custom_input"),
-                    decorator = { inner ->
-                        Box {
-                            if (customAnchorState.text.isEmpty()) {
-                                Text("Add a point you want included…", style = sans(14.sp, Cs.Dim, 20.sp))
+                    .testTag("cs_anchor_custom_input"),
+                trailing = {
+                    AcKey(
+                        label = "add",
+                        onClick = {
+                            val txt = custom.trim()
+                            if (txt.isNotEmpty()) {
+                                vm.addCustomAnchor(txt)
+                                custom = ""
                             }
-                            inner()
-                        }
-                    }
-                )
-                CsKeyLabel(
-                    label = "add",
-                    onClick = {
-                        val txt = customAnchorState.text.toString().trim()
-                        if (txt.isNotEmpty()) {
-                            vm.addCustomAnchor(txt)
-                            customAnchorState.setTextAndPlaceCursorAtEnd("")
-                        }
-                    },
-                    enabled = customAnchorState.text.toString().isNotBlank(),
-                    role = KeyRole.ACTIVE,
-                    radius = 10.dp,
-                    size = 12.sp,
-                    modifier = Modifier
-                        .height(38.dp)
-                        .testTag("cs_anchor_custom_add")
-                )
-            }
-
-            CsKey(
-                onClick = { vm.applyAnchorsAndRegenerateBeats() },
-                role = KeyRole.COMMIT,
-                radius = 18.dp,
-                horizontalPadding = 20.dp,
-                contentAlignment = Arrangement.spacedBy(12.dp),
-                modifier = Modifier
-                    .padding(top = 6.dp)
-                    .fillMaxWidth()
-                    .height(60.dp)
-                    .testTag("cs_anchors_done")
-            ) { tint ->
-                Text(
-                    text = if (state.anchorsDirtyForBeats) {
-                        "apply $count anchor${if (count == 1) "" else "s"} & update beats"
-                    } else {
-                        "keep $count anchor${if (count == 1) "" else "s"}"
-                    },
-                    style = mono(14.sp, tint, FontWeight.Medium),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Icon(Icons.Sharp.Check, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
-            }
+                        },
+                        enabled = custom.isNotBlank(),
+                        size = AcKeySize.Small,
+                        modifier = Modifier.testTag("cs_anchor_custom_add")
+                    )
+                }
+            )
         }
+
+        AcPrimaryKey(
+            label = if (state.anchorsDirtyForBeats) {
+                "apply $count anchor${if (count == 1) "" else "s"} & update beats"
+            } else {
+                "keep $count anchor${if (count == 1) "" else "s"}"
+            },
+            icon = Icons.Sharp.Check,
+            onClick = { vm.applyAnchorsAndRegenerateBeats() },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 14.dp, end = 14.dp, bottom = 18.dp)
+                .testTag("cs_anchors_done")
+        )
     }
 }
 
@@ -1563,60 +1121,24 @@ private fun FollowupBottomSheet(
     video: LastVideoSummary,
     vm: DraftDeckViewModel
 ) {
-    Box(Modifier.fillMaxSize()) {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.6f))
-                .clickable(onClick = vm::closeContinueSheet)
-        )
+    StudioSheet(
+        title = "Follow up your last video",
+        onDismiss = vm::closeContinueSheet,
+        closeTag = "cs_followup_close",
+        closeDescription = "Close follow-up sheet",
+        fill = true,
+        modifier = Modifier.testTag("cs_followup_sheet")
+    ) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(top = 118.dp)
-                .clip(RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp))
-                .background(Cs.Sheet)
-                .testTag("cs_followup_sheet")
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 14.dp, top = 4.dp, end = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            SheetDragHandle()
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 18.dp, end = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = "Follow up your last video",
-                    style = sans(20.sp, Cs.Ink, 26.sp, FontWeight.Medium),
-                    modifier = Modifier.weight(1f)
-                )
-                CsIconKey(
-                    icon = Icons.Sharp.Close,
-                    contentDescription = "Close follow-up sheet",
-                    onClick = vm::closeContinueSheet,
-                    modifier = Modifier.testTag("cs_followup_close")
-                )
-            }
-
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(start = 12.dp, top = 10.dp, end = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                // 1. Sunken Last Video Card
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .sunkenPanel(radius = 18.dp, fill = Cs.SunkenTrack)
-                        .padding(10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+            AcCard(contentPadding = PaddingValues(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     VideoThumbBox(
                         thumbPath = video.thumbFilePath,
                         remoteUrl = video.remoteThumbUrl,
@@ -1625,29 +1147,15 @@ private fun FollowupBottomSheet(
                         modifier = Modifier
                             .width(64.dp)
                             .height(84.dp)
-                            .clip(RoundedCornerShape(12.dp))
                     )
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            text = "LAST VIDEO · ${formatRelativeAgeUpper(video.updatedAtMillis)} · ${mmss(video.durationMs)}",
-                            style = SectionLabelStyle,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = video.title,
-                            style = sans(16.sp, Cs.Ink, 21.sp, FontWeight.Medium),
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        SectionCaption("Last video · ${formatRelativeAgeUpper(video.updatedAtMillis)} · ${mmss(video.durationMs)}")
+                        Text(video.title, style = AcType.Body, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         val reply = video.topReplyQuestion?.trim().orEmpty()
                         if (reply.isNotEmpty()) {
                             Text(
                                 text = "Most asked in replies: \"$reply\"",
-                                style = sans(13.sp, Cs.Muted, 18.sp),
+                                style = AcType.BodySmall,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.testTag("cs_followup_top_reply")
@@ -1655,143 +1163,88 @@ private fun FollowupBottomSheet(
                         }
                     }
                 }
+            }
 
-                // 2. FOLLOW-UP ANGLE 3-way sunken segmented control
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("FOLLOW-UP ANGLE", style = SectionLabelStyle, modifier = Modifier.padding(horizontal = 4.dp))
-                    CsSegmentedRow {
-                        val angles = listOf(
-                            Triple("answer", "answer", Icons.Sharp.Forum),
-                            Triple("part_2", "part 2", Icons.Sharp.Layers),
-                            Triple("update", "update", Icons.Sharp.Update)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SectionCaption("Follow-up angle")
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        Triple("answer", "answer", Icons.Sharp.Forum),
+                        Triple("part_2", "part 2", Icons.Sharp.Layers),
+                        Triple("update", "update", Icons.Sharp.Update)
+                    ).forEach { (wire, label, icon) ->
+                        AcKey(
+                            label = label,
+                            icon = icon,
+                            selected = state.followupDirection == null && state.followupAngle == wire,
+                            onClick = { vm.selectFollowupAngle(wire) },
+                            size = AcKeySize.Small,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("cs_followup_angle_$wire")
                         )
-                        angles.forEach { (wire, label, icon) ->
-                            val selected = state.followupDirection == null && state.followupAngle == wire
-                            CsSegment(
-                                selected = selected,
-                                onClick = { vm.selectFollowupAngle(wire) },
-                                height = 44.dp,
-                                modifier = Modifier.testTag("cs_followup_angle_$wire")
-                            ) { tint ->
-                                Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
-                                Text(label, style = mono(13.sp, tint), maxLines = 1)
-                            }
-                        }
                     }
                 }
+            }
 
-                // 3. DRAFT FOLLOW-UP · 60S
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("DRAFT FOLLOW-UP · 60S", style = SectionLabelStyle, modifier = Modifier.weight(1f))
-                        val followNote = when {
-                            state.isDraftingFollowup -> "drafting…"
-                            state.followupDirection != null -> state.followupDirection
-                            state.followupAngle == "answer" -> if (!video.topReplyQuestion.isNullOrBlank()) "from replies" else "answer"
-                            state.followupAngle == "part_2" -> "goes deeper"
-                            state.followupAngle == "update" -> "what changed"
-                            else -> ""
-                        }
-                        if (followNote.isNotBlank()) {
-                            Text(followNote, style = mono(11.sp, Cs.Muted), maxLines = 1)
-                        }
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    SectionCaption("Draft follow-up · 60s", modifier = Modifier.weight(1f))
+                    val followNote = when {
+                        state.isDraftingFollowup -> "drafting…"
+                        state.followupDirection != null -> state.followupDirection
+                        state.followupAngle == "answer" -> if (!video.topReplyQuestion.isNullOrBlank()) "from replies" else "answer"
+                        state.followupAngle == "part_2" -> "goes deeper"
+                        state.followupAngle == "update" -> "what changed"
+                        else -> ""
                     }
-
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .sunkenPanel(radius = 18.dp)
-                            .testTag("cs_followup_beats")
-                    ) {
-                        if (state.followupBeats.isEmpty()) {
-                            Row(
-                                modifier = Modifier.padding(16.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                if (state.isDraftingFollowup) {
-                                    ThinkingOrbSolving(size = 24.dp, tint = Cs.Ink)
-                                }
+                    if (followNote.isNotBlank()) SectionCaption(followNote)
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("cs_followup_beats"),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (state.followupBeats.isEmpty()) {
+                        AcCard(modifier = Modifier.fillMaxWidth()) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                if (state.isDraftingFollowup) ThinkingOrbSolving(size = 24.dp, tint = AcTokens.Ink)
                                 Text(
-                                    text = if (state.isDraftingFollowup) {
-                                        "Drafting 4-beat follow-up…"
-                                    } else {
-                                        "Select a follow-up angle above to draft beats."
-                                    },
-                                    style = sans(15.sp, Cs.Muted, 21.sp)
+                                    text = if (state.isDraftingFollowup) "Drafting 4-beat follow-up…" else "Select a follow-up angle above to draft beats.",
+                                    style = AcType.BodySmall
                                 )
                             }
-                        } else {
-                            state.followupBeats.forEachIndexed { idx, fb ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .then(if (idx > 0) Modifier.hairlineTop(Cs.Body) else Modifier)
-                                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    Column(
-                                        modifier = Modifier.width(52.dp),
-                                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                                    ) {
-                                        Text(fb.label, style = mono(11.sp, Cs.Ink, FontWeight.Medium), maxLines = 1)
-                                        Text(
-                                            fb.window.ifBlank { "${fb.startSec}–${fb.endSec}s" },
-                                            style = mono(11.sp, Cs.Muted),
-                                            maxLines = 1
-                                        )
-                                    }
-                                    Text(
-                                        text = fb.text,
-                                        style = sans(15.sp, if (state.isDraftingFollowup) Cs.Dim else Cs.Ink, 21.sp),
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                }
+                        }
+                    } else {
+                        state.followupBeats.forEach { fb ->
+                            AcCard(
+                                tag = "${fb.label} · ${fb.window.ifBlank { "${fb.startSec}–${fb.endSec}s" }}",
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(fb.text, style = AcType.Body.copy(color = if (state.isDraftingFollowup) AcTokens.Ink2 else AcTokens.Ink))
                             }
                         }
                     }
                 }
             }
-
-            CsDock(
-                leading = {
-                    CsDockSideKey(
-                        label = "new idea",
-                        icon = Icons.Sharp.Add,
-                        onClick = vm::closeContinueSheet,
-                        modifier = Modifier.testTag("cs_followup_new_idea")
-                    )
-                },
-                primaryLabel = "use this follow-up",
-                primaryTrailingIcon = Icons.AutoMirrored.Sharp.ArrowForward,
-                primaryEnabled = state.followupBeats.isNotEmpty() && !state.isDraftingFollowup,
-                primaryTag = "cs_followup_use",
-                onPrimaryClick = { vm.loadFollowupIntoSpark(videoOverride = video) },
-                modifier = Modifier.padding(bottom = 14.dp)
-            )
         }
-    }
-}
 
-@Composable
-private fun SheetDragHandle() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(20.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .width(40.dp)
-                .height(4.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(Cs.Dim)
+        StudioDock(
+            leading = {
+                AcKey(
+                    label = "new idea",
+                    icon = Icons.Sharp.Add,
+                    onClick = vm::closeContinueSheet,
+                    modifier = Modifier.testTag("cs_followup_new_idea")
+                )
+            },
+            primaryLabel = "use this follow-up",
+            primaryIcon = Icons.AutoMirrored.Sharp.ArrowForward,
+            primaryEnabled = state.followupBeats.isNotEmpty() && !state.isDraftingFollowup,
+            primaryTag = "cs_followup_use",
+            onPrimaryClick = { vm.loadFollowupIntoSpark(videoOverride = video) },
+            modifier = Modifier.padding(bottom = 8.dp)
         )
     }
 }
