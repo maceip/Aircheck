@@ -379,6 +379,60 @@ class MacRigGatewayAndSessionContractTest {
     }
 
     @Test
+    fun chopTalkingHeadIntoBroll_sendsEditRangesAndBrollSegments() = runTest {
+        val chopBodies = CopyOnWriteArrayList<String>()
+        val srv = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        srv.createContext("/v1/jobs/task_") { serveRigTask(it) }
+        srv.createContext("/v1/core/chop-broll") { ex ->
+            chopBodies.add(ex.requestBody.readBytes().toString(Charsets.UTF_8))
+            val p = srv.address.port
+            val json = """{"job_id":"cut_02","video_url":"http://127.0.0.1:$p/v1/renders/cut_02.mp4","duration_ms":2500,
+                "broll_cut_count":1,"applied_overlay_count":0,"remotion_used":false,"renderer":"ffmpeg"}""".toByteArray()
+            respondAsyncTask(ex, json)
+        }
+        srv.start()
+        server = srv
+        val baseUrl = "http://127.0.0.1:${srv.address.port}"
+        gateway.chopTalkingHeadIntoBroll(
+            rigBaseUrl = baseUrl,
+            scriptId = "s_2",
+            title = "Cut",
+            sourceJobId = "head_2",
+            sourceMp4Sha = null,
+            clauses = listOf(CoreStoryClause(id = "c_0", spokenText = "Hi.", startMs = 0L, endMs = 4000L)),
+            renderOptions = CoreRenderOptions(),
+            editRanges = listOf(0L to 1500L, 2500L to 4000L),
+            brollSegments = listOf(
+                BrollSegment(id = "seg_a", startMs = 2600L, durationMs = 900L, prompt = "Harbour at dawn",
+                    mediaId = "bmedia_0123456789ab.jpg", framingOverride = "full", originClauseId = "c_0")
+            )
+        )
+        val payload = JSONObject(chopBodies.single())
+        val ranges = payload.getJSONArray("edit_ranges")
+        assertEquals(2, ranges.length())
+        assertEquals(2500L, ranges.getJSONObject(1).getLong("start_ms"))
+        assertEquals(4000L, ranges.getJSONObject(1).getLong("end_ms"))
+        val seg = payload.getJSONArray("broll_segments").getJSONObject(0)
+        assertEquals("seg_a", seg.getString("id"))
+        assertEquals(2600L, seg.getLong("start_ms"))
+        assertEquals(900L, seg.getLong("duration_ms"))
+        assertEquals("Harbour at dawn", seg.getString("b_roll_prompt"))
+        assertEquals("bmedia_0123456789ab.jpg", seg.getString("broll_media_id"))
+        assertEquals("full", seg.getString("broll_framing"))
+        assertEquals("c_0", seg.getString("origin_clause_id"))
+
+        // Untrimmed, no segments: neither key is sent (legacy rigs see the old request).
+        chopBodies.clear()
+        gateway.chopTalkingHeadIntoBroll(
+            rigBaseUrl = baseUrl, scriptId = "s_2", title = "Cut", sourceJobId = "head_2", sourceMp4Sha = null,
+            clauses = listOf(CoreStoryClause(id = "c_0", spokenText = "Hi.", startMs = 0L, endMs = 4000L)),
+            renderOptions = CoreRenderOptions()
+        )
+        val plain = JSONObject(chopBodies.single())
+        assertTrue(!plain.has("edit_ranges") && !plain.has("broll_segments"))
+    }
+
+    @Test
     fun corePipelineSession_legacyV5JsonBackwardCompatAndRoundTrip() = runTest {
         // Legacy Room v5 JSON lacking all new M4-1 defaulted fields
         val legacyJson = """

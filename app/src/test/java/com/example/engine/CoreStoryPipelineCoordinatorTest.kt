@@ -352,6 +352,67 @@ class CoreStoryPipelineCoordinatorTest {
     }
 
     @Test
+    fun stage4_sendsTrimSplitAndTimedBroll_andRoutesOffSentenceEditsToFfmpeg() = runTest {
+        profileStore.setPhoneOnlyVoiceMode(false)
+        val coordinator = buildCoordinator()
+        val headFile = tempFolder.newFile("head_cut.mp4").apply { writeBytes("MP4".toByteArray()) }
+        val headSha = casStore.putFile(headFile, "mp4").sha256
+        val base = CorePipelineSession(
+            id = "pipe_cut",
+            scriptId = "script_cut",
+            stage = CorePipelineStage.CHOP_INTO_BROLL,
+            clauses = listOf(
+                CoreStoryClause(id = "c0", index = 0, spokenText = "Lead story.", startMs = 0L, endMs = 2000L),
+                CoreStoryClause(
+                    id = "c1", index = 1, spokenText = "Second line.", startMs = 2000L, endMs = 4000L,
+                    segmentMode = BrollSegmentMode.BROLL_CUTAWAY, bRollPrompt = "City skyline"
+                )
+            ),
+            ttsDurationMs = 4000L,
+            talkingHeadJobId = "head_job_cut",
+            talkingHeadSha = headSha
+        )
+        suspend fun chop(session: CorePipelineSession) {
+            val res = coordinator.chopTalkingHeadIntoBrollStage4(
+                session = session,
+                rigBaseUrl = "http://127.0.0.1:8443",
+                allSavedOverlays = emptyList()
+            )
+            assertTrue(res.isSuccess)
+        }
+
+        // The sentence tag on c1 is migrated to a timed segment at its window; untrimmed and
+        // sentence-aligned, so it stays on Remotion.
+        chop(base)
+        assertEquals(null, fakeGateway.lastChopEditRanges)
+        val migrated = checkNotNull(fakeGateway.lastChopBrollSegments).single()
+        assertEquals(2000L, migrated.startMs)
+        assertEquals(2000L, migrated.durationMs)
+        assertEquals("City skyline", migrated.prompt)
+        assertEquals("c1", migrated.originClauseId)
+        assertEquals(true, fakeGateway.lastChopUseRemotion)
+
+        // Split at 1.5s and drop the first piece: edit ranges go to the rig and force FFmpeg.
+        val clips = com.example.data.CutTimeline.split(com.example.data.CutTimeline.effectiveClips(base), 1500L)
+        val trimmed = base.copy(cutClips = com.example.data.CutTimeline.remove(clips, clips.first().id))
+        chop(trimmed)
+        assertEquals(listOf(1500L to 4000L), fakeGateway.lastChopEditRanges)
+        assertEquals(false, fakeGateway.lastChopUseRemotion)
+
+        // A B-roll segment dragged off its sentence window also needs FFmpeg.
+        val normalized = com.example.data.CutTimeline.normalize(base)
+        val moved = normalized.copy(
+            brollSegments = com.example.data.CutTimeline.moveSegment(
+                normalized.brollSegments, normalized.brollSegments.single().id, 1000L, 4000L
+            )
+        )
+        chop(moved)
+        assertEquals(null, fakeGateway.lastChopEditRanges)
+        assertEquals(1000L, checkNotNull(fakeGateway.lastChopBrollSegments).single().startMs)
+        assertEquals(false, fakeGateway.lastChopUseRemotion)
+    }
+
+    @Test
     fun stage4_passesAlignedWordsAndUseRemotion_andCoreStageRunnerFormatsSubSecondAnd60sDurations() = runTest {
         profileStore.setPhoneOnlyVoiceMode(false)
         profileStore.recordRemotionInstallRequest("enable remotion", installedOnRig = true)
@@ -637,6 +698,8 @@ class CoreStoryPipelineCoordinatorTest {
         var lastChopWords: List<AlignedWord> = emptyList()
         var lastChopAlignUrl: String? = null
         var lastChopUseRemotion: Boolean? = null
+        var lastChopEditRanges: List<Pair<Long, Long>>? = null
+        var lastChopBrollSegments: List<com.example.data.BrollSegment>? = null
         var pollResponder: ((String) -> MacRigJobSnapshot)? = null
 
         fun defaultReadySnapshot(jobId: String) = MacRigJobSnapshot(
@@ -742,8 +805,12 @@ class CoreStoryPipelineCoordinatorTest {
             task: RigTaskHandle?,
             alignedWords: List<AlignedWord>,
             alignUrl: String?,
-            useRemotion: Boolean?
+            useRemotion: Boolean?,
+            editRanges: List<Pair<Long, Long>>?,
+            brollSegments: List<com.example.data.BrollSegment>?
         ): ChoppedBrollResult {
+            lastChopEditRanges = editRanges
+            lastChopBrollSegments = brollSegments
             lastChopWords = alignedWords
             lastChopAlignUrl = alignUrl
             lastChopUseRemotion = useRemotion

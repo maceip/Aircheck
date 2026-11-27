@@ -1301,7 +1301,7 @@ class StudioViewModel internal constructor(
             coreUndoStack.addLast(CoreUndoEntry(label = label, session = previous, looks = prevLooks))
             while (coreUndoStack.size > MAX_CORE_UNDO) coreUndoStack.removeFirst()
         }
-        val stamped = next.copy(updatedAtMillis = System.currentTimeMillis())
+        val stamped = com.example.data.CutTimeline.normalize(next).copy(updatedAtMillis = System.currentTimeMillis())
         _uiState.update {
             it.copy(
                 corePipelineSession = stamped,
@@ -1311,6 +1311,88 @@ class StudioViewModel internal constructor(
             )
         }
         viewModelScope.launch(Dispatchers.IO) { localRepo.saveCorePipelineSession(stamped) }
+    }
+
+    // ----------------------------------------------------------------- Cut editor edits
+    // Trim/split clips and timed B-roll segments (CutTimeline). Positions from the Cut timeline are in
+    // edited-timeline ms; segments are stored in talking-head source ms. Every edit has undo and
+    // changes cutSignature, so the dock asks for a re-render.
+
+    /** Splits the clip under the playhead ([timelineMs]) into two clips. */
+    fun splitCutAtPlayhead(timelineMs: Long) {
+        val current = _uiState.value.corePipelineSession
+        val clips = com.example.data.CutTimeline.effectiveClips(current)
+        val next = com.example.data.CutTimeline.split(clips, timelineMs)
+        if (next == clips) {
+            showToast("Move the playhead inside a clip to split it")
+            return
+        }
+        commitCoreEdit(current.copy(cutClips = next), label = "Split clip")
+    }
+
+    /** Sets clip [clipId]'s trim in/out points (talking-head source ms). */
+    fun trimCutClip(clipId: String, sourceStartMs: Long, sourceEndMs: Long) {
+        val current = _uiState.value.corePipelineSession
+        val total = com.example.data.CutTimeline.sourceDurationMs(current)
+        val clips = com.example.data.CutTimeline.effectiveClips(current)
+        val next = com.example.data.CutTimeline.trim(clips, clipId, sourceStartMs, sourceEndMs, total)
+        if (next == clips) return
+        commitCoreEdit(current.copy(cutClips = next), label = "Trim clip")
+    }
+
+    /** Drops clip [clipId] from the edit (the last clip can't be removed). */
+    fun removeCutClip(clipId: String) {
+        val current = _uiState.value.corePipelineSession
+        val clips = com.example.data.CutTimeline.effectiveClips(current)
+        val next = com.example.data.CutTimeline.remove(clips, clipId)
+        if (next == clips) return
+        commitCoreEdit(current.copy(cutClips = next), label = "Remove clip")
+    }
+
+    /** Restores the untrimmed talking head. */
+    fun resetCutClips() {
+        val current = _uiState.value.corePipelineSession
+        if (current.cutClips.isEmpty()) return
+        commitCoreEdit(current.copy(cutClips = emptyList()), label = "Reset trims")
+    }
+
+    /** Adds a B-roll cutaway at the playhead ([timelineMs]); its source is set afterwards. */
+    fun addBrollSegmentAtPlayhead(timelineMs: Long, prompt: String = "") {
+        val current = _uiState.value.corePipelineSession
+        val clips = com.example.data.CutTimeline.effectiveClips(current)
+        val sourceMs = com.example.data.CutTimeline.timelineToSource(clips, timelineMs) ?: return
+        val total = com.example.data.CutTimeline.sourceDurationMs(current)
+        val next = com.example.data.CutTimeline.addSegment(current.brollSegments, sourceMs, total, prompt = prompt.trim())
+        if (next == current.brollSegments) return
+        commitCoreEdit(current.copy(brollSegments = next), label = "Add B-roll")
+    }
+
+    /** Drags B-roll segment [segmentId] so it starts at [timelineStartMs] on the edited timeline. */
+    fun moveBrollSegment(segmentId: String, timelineStartMs: Long) {
+        val current = _uiState.value.corePipelineSession
+        val clips = com.example.data.CutTimeline.effectiveClips(current)
+        val sourceMs = com.example.data.CutTimeline.timelineToSource(clips, timelineStartMs.coerceAtLeast(0L)) ?: return
+        val total = com.example.data.CutTimeline.sourceDurationMs(current)
+        val next = com.example.data.CutTimeline.moveSegment(current.brollSegments, segmentId, sourceMs, total)
+        if (next == current.brollSegments) return
+        commitCoreEdit(current.copy(brollSegments = next), label = "Move B-roll")
+    }
+
+    /** Sets B-roll segment [segmentId] to [durationMs]. */
+    fun resizeBrollSegment(segmentId: String, durationMs: Long) {
+        val current = _uiState.value.corePipelineSession
+        val total = com.example.data.CutTimeline.sourceDurationMs(current)
+        val next = com.example.data.CutTimeline.resizeSegment(current.brollSegments, segmentId, durationMs, total)
+        if (next == current.brollSegments) return
+        commitCoreEdit(current.copy(brollSegments = next), label = "Resize B-roll")
+    }
+
+    /** Removes B-roll segment [segmentId] (and the sentence tag it came from, if any). */
+    fun removeBrollSegment(segmentId: String) {
+        val current = _uiState.value.corePipelineSession
+        val next = com.example.data.CutTimeline.removeSegment(current, segmentId)
+        if (next == current) return
+        commitCoreEdit(next, label = "Remove B-roll")
     }
 
     /** Restores and persists the session & newsroom looks as they were before the last edit. */

@@ -76,6 +76,51 @@ data class CoreStoryClause(
         get() = (endMs - startMs).coerceAtLeast(0L)
 }
 
+/**
+ * One kept piece of the talking head on the Cut timeline, in talking-head source ms.
+ * [sourceStartMs]/[sourceEndMs] are the clip's trim in/out points; splitting a clip at the playhead
+ * makes two clips. An empty [CorePipelineSession.cutClips] list means the whole source, untrimmed.
+ */
+@Serializable
+data class CutClip(
+    val id: String = "cut_" + UUID.randomUUID().toString().replace("-", "").take(10),
+    val sourceStartMs: Long,
+    val sourceEndMs: Long
+) {
+    val durationMs: Long
+        get() = (sourceEndMs - sourceStartMs).coerceAtLeast(0L)
+}
+
+/**
+ * A timed B-roll cutaway on the Cut timeline: starts at [startMs] (talking-head source ms) and runs
+ * for [durationMs], showing its source (generated still [mediaId], or a picked photo/video [sha] +
+ * [customExt], or a still generated from [prompt]). Replaces per-sentence B-roll tags.
+ *
+ * [originClauseId] links a segment created from a sentence (or migrated from a sentence tag); while
+ * [lockedToClause] is true its window follows that sentence when the voice is re-timed. Moving or
+ * resizing a segment unlocks it.
+ */
+@Serializable
+data class BrollSegment(
+    val id: String = "seg_" + UUID.randomUUID().toString().replace("-", "").take(10),
+    val startMs: Long,
+    val durationMs: Long,
+    val caption: String = "",
+    val prompt: String = "",
+    val mediaId: String? = null,
+    val sha: String? = null,
+    val customExt: String = "",
+    val previewUrl: String? = null,
+    val framingOverride: String = "",
+    val transitionType: String = ClipTransitionType.CUT.wire,
+    val transitionDurationMs: Int = 350,
+    val originClauseId: String? = null,
+    val lockedToClause: Boolean = false
+) {
+    val endMs: Long
+        get() = startMs + durationMs
+}
+
 @Serializable
 enum class OverlayObjectKind(val label: String) {
     LOWER_THIRD("Lower Third"),
@@ -287,6 +332,10 @@ data class CorePipelineSession(
     val ttsMetrics: RigQualityMetrics? = null,
     val headMetrics: RigQualityMetrics? = null,
     val ttsSource: String = "",
+    /** Kept talking-head clips after trim/split (empty = whole source). See [CutTimeline]. */
+    val cutClips: List<CutClip> = emptyList(),
+    /** Timed B-roll cutaways; the renderer uses these instead of per-sentence tags. See [CutTimeline]. */
+    val brollSegments: List<BrollSegment> = emptyList(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
     /** Everything that changes the studio cut output: clauses, transitions, options, overlays content, and look. */
@@ -317,6 +366,15 @@ data class CorePipelineSession(
             }
         } else {
             append(selectedOverlayIds.sorted().joinToString(",")).append('\n')
+        }
+        cutClips.forEach { append("clip:").append(it.sourceStartMs).append('-').append(it.sourceEndMs).append('|') }
+        append('\n')
+        brollSegments.sortedBy { it.startMs }.forEach {
+            append("seg:").append(it.startMs).append('+').append(it.durationMs).append('|')
+                .append(it.prompt).append('|').append(it.caption).append('|')
+                .append(it.mediaId.orEmpty()).append('|').append(it.sha.orEmpty()).append('|')
+                .append(it.framingOverride).append('|').append(it.transitionType).append(':')
+                .append(it.transitionDurationMs).append('\n')
         }
         append(talkingHeadJobId.orEmpty()).append('\n')
         if (look != null) {

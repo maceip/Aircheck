@@ -3,6 +3,7 @@ package com.example.data.gateway
 import com.example.data.AlignedWord
 import com.example.data.BreakingNewsStyle
 import com.example.data.CoreRenderOptions
+import com.example.data.BrollSegment
 import com.example.data.CoreStoryClause
 import com.example.data.NewsroomLook
 import com.example.data.RigQualityMetrics
@@ -660,7 +661,9 @@ class DirectMacRigGateway(
         task: RigTaskHandle?,
         alignedWords: List<AlignedWord>,
         alignUrl: String?,
-        useRemotion: Boolean?
+        useRemotion: Boolean?,
+        editRanges: List<Pair<Long, Long>>?,
+        brollSegments: List<BrollSegment>?
     ): ChoppedBrollResult = withContext(Dispatchers.IO) {
         val baseUrl = normalizeMacRigBaseUrl(rigBaseUrl)
         val mp4Base64: String? = if (sourceJobId.isNullOrBlank() && !sourceMp4Sha.isNullOrBlank()) {
@@ -724,6 +727,38 @@ class DirectMacRigGateway(
             .put("title", title)
             .put("clauses", clausesArr)
             .put("overlays", overlaysArr)
+        if (editRanges != null) {
+            val rangesArr = JSONArray()
+            editRanges.forEach { (start, end) -> rangesArr.put(JSONObject().put("start_ms", start).put("end_ms", end)) }
+            payload.put("edit_ranges", rangesArr)
+        }
+        if (brollSegments != null) {
+            val segArr = JSONArray()
+            brollSegments.forEach { seg ->
+                val obj = JSONObject()
+                    .put("id", seg.id)
+                    .put("start_ms", seg.startMs)
+                    .put("duration_ms", seg.durationMs)
+                    .put("transition", seg.transitionType.ifBlank { "cut" })
+                    .put("transition_duration_ms", seg.transitionDurationMs.coerceIn(150, 900))
+                if (seg.caption.isNotBlank()) obj.put("broll_caption", seg.caption)
+                if (seg.prompt.isNotBlank()) obj.put("b_roll_prompt", seg.prompt)
+                if (seg.framingOverride.isNotBlank()) obj.put("broll_framing", seg.framingOverride)
+                if (!seg.originClauseId.isNullOrBlank()) obj.put("origin_clause_id", seg.originClauseId)
+                if (!seg.mediaId.isNullOrBlank()) {
+                    obj.put("broll_media_id", seg.mediaId)
+                } else if (!seg.sha.isNullOrBlank() && seg.customExt.isNotBlank()) {
+                    val customFile = casStore.fileForSha(seg.sha, seg.customExt)
+                    if (customFile != null && customFile.isFile && customFile.length() > 0L) {
+                        obj.put("broll_media_base64", Base64.getEncoder().encodeToString(customFile.readBytes()))
+                        obj.put("broll_media_ext", seg.customExt)
+                    }
+                }
+                if (!seg.sha.isNullOrBlank()) obj.put("b_roll_sha", seg.sha)
+                segArr.put(obj)
+            }
+            payload.put("broll_segments", segArr)
+        }
         if (!sourceJobId.isNullOrBlank()) {
             payload.put("source_job_id", sourceJobId)
         }

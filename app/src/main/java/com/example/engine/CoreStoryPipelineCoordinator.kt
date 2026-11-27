@@ -626,9 +626,12 @@ class CoreStoryPipelineCoordinator(
                     IllegalStateException("Complete Stage 3 (Speech Matched to Talking Head) first.")
                 )
             }
-            val activeClauses = session.clauses
+            val edited = com.example.data.CutTimeline.normalize(session)
+            val activeClauses = edited.clauses
                 .filter { it.spokenText.isNotBlank() }
                 .mapIndexed { idx, c -> c.copy(index = idx) }
+            val editRanges = com.example.data.CutTimeline.editRanges(edited)
+            val brollSegments = edited.brollSegments
             if (activeClauses.isEmpty()) {
                 return@withContext Result.failure(
                     IllegalStateException("Story has no clauses to chop.")
@@ -641,7 +644,11 @@ class CoreStoryPipelineCoordinator(
             // not implement trim pauses, non-cut transitions, or the look grade (backdrop plate,
             // blur, exposure, light, grain, border), so a cut that uses any of those goes to the
             // FFmpeg studio_cut compositor, which does. renderOptions.useRemotion forces either one.
-            val needsFfmpegOnlyFeature = session.renderOptions.stripSilence ||
+            // Trim/split edits and B-roll segments that don't cover exactly one sentence are only
+            // honored by the FFmpeg compositor too (the rig enforces the same rule).
+            val needsFfmpegOnlyFeature = editRanges != null ||
+                brollSegments.any { !com.example.data.CutTimeline.isSentenceAligned(edited, it) } ||
+                session.renderOptions.stripSilence ||
                 session.renderOptions.defaultTransition != ClipTransitionType.CUT.wire ||
                 activeClauses.any { it.transitionType != ClipTransitionType.CUT.wire } ||
                 (look != null && (
@@ -666,7 +673,9 @@ class CoreStoryPipelineCoordinator(
                 task = task,
                 alignedWords = session.alignedWords,
                 alignUrl = session.alignUrl,
-                useRemotion = effectiveUseRemotion
+                useRemotion = effectiveUseRemotion,
+                editRanges = editRanges,
+                brollSegments = brollSegments
             )
             val storedFinal = macRigGateway.downloadRenderedMp4ToCas(chopRes.videoUrl)
 
@@ -701,7 +710,7 @@ class CoreStoryPipelineCoordinator(
             )
             localRepo.upsertClip(clip)
 
-            val updatedSession = session.copy(
+            val updatedSession = edited.copy(
                 title = effectiveTitle,
                 stage = CorePipelineStage.FINAL_REVIEW,
                 clauses = activeClauses,

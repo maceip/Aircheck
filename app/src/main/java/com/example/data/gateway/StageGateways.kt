@@ -254,7 +254,11 @@ interface MacRigRenderGateway {
         task: RigTaskHandle? = null,
         alignedWords: List<AlignedWord> = emptyList(),
         alignUrl: String? = null,
-        useRemotion: Boolean? = null
+        useRemotion: Boolean? = null,
+        /** Kept talking-head source ranges after trim/split; null = untrimmed. */
+        editRanges: List<Pair<Long, Long>>? = null,
+        /** Timed B-roll cutaways; null = legacy per-sentence tags only. */
+        brollSegments: List<com.example.data.BrollSegment>? = null
     ): ChoppedBrollResult
 
     /** `POST /v1/core/silence-gaps`: internal pauses in a rig talking-head render. */

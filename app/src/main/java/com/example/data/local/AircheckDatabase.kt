@@ -748,7 +748,8 @@ class AircheckLocalRepository(private val db: AircheckDatabase) :
         db.corePipelineSessionDao().getLatest()?.let { decodeCorePipelineSessionOrNull(it.sessionJson) }
 
     suspend fun saveCorePipelineSession(session: CorePipelineSession) {
-        val stamped = session.copy(updatedAtMillis = System.currentTimeMillis())
+        // Sessions are stored normalized: sentence B-roll tags migrated to timed segments (CutTimeline).
+        val stamped = com.example.data.CutTimeline.normalize(session).copy(updatedAtMillis = System.currentTimeMillis())
         val encoded = json.encodeToString(CorePipelineSession.serializer(), stamped)
         db.corePipelineSessionDao().upsert(
             CorePipelineSessionEntity(
@@ -763,7 +764,7 @@ class AircheckLocalRepository(private val db: AircheckDatabase) :
 
     private fun decodeCorePipelineSessionOrNull(rawJson: String): CorePipelineSession? =
         runCatching {
-            json.decodeFromString(CorePipelineSession.serializer(), rawJson)
+            com.example.data.CutTimeline.normalize(json.decodeFromString(CorePipelineSession.serializer(), rawJson))
         }.getOrNull()
 
     fun observeVoiceManifest(projectId: String): Flow<VoiceProjectManifest?> =
