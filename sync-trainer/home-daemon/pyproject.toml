@@ -26,6 +26,7 @@ voicestudio-ota-server = "ota_server:main"
 
 [tool.setuptools]
 py-modules = ["tinker_voice_daemon", "ota_server"]
+packages = ["media_providers"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

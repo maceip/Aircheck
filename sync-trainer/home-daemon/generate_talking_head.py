@@ -447,7 +447,11 @@ def generate_talking_head(
     whisper_model: Path = DEFAULT_WHISPER_MODEL,
     bl_timeout_sec: int = BL_BEAT_TIMEOUT_SEC,
     use_custom_photo: bool = False,
+    media_config_path: Path | None = None,
 ) -> dict:
+    from media_providers.registry import load_config
+
+    media_config = load_config(media_config_path)
     norm_resolution = normalize_talking_head_resolution(resolution)
     norm_ratio = _validate_ratio_and_duration(ratio, max_duration)
     target_w, target_h = _RESOLUTION_DIMENSIONS[(norm_resolution, norm_ratio)]
@@ -468,6 +472,13 @@ def generate_talking_head(
             master_wav,
             max_duration_sec=max_duration,
         )
+        if media_config.video_backend == "musetalk":
+            from media_providers.musetalk import render
+
+            return render(
+                media_config.musetalk or {}, master_wav=master_wav, avatar=avatar_path,
+                output=output_mp4, width=target_w, height=target_h, duration_ms=total_ms,
+            )
         if not full_transcript and whisper_model.is_file():
             wav16 = tmp_dir / "full_16k.wav"
             _run_subprocess(
@@ -562,6 +573,7 @@ def main() -> int:
     parser.add_argument("--resolution", default="720P", choices=["480P", "720P", "1080P"])
     parser.add_argument("--ratio", default="9:16", choices=["9:16", "16:9", "1:1"])
     parser.add_argument("--max-duration", type=int, default=10, help="Max clip duration in seconds (2..120, default 10)")
+    parser.add_argument("--media-config", type=Path, default=None, help="Opt-in provider configuration; omitted keeps HeyGen")
     parser.add_argument("--custom-photo", action="store_true", help="Animate the supplied --avatar image instead of the default HeyGen look")
     args = parser.parse_args()
 
@@ -574,6 +586,7 @@ def main() -> int:
         ratio=args.ratio,
         max_duration=args.max_duration,
         use_custom_photo=bool(args.custom_photo),
+        media_config_path=args.media_config,
     )
     print(json.dumps(res, indent=2))
     return 0
