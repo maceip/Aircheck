@@ -52,18 +52,16 @@ is from 25 Nov. So the cause of this morning's exit is unrecoverable.
 Fix: a LaunchAgent with `KeepAlive`, always tee supervisor output to a rotated log file, and
 record child exit codes in `state.json`.
 
-### 3. A self-hosted lip-sync engine is built, tunnelled, health-checked and never called
-`backend/lambda-av-studio/video_engine.py` (LivePortrait + LatentSync 1.6, port 8451) is
-forwarded by the SSH tunnel and polled every 2 s, and the supervisor exports
-`AIRCHECK_VIDEO_ENDPOINT` (`main.go:537`). No Python file reads that variable. Video backends
-are only `heygen` and `musetalk` (`media_providers/registry.py:17`). So talking-head video
-always goes to HeyGen while the GPU box's video half sits idle; only its voice half is used.
+### 3. Dead wiring left over from the removed self-hosted lip-sync path
+`backend/lambda-av-studio/video_engine.py` (LivePortrait + LatentSync 1.6, port 8451) is still
+forwarded by the SSH tunnel and polled every 2 s, and the supervisor still exports
+`AIRCHECK_VIDEO_ENDPOINT` (`main.go`). No Python file reads that variable.
 
-This corrects my earlier note: the gap is not just that MuseTalk needs CUDA, it is that the
-remote-GPU video path that already exists was dropped from the registry.
-
-Fix: add a `gpu_endpoint` video backend that calls `:8451`, the mirror of the voice path. That
-is also the slot an EchoMimicV2 server would plug into.
+Correction (same day): this was a deliberate removal, not an accident. Commit `a0664f1` made
+HeyGen Avatar 6 the single talking-head engine and deleted the LatentSync/Lambda path. What
+remains is leftover: a tunnelled port, an env var, a "Lambda Video" status line and the GPU
+box's video half running with no caller. Either remove those, or reuse the slot if a
+self-hosted engine (for example EchoMimicV2) is wanted again.
 
 ### 4. `--media-config` is unreachable and the local adapters cannot work on this host
 - `aircheck-rig` never passes `--media-config`, so `chatterbox_local` and `musetalk` always
@@ -170,8 +168,20 @@ end-to-end test on the rig side.
 1. Bind the daemon to loopback and put LAN behind the capability proxy (finding 1).
 2. LaunchAgent + persistent supervisor log (finding 2).
 3. Pin the SSH host key; move the GPU host out of source (finding 6).
-4. Add the `gpu_endpoint` video backend and load media config from `.aircheck-rig/` (3, 4).
+4. Remove or reuse the dead GPU video wiring; load media config from `.aircheck-rig/` (3, 4).
 5. Report the engine actually used; stop prompting b-roll with the spoken sentence (5).
 6. Supervise MLX; lock the Python environment; add CI (7, 10).
 7. Split `ota_server.py` by stage; add render retention (8).
 8. Choose one compositor (9).
+
+## Fixed on 2026-11-27 (branch `remotion-default`)
+- Supervisor: `restart`, `url`, `doctor`, `install-service` / `uninstall-service`; foreground runs
+  now write `.aircheck-rig/logs/supervisor.log` (rotated at 10 MB) and log the stopping signal,
+  SIGHUP included; `--media-config` is passed when `.aircheck-rig/media-providers.json` exists.
+- Remotion: portrait anchor framed whole in 16:9; overlays timed by `durationSec`; overlay text
+  cut at word boundaries; `caption_count` comes from the worker.
+- Voice: the TTS result carries `voice_engine`, the engine that actually spoke.
+
+Not changed: authentication (by request), the b-roll prompt substitution in finding 5 (it is
+relied on by the arc and reroll flows and by the chop itself, so removing it is a product
+decision), MLX supervision, the Python lock file, CI, the daemon split and render retention.
