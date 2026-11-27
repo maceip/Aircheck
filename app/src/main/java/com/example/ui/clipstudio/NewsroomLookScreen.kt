@@ -326,7 +326,7 @@ fun NewsroomLookScreen(
                         modifier = Modifier.testTag("cs_tweak_ai_button")
                     )
                 },
-                primaryLabel = if (canRenderNow) "apply & render video" else "save overlays",
+                primaryLabel = if (canRenderNow) "apply & render" else "save overlays",
                 primaryTrailingIcon = if (canRenderNow) Icons.Sharp.Movie else Icons.Sharp.Check,
                 primaryRole = KeyRole.COMMIT,
                 primaryEnabled = !isLookBusy && !state.isCoreStageBusy,
