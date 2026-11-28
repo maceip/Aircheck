@@ -646,15 +646,7 @@ class CoreStoryPipelineCoordinator(
             // FFmpeg studio_cut compositor, which does. renderOptions.useRemotion forces either one.
             // Trim/split edits and B-roll segments that don't cover exactly one sentence are only
             // honored by the FFmpeg compositor too (the rig enforces the same rule).
-            val needsFfmpegOnlyFeature = editRanges != null ||
-                brollSegments.any { !com.example.data.CutTimeline.isSentenceAligned(edited, it) } ||
-                session.renderOptions.stripSilence ||
-                session.renderOptions.defaultTransition != ClipTransitionType.CUT.wire ||
-                activeClauses.any { it.transitionType != ClipTransitionType.CUT.wire } ||
-                (look != null && (
-                    look.plateId != null || look.blurPercent != 0 || look.brightnessEv != 0.0 ||
-                        look.light != NewsroomLook.LIGHT_NEUTRAL || look.grain || look.border
-                    ))
+            val needsFfmpegOnlyFeature = com.example.data.GfxLane.needsFfmpegOnlyFeature(edited, look)
             val effectiveUseRemotion = session.renderOptions.useRemotion ?: !needsFfmpegOnlyFeature
             val effectiveTitle = session.title.ifBlank {
                 activeClauses.first().spokenText.take(40)
