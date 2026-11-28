@@ -152,6 +152,43 @@ class AircheckFullClipE2ETest {
             "rig online (override=${override != null})"
         }
 
+        val resume = InstrumentationRegistry.getArguments().getString("resumeFromCut")?.trim() == "true"
+        facts.put("resumed", resume)
+        if (resume) {
+            // Ryan chose "resume from the existing head": reuse the voice + talking head already made on
+            // this phone instead of generating them again. Those stages are SKIPPED, never PASS.
+            val s0 = persisted()
+            val wav = studioVm.casStore.fileForSha(s0.ttsVoiceSha, "wav")
+            val head = studioVm.casStore.fileForSha(s0.talkingHeadSha, "mp4")
+            stage("resume") {
+                assertTrue("latest session ${s0.id} has no voice", s0.hasTtsAudio)
+                assertTrue("latest session ${s0.id} has no talking head", s0.hasTalkingHead)
+                assertTrue("voice wav ${s0.ttsVoiceSha} missing from CAS", wav != null && wav.length() > 1_000L)
+                assertTrue("talking head mp4 ${s0.talkingHeadSha} missing from CAS", head != null && head.length() > 1_000L)
+                composeRule.onNodeWithTag("cs_crumb_2").performClick()
+                waitFor("cut opened on session ${s0.id}", 20_000L) {
+                    composeRule.onAllNodesWithTag("cs_cut_root").fetchSemanticsNodes().isNotEmpty() && session().id == s0.id
+                }
+                // Clear earlier runs' edits so the cut stages start clean: trims and every B-roll block.
+                composeRule.runOnUiThread { studioVm.resetCutClips() }
+                waitFor("trims reset", 5_000L) { persisted().cutClips.isEmpty() }
+                persisted().brollSegments.map { it.id }.forEach { id ->
+                    composeRule.runOnUiThread { studioVm.removeBrollSegment(id) }
+                    waitFor("b-roll $id removed", 5_000L) { persisted().brollSegments.none { it.id == id } }
+                }
+                composeRule.runOnUiThread { studioVm.dismissToast(); studioVm.dismissNotice(); studioVm.dismissError() }
+                val probe = probeVideo(Uri.fromFile(head!!))
+                facts.put("tts_source", s0.ttsSource.ifBlank { "unknown" })
+                facts.put("tts_duration_ms", s0.ttsDurationMs)
+                facts.put("head_video", probe)
+                screenshot("resume_cut")
+                "session ${s0.id}, voice ${s0.ttsDurationMs} ms, head ${probe.optLong("duration_ms")} ms, trims and b-roll cleared"
+            }
+            val skipped = "SKIPPED (resumed from session ${s0.id}, head sha ${s0.talkingHeadSha})"
+            listOf("spark_idea", "spark_anchors", "spark_beats", "voice", "talking_head").forEach {
+                stages += JSONObject().put("stage", it).put("result", "SKIPPED").put("detail", skipped)
+            }
+        } else {
         stage("spark_idea") {
             composeRule.onNodeWithTag("cs_tone_explainer").scrollIntoView().performClick()
             waitFor("tone explainer", 5_000L) { draftVm.uiState.value.tone == DraftTone.EXPLAINER }
@@ -248,6 +285,8 @@ class AircheckFullClipE2ETest {
             probe?.let { assertTrue("talking head must have a video track", it.optBoolean("has_video")) }
             screenshot("cut_head")
             "head ${probe?.optLong("duration_ms") ?: "remote"} ms"
+        }
+
         }
 
         stage("cut_trim_split") {
