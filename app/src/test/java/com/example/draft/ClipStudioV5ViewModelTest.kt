@@ -746,12 +746,6 @@ class ClipStudioV5ViewModelTest {
         assertEquals("Pay once for the chip.", savedOverlays.single().headline)
         assertTrue(savedOverlays.single().id in studioVm.uiState.value.corePipelineSession.selectedOverlayIds)
 
-        // Open clause toggle in 03 CUT
-        studioVm.toggleOpenCutClause(2)
-        assertEquals(2, studioVm.uiState.value.openClause)
-        studioVm.toggleOpenCutClause(2)
-        assertNull(studioVm.uiState.value.openClause)
-
         // Video look: setTitleTagStyle maps none/breaking/developing/explainer -> BreakingNewsStyle
         studioVm.setTitleTagStyle("none")
         assertEquals(BreakingNewsStyle.CLEAN, studioVm.uiState.value.corePipelineSession.renderOptions.breakingStyle)

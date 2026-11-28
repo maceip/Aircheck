@@ -198,7 +198,6 @@ fun ClipStudioShell(
                     vm = studioVm,
                     onOpenSettings = onOpenSettings,
                     onOpenNewsroom = { navigateTo(ClipStudioScreen.NEWSROOM) },
-                    onOpenBrollStudio = { navigateTo(ClipStudioScreen.BROLL_STUDIO) },
                     onNavigate = navigate,
                     onNewIdea = startNewIdea,
                     renderGlobalOverlays = false

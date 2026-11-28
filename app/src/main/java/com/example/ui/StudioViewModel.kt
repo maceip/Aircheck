@@ -117,7 +117,6 @@ data class StudioUiState(
     val statusNotice: String? = null,
     val toastMessage: String? = null,
     val lastCompletedVideo: LastVideoSummary? = null,
-    val openClauseIndex: Int? = null,
     val isRefreshingHeadline: Boolean = false,
     val isTweakingLook: Boolean = false,
     val otaBundleState: OtaBundleState = OtaBundleState(),
@@ -136,9 +135,6 @@ data class StudioUiState(
     val isRemotionUnused: Boolean
         get() = settings.remotionUsedCount <= 0 &&
             settings.providers.packageProviderId != "mac_rig_remotion"
-
-    val openClause: Int?
-        get() = openClauseIndex
 }
 
 /** An X post chosen with "show post" in 02 SCRIPT, burned into the cut as a quote card. */
@@ -858,7 +854,6 @@ class StudioViewModel internal constructor(
                 state.copy(
                     corePipelineSession = session,
                     savedOverlays = mergedOverlays,
-                    openClauseIndex = null,
                     openCorePipelineEvent = true,
                     errorMessage = null,
                     statusNotice = "Story loaded in Core Pipeline (01 TTS)."
@@ -1419,28 +1414,6 @@ class StudioViewModel internal constructor(
         }
     }
 
-    /** Seeks to clause [index] and toggles its inline action tray (`edit words` / `b-roll here`). */
-    fun toggleOpenCutClause(index: Int) {
-        val clauses = _uiState.value.corePipelineSession.clauses
-        if (index !in clauses.indices) return
-        val opening = _uiState.value.openClauseIndex != index
-        _uiState.update { it.copy(openClauseIndex = if (opening) index else null) }
-        if (opening) {
-            val startMs = clauses[index].startMs
-            if (startMs >= 0L) {
-                runCatching { playerController.seekTo(startMs) }
-            }
-        }
-    }
-
-    fun setOpenCutClause(index: Int?) {
-        _uiState.update { it.copy(openClauseIndex = index) }
-    }
-
-    fun setCoreStripSilence(enabled: Boolean) = updateRenderOptions("Trim pauses") { it.copy(stripSilence = enabled) }
-
-    fun setCorePunchIn(enabled: Boolean) = updateRenderOptions("Auto zoom") { it.copy(punchIn = enabled) }
-
     fun setCoreCaptions(enabled: Boolean) = updateRenderOptions("Captions") { it.copy(captions = enabled) }
 
     fun setCoreBreakingStyle(style: BreakingNewsStyle) = updateRenderOptions("Chyron style") { it.copy(breakingStyle = style) }
@@ -1999,13 +1972,6 @@ class StudioViewModel internal constructor(
         }
     }
 
-    fun setCoreAspect(aspect: String) {
-        require(aspect == CoreRenderOptions.ASPECT_VERTICAL || aspect == CoreRenderOptions.ASPECT_HORIZONTAL) {
-            "Unsupported aspect $aspect"
-        }
-        updateRenderOptions("Aspect $aspect") { it.copy(aspect = aspect) }
-    }
-
     private fun updateRenderOptions(
         label: String = "Render setting",
         transform: (CoreRenderOptions) -> CoreRenderOptions
@@ -2014,20 +1980,6 @@ class StudioViewModel internal constructor(
         val next = transform(current.renderOptions)
         if (next == current.renderOptions) return
         commitCoreEdit(current.copy(renderOptions = next), label = label)
-    }
-
-    /** Edits clause [index] in Cut; the clause becomes "unsynced" until [resyncEditedVoice] runs. */
-    fun editCutClauseText(index: Int, updatedText: String) {
-        val current = _uiState.value.corePipelineSession
-        if (index !in current.clauses.indices) return
-        val clean = updatedText.trim()
-        if (clean.isEmpty() || clean == current.clauses[index].spokenText.trim()) return
-        commitCoreEdit(
-            current.copy(
-                clauses = current.clauses.mapIndexed { i, c -> if (i == index) c.copy(spokenText = clean) else c }
-            ),
-            label = "Line ${index + 1} edit"
-        )
     }
 
     /** Toggles clause [index] between talking head and B-roll cutaway, with undo. */
@@ -2054,13 +2006,6 @@ class StudioViewModel internal constructor(
             label = if (willBeBroll) "Add B-roll cut ${index + 1}" else "Remove B-roll cut ${index + 1}"
         )
         showToast(if (willBeBroll) "B-roll enabled on cut ${index + 1}" else "Switched cut ${index + 1} to talking head")
-    }
-
-    /** Asks the rig which pauses `strip_silence` would remove from the current talking-head render. */
-    fun refreshSilenceGaps() {
-        val session = _uiState.value.corePipelineSession
-        if (session.talkingHeadJobId.isNullOrBlank() || _uiState.value.isCoreStageBusy) return
-        startCoreStage(CoreStageWorker.OP_SILENCE)
     }
 
     /**

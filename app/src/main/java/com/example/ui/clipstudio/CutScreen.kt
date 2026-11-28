@@ -3,42 +3,33 @@ package com.example.ui.clipstudio
 import android.net.Uri
 import android.view.LayoutInflater
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.input.TextFieldLineLimits
-import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.sharp.Notes
 import androidx.compose.material.icons.automirrored.sharp.Undo
 import androidx.compose.material.icons.sharp.Add
-import androidx.compose.material.icons.sharp.CheckCircle
-import androidx.compose.material.icons.sharp.ChevronRight
 import androidx.compose.material.icons.sharp.ClosedCaption
 import androidx.compose.material.icons.sharp.ContentCut
-import androidx.compose.material.icons.sharp.CropLandscape
-import androidx.compose.material.icons.sharp.CropPortrait
-import androidx.compose.material.icons.sharp.Edit
 import androidx.compose.material.icons.sharp.Layers
 import androidx.compose.material.icons.sharp.Movie
 import androidx.compose.material.icons.sharp.Pause
@@ -47,42 +38,40 @@ import androidx.compose.material.icons.sharp.PlayArrow
 import androidx.compose.material.icons.sharp.RecordVoiceOver
 import androidx.compose.material.icons.sharp.Settings
 import androidx.compose.material.icons.sharp.Share
+import androidx.compose.material.icons.sharp.SwapHoriz
 import androidx.compose.material.icons.sharp.Sync
-import androidx.compose.material.icons.sharp.SyncProblem
-import androidx.compose.material.icons.sharp.ZoomIn
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -91,21 +80,15 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import com.example.R
-import com.example.data.AlignedWord
-import com.example.data.BrollSegmentMode
 import com.example.data.ClipRecord
-import com.example.data.ClipTransitionType
 import com.example.data.CoreRenderOptions
 import com.example.data.CoreStoryClause
+import com.example.data.CutTimeline
 import com.example.data.ExportState
+import com.example.data.GfxLane
 import com.example.ui.StudioUiState
 import com.example.ui.StudioViewModel
-import java.io.File
-import kotlinx.coroutines.delay
-import androidx.compose.ui.text.withStyle
-import com.example.ui.design.AcCard
 import com.example.ui.design.AcDisplay
-import com.example.ui.design.AcField
 import com.example.ui.design.AcKey
 import com.example.ui.design.AcKeySize
 import com.example.ui.design.AcMediaKey
@@ -113,18 +96,18 @@ import com.example.ui.design.AcMediaWell
 import com.example.ui.design.AcTokens
 import com.example.ui.design.AcType
 import com.example.ui.design.AcVideoOverlayKey
+import java.io.File
+import kotlinx.coroutines.delay
 
 /**
- * 03 CUT:
- * - 56dp top bar (`01 · 02 · 03 CUT`, New, Undo, Settings).
- * - Compact 4-stage pipeline progress strip (`1.Voice · 2.Head · 3.Cut · 4.Export`) + explicit
- *   re-voice / re-render status banner whenever edits require a refresh.
- * - 218dp sunken `#000` ExoPlayer monitor that visibly reshapes between `9:16` portrait and
- *   `16:9` widescreen frames and previews `Auto Zoom` & `Captions` live.
- * - Clean dark-graphite 2-row controls deck (zero gray OP-1 bar, zero cryptic LEDs):
- *   - Row 1 toggles: `Captions`, `Trim` (with real detected silence gap count), `Auto Zoom`, `9:16` / `16:9`.
- *   - Row 2 studio editors: `Overlays` (Newsroom Overlays Editor) and `B-Roll & Cuts` (B-Roll & Transition Studio).
- * - Sunken `words` · `b-roll` workspace + single sequential primary pipeline dock key.
+ * 02 CUT (cut mockup + studio mockup, approved 2026-11-28):
+ * - Header `01 · 02 CUT` with new / undo / settings (rig dot), one status Caption line.
+ * - AcDisplay player (drag grip resizes it 220–470dp), flat play key over the video.
+ * - AcDisplay timeline: VOICE clips with trim brackets and ◆ transition joins, B-ROLL blocks you
+ *   drag / resize / tap, read-only GFX lane showing when each graphic is on screen.
+ * - Media well: play, split at the playhead, add b-roll at the playhead, captions.
+ * - Bottom: overlays key (Newsroom), blue-icon transitions key (all joins), the one primary key.
+ *   Renders start only here.
  */
 @Composable
 fun CutScreen(
@@ -133,28 +116,38 @@ fun CutScreen(
     onOpenSettings: () -> Unit,
     onOpenNewsroom: () -> Unit,
     modifier: Modifier = Modifier,
-    onOpenBrollStudio: () -> Unit = {},
     onNavigate: (Int) -> Unit = {},
     onNewIdea: () -> Unit = { onNavigate(1) },
     renderGlobalOverlays: Boolean = true
 ) {
-    val session = state.corePipelineSession
+    val session = remember(state.corePipelineSession) { CutTimeline.normalize(state.corePipelineSession) }
     val opts = session.renderOptions
     val defaultLook = state.newsroomLooks.firstOrNull { it.isDefault }
     val player = remember { vm.playerController.acquirePlayer() }
     val isPlaying by vm.playerController.isPlaying.collectAsStateWithLifecycle()
     val durationMs by vm.playerController.durationMs.collectAsStateWithLifecycle()
     var positionMs by remember { mutableLongStateOf(0L) }
-    var mode by rememberSaveable { mutableStateOf("transcript") }
-    var editingClause by rememberSaveable { mutableStateOf<Int?>(null) }
+    var playerHeightDp by rememberSaveable { mutableFloatStateOf(330f) }
+    // null = closed, -1 = every join, n = the join entering clause n.
+    var transitionJoin by rememberSaveable { mutableStateOf<Int?>(null) }
+    var brollSheetSegment by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingPickSegment by rememberSaveable { mutableStateOf<String?>(null) }
 
-    BackHandler(enabled = editingClause != null) { editingClause = null }
-    BackHandler(enabled = editingClause == null && state.openClause != null) { vm.setOpenCutClause(null) }
+    BackHandler(enabled = transitionJoin != null) { transitionJoin = null }
+    BackHandler(enabled = transitionJoin == null && brollSheetSegment != null) { brollSheetSegment = null }
+
+    val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        val segId = pendingPickSegment
+        pendingPickSegment = null
+        if (uri != null && segId != null) vm.importCustomBrollMediaForSegment(segId, uri)
+    }
 
     val clipFlow = remember(session.finalClipId) { vm.observeClip(session.finalClipId.orEmpty()) }
     val clip: ClipRecord? by clipFlow.collectAsStateWithLifecycle(initialValue = null)
 
-    val sourceInfo: Pair<Uri?, Boolean> = remember(
+    // Player source: the rendered cut (edited timeline), else the talking head or voice (source time).
+    data class PlayerSource(val uri: Uri?, val hasVideo: Boolean, val edited: Boolean)
+    val source: PlayerSource = remember(
         session.finalVideoSha,
         session.finalVideoUrl,
         session.talkingHeadSha,
@@ -166,17 +159,15 @@ fun CutScreen(
         val headFile = vm.casStore.fileForSha(session.talkingHeadSha, "mp4")
         val wavFile = vm.casStore.fileForSha(session.ttsVoiceSha, "wav")
         when {
-            finalFile != null -> Uri.fromFile(finalFile) to true
-            !session.finalVideoUrl.isNullOrBlank() -> Uri.parse(session.finalVideoUrl) to true
-            headFile != null -> Uri.fromFile(headFile) to true
-            !session.talkingHeadVideoUrl.isNullOrBlank() -> Uri.parse(session.talkingHeadVideoUrl) to true
-            wavFile != null -> Uri.fromFile(wavFile) to false
-            !session.ttsAudioUrl.isNullOrBlank() -> Uri.parse(session.ttsAudioUrl) to false
-            else -> null to false
+            finalFile != null -> PlayerSource(Uri.fromFile(finalFile), true, true)
+            !session.finalVideoUrl.isNullOrBlank() -> PlayerSource(Uri.parse(session.finalVideoUrl), true, true)
+            headFile != null -> PlayerSource(Uri.fromFile(headFile), true, false)
+            !session.talkingHeadVideoUrl.isNullOrBlank() -> PlayerSource(Uri.parse(session.talkingHeadVideoUrl), true, false)
+            wavFile != null -> PlayerSource(Uri.fromFile(wavFile), false, false)
+            !session.ttsAudioUrl.isNullOrBlank() -> PlayerSource(Uri.parse(session.ttsAudioUrl), false, false)
+            else -> PlayerSource(null, false, false)
         }
     }
-    val sourceUri = sourceInfo.first
-    val sourceHasVideo = sourceInfo.second
     val anchorPhotoFile: File? = remember(
         state.activeProject.stageConfig.photoSha,
         state.settings.persona.defaultPhotoSha
@@ -184,8 +175,8 @@ fun CutScreen(
         vm.resolveAnchorPhotoFile()
     }
 
-    LaunchedEffect(sourceUri) {
-        sourceUri?.let { vm.playerController.prepareUri(it, autoPlay = false) }
+    LaunchedEffect(source.uri) {
+        source.uri?.let { vm.playerController.prepareUri(it, autoPlay = false) }
     }
     LaunchedEffect(isPlaying) {
         while (true) {
@@ -196,22 +187,21 @@ fun CutScreen(
     }
     DisposableEffect(Unit) { onDispose { vm.playerController.pause() } }
 
-    // Auto-detect silence once a talking head exists and gaps are unknown for it.
-    LaunchedEffect(session.talkingHeadJobId) {
-        if (!session.talkingHeadJobId.isNullOrBlank() && session.silenceGapsJobId != session.talkingHeadJobId) {
-            vm.refreshSilenceGaps()
-        }
+    val clips = remember(session.cutClips, session.ttsDurationMs, session.clauses) { CutTimeline.effectiveClips(session) }
+    val timelineTotalMs = CutTimeline.timelineDurationMs(clips)
+    val playheadMs = if (source.edited) positionMs.coerceAtMost(timelineTotalMs) else sourceToTimelineClamped(clips, positionMs)
+    val playheadSourceMs = if (source.edited) CutTimeline.timelineToSource(clips, positionMs) ?: positionMs else positionMs
+    val seekTimeline: (Long) -> Unit = { tl ->
+        val target = if (source.edited) tl else CutTimeline.timelineToSource(clips, tl) ?: clips.lastOrNull()?.sourceEndMs ?: 0L
+        runCatching { vm.playerController.seekTo(target) }
+        positionMs = target
+    }
+    val gfxSpans = remember(session, state.savedOverlays, defaultLook, timelineTotalMs) {
+        GfxLane.spans(session, state.savedOverlays, defaultLook, timelineTotalMs)
     }
 
     val unsynced = session.unsyncedClauseIndices
-    val activeClause = clauseAtPlayhead(session.clauses, positionMs)
-    val effectiveDurationMs = remember(durationMs, session.ttsDurationMs, session.clauses) {
-        when {
-            durationMs > 0L -> durationMs
-            session.ttsDurationMs > 0L -> session.ttsDurationMs
-            else -> session.clauses.maxOfOrNull { it.endMs } ?: 0L
-        }
-    }
+    val activeClause = clauseAtPlayhead(session.clauses, playheadSourceMs)
 
     Box(
         modifier = modifier
@@ -296,81 +286,104 @@ fun CutScreen(
                 onDismissNotice = vm::dismissNotice
             )
 
-            val dirtyReason: String? = when {
-                unsynced.isNotEmpty() -> {
-                    val unit = if (unsynced.size == 1) "line" else "lines"
-                    "${unsynced.size} $unit edited — tap re-voice below to sync voice & video"
-                }
-                session.hasFinalVideo && !cutCurrent -> "Overlays, B-roll, or cut settings changed — tap render the video to apply"
-                session.hasTalkingHead && !session.hasFinalVideo -> "Talking head ready — customize overlays or B-roll, then tap render the video"
-                else -> null
-            }
-            if (dirtyReason != null) {
-                val isWarning = unsynced.isNotEmpty() || (session.hasFinalVideo && !cutCurrent)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 16.dp, end = 16.dp, bottom = 6.dp)
-                        .testTag("cs_cut_dirty_banner"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp)
-                ) {
-                    Icon(
-                        imageVector = if (isWarning) Icons.Sharp.SyncProblem else Icons.Sharp.Movie,
-                        contentDescription = null,
-                        tint = if (isWarning) AcTokens.Red else AcTokens.Ink2,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Text(
-                        text = dirtyReason,
-                        style = AcType.BodySmall.copy(color = if (isWarning) AcTokens.Red else AcTokens.Ink2),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-
-            VideoMonitorPanel(
-                player = player,
-                sourceUri = sourceUri,
-                sourceHasVideo = sourceHasVideo,
-                waveformPeaks = session.waveformPeaks,
-                anchorPhotoFile = anchorPhotoFile,
-                isPlaying = isPlaying,
-                positionMs = positionMs,
-                durationMs = effectiveDurationMs,
-                aspect = opts.aspect,
-                punchIn = opts.punchIn,
-                liveCaption = if (opts.captions && session.clauses.isNotEmpty()) {
-                    session.clauses.getOrNull(activeClause)?.spokenText.orEmpty()
-                } else {
-                    ""
-                },
-                onTogglePlay = {
-                    vm.playerController.togglePlayPause()
-                    positionMs = vm.playerController.currentPositionMs()
-                }
-            )
-
-            val isVertical = opts.aspect == CoreRenderOptions.ASPECT_VERTICAL
-            val gapCount = if (session.silenceGapsJobId == session.talkingHeadJobId) session.silenceGaps.size else 0
-            val activeOverlayCount = (if (opts.showLowerThird) 1 else 0) +
-                (if (opts.showBrandBug && opts.cornerBugText.isNotBlank()) 1 else 0) +
-                session.selectedOverlayIds.size
-            val brollCutawayCount = session.clauses.count { it.segmentMode == BrollSegmentMode.BROLL_CUTAWAY }
-
             Column(
                 modifier = Modifier
+                    .weight(1f)
                     .fillMaxWidth()
-                    .padding(start = 14.dp, top = 10.dp, end = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                AcMediaWell(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                VideoMonitorPanel(
+                    player = player,
+                    sourceUri = source.uri,
+                    sourceHasVideo = source.hasVideo,
+                    waveformPeaks = session.waveformPeaks,
+                    anchorPhotoFile = anchorPhotoFile,
+                    isPlaying = isPlaying,
+                    positionMs = playheadMs,
+                    durationMs = timelineTotalMs.takeIf { it > 0L } ?: durationMs,
+                    aspect = opts.aspect,
+                    punchIn = opts.punchIn,
+                    liveCaption = if (opts.captions && session.clauses.isNotEmpty()) {
+                        session.clauses.getOrNull(activeClause)?.spokenText.orEmpty()
+                    } else {
+                        ""
+                    },
+                    heightDp = playerHeightDp,
+                    onResize = { deltaDp -> playerHeightDp = (playerHeightDp + deltaDp).coerceIn(220f, 470f) },
+                    onTogglePlay = {
+                        vm.playerController.togglePlayPause()
+                        positionMs = vm.playerController.currentPositionMs()
+                    }
+                )
+
+                if (session.clauses.isEmpty()) {
+                    Text(
+                        "No story loaded yet. Go to 01 SPARK and tap make the video.",
+                        style = AcType.Body.copy(color = AcTokens.Ink2),
+                        modifier = Modifier.padding(horizontal = 20.dp)
+                    )
+                } else {
+                    CutTimelinePanel(
+                        session = session,
+                        clips = clips,
+                        gfxSpans = gfxSpans,
+                        playheadMs = playheadMs,
+                        onSeek = seekTimeline,
+                        onTrim = vm::trimCutClip,
+                        onMoveSegment = vm::moveBrollSegment,
+                        onResizeSegment = vm::resizeBrollSegment,
+                        onOpenSegment = { brollSheetSegment = it },
+                        onOpenJoin = { transitionJoin = it }
+                    )
+                }
+
+                AcMediaWell(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    AcMediaKey(
+                        icon = if (isPlaying) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
+                        contentDescription = if (isPlaying) "Pause" else "Play",
+                        active = isPlaying,
+                        enabled = source.uri != null,
+                        onClick = {
+                            vm.playerController.togglePlayPause()
+                            positionMs = vm.playerController.currentPositionMs()
+                        },
+                        size = 56.dp,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_well_play")
+                    )
+                    AcMediaKey(
+                        icon = Icons.Sharp.ContentCut,
+                        contentDescription = "Split at the playhead",
+                        caption = "SPLIT",
+                        enabled = timelineTotalMs > 0L,
+                        onClick = { vm.splitCutAtPlayhead(playheadMs) },
+                        size = 56.dp,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_split")
+                    )
+                    AcMediaKey(
+                        icon = Icons.Sharp.Movie,
+                        contentDescription = "Add B-roll at the playhead",
+                        caption = "B-ROLL",
+                        enabled = timelineTotalMs > 0L,
+                        onClick = { vm.addBrollSegmentAtPlayhead(playheadMs) },
+                        size = 56.dp,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_add_broll")
+                    )
                     AcMediaKey(
                         icon = Icons.Sharp.ClosedCaption,
-                        contentDescription = null,
-                        caption = "Captions",
+                        contentDescription = "Captions",
+                        caption = "CAPS",
                         toggle = opts.captions,
                         onClick = { vm.setCoreCaptions(!opts.captions) },
                         size = 56.dp,
@@ -378,138 +391,6 @@ fun CutScreen(
                             .weight(1f)
                             .testTag("cs_cut_captions")
                     )
-                    AcMediaKey(
-                        icon = Icons.Sharp.ContentCut,
-                        contentDescription = null,
-                        caption = if (gapCount > 0) "Trim ($gapCount)" else "Trim",
-                        toggle = opts.stripSilence,
-                        onClick = { vm.setCoreStripSilence(!opts.stripSilence) },
-                        size = 56.dp,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("cs_cut_strip_silence")
-                    )
-                    AcMediaKey(
-                        icon = Icons.Sharp.ZoomIn,
-                        contentDescription = null,
-                        caption = "Auto Zoom",
-                        toggle = opts.punchIn,
-                        onClick = { vm.setCorePunchIn(!opts.punchIn) },
-                        size = 56.dp,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("cs_cut_punch_in")
-                    )
-                    AcMediaKey(
-                        icon = if (isVertical) Icons.Sharp.CropPortrait else Icons.Sharp.CropLandscape,
-                        contentDescription = null,
-                        caption = if (isVertical) "9:16" else "16:9",
-                        onClick = {
-                            vm.setCoreAspect(if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL)
-                        },
-                        size = 56.dp,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("cs_cut_aspect")
-                    )
-                }
-
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AcKey(
-                        label = if (activeOverlayCount > 0) "Overlays ($activeOverlayCount)" else "Overlays",
-                        icon = Icons.Sharp.Layers,
-                        trailingIcon = Icons.Sharp.ChevronRight,
-                        onClick = onOpenNewsroom,
-                        size = AcKeySize.Small,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("cs_cut_look")
-                    )
-                    AcKey(
-                        label = if (brollCutawayCount > 0) "B-Roll ($brollCutawayCount)" else "B-Roll & Cuts",
-                        icon = Icons.Sharp.Movie,
-                        trailingIcon = Icons.Sharp.ChevronRight,
-                        onClick = onOpenBrollStudio,
-                        size = AcKeySize.Small,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("cs_cut_broll_studio")
-                    )
-                }
-            }
-
-            AcCard(
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-                verticalArrangement = Arrangement.Top,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(start = 14.dp, top = 10.dp, end = 14.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    AcKey(
-                        label = "words",
-                        icon = Icons.AutoMirrored.Sharp.Notes,
-                        selected = mode == "transcript",
-                        onClick = { mode = "transcript" },
-                        size = AcKeySize.Small,
-                        role = Role.Tab,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("cs_cut_mode_transcript")
-                    )
-                    AcKey(
-                        label = "b-roll",
-                        icon = Icons.Sharp.Movie,
-                        selected = mode == "timeline",
-                        onClick = { mode = "timeline" },
-                        size = AcKeySize.Small,
-                        role = Role.Tab,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("cs_cut_mode_timeline")
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .hairlineTop()
-                ) {
-                    if (session.clauses.isEmpty()) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(20.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("No story loaded yet. Go to 01 SPARK and tap make the video.", style = AcType.Body.copy(color = AcTokens.Ink2))
-                        }
-                    } else if (mode == "transcript") {
-                        TranscriptWordsPane(
-                            state = state,
-                            vm = vm,
-                            positionMs = positionMs,
-                            unsynced = unsynced,
-                            editingClause = editingClause,
-                            onEdit = { editingClause = it },
-                            onSeekLocal = { ms -> positionMs = ms }
-                        )
-                    } else {
-                        BrollModePane(
-                            clauses = session.clauses,
-                            vm = vm,
-                            onOpenBrollStudio = onOpenBrollStudio,
-                            onSeekLocal = { ms -> positionMs = ms }
-                        )
-                    }
                 }
             }
 
@@ -532,7 +413,25 @@ fun CutScreen(
                 vm = vm
             )
 
+            val activeOverlayCount = gfxSpans.size
             StudioDock(
+                leading = {
+                    AcKey(
+                        icon = Icons.Sharp.Layers,
+                        contentDescription = if (activeOverlayCount > 0) "Overlays, $activeOverlayCount on screen" else "Overlays",
+                        onClick = onOpenNewsroom,
+                        modifier = Modifier.testTag("cs_cut_look")
+                    )
+                    AcKey(
+                        onClick = { transitionJoin = -1 },
+                        circle = true,
+                        enabled = session.clauses.size > 1,
+                        modifier = Modifier.testTag("cs_cut_transitions")
+                    ) { _ ->
+                        // Blue glyph kept from the original transitions button (Ryan, 2026-11-28).
+                        Icon(Icons.Sharp.SwapHoriz, contentDescription = "Transitions for every join", tint = AcTokens.OpBlue, modifier = Modifier.size(22.dp))
+                    }
+                },
                 primaryLabel = dockSpec.label,
                 primaryIcon = dockSpec.icon,
                 primaryEnabled = dockSpec.enabled && !isCutBusy,
@@ -542,6 +441,46 @@ fun CutScreen(
                 busyLabel = busyLabel,
                 busyFraction = busyFraction
             )
+        }
+
+        transitionJoin?.let { join ->
+            TransitionSheet(
+                session = session,
+                clips = clips,
+                clauseIndex = join.takeIf { it >= 0 },
+                onSetJoin = vm::setClauseTransition,
+                onSetDefault = vm::setCoreDefaultTransition,
+                onApplyAll = vm::applyTransitionToAllCuts,
+                onDismiss = { transitionJoin = null }
+            )
+        }
+
+        brollSheetSegment?.let { segId ->
+            val seg = session.brollSegments.firstOrNull { it.id == segId }
+            if (seg == null) {
+                LaunchedEffect(segId) { brollSheetSegment = null }
+            } else {
+                val linkedIdx = seg.originClauseId?.let { o -> session.clauses.indexOfFirst { it.id == o } }?.takeIf { it >= 0 }
+                BrollSegmentSheet(
+                    segment = seg,
+                    clips = clips,
+                    defaultFraming = opts.brollFraming,
+                    isGenerating = segId in state.generatingBrollSegmentIds || (linkedIdx != null && linkedIdx in state.generatingBrollClauseIndices),
+                    isUploading = segId in state.uploadingBrollSegmentIds || (linkedIdx != null && linkedIdx in state.uploadingBrollClauseIndices),
+                    onCommitPrompt = { vm.updateBrollSegmentPrompt(segId, it) },
+                    onGenerate = { vm.generateBrollForSegment(segId, it) },
+                    onPickMedia = {
+                        pendingPickSegment = segId
+                        mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                    },
+                    onSetFraming = { vm.setBrollSegmentFraming(segId, it) },
+                    onDelete = {
+                        brollSheetSegment = null
+                        vm.removeBrollSegment(segId)
+                    },
+                    onDismiss = { brollSheetSegment = null }
+                )
+            }
         }
 
         if (renderGlobalOverlays) {
@@ -642,8 +581,12 @@ private fun VideoMonitorPanel(
     aspect: String,
     punchIn: Boolean,
     liveCaption: String,
+    heightDp: Float,
+    onResize: (deltaDp: Float) -> Unit,
     onTogglePlay: () -> Unit
 ) {
+    val density = LocalDensity.current
+    val latestResize by rememberUpdatedState(onResize)
     val progressFraction = remember(positionMs, durationMs) {
         if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
     }
@@ -654,7 +597,7 @@ private fun VideoMonitorPanel(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp)
-            .height(256.dp)
+            .height(heightDp.dp)
             .clickable(enabled = sourceUri != null, role = Role.Button, onClick = onTogglePlay)
             .testTag("cs_cut_monitor")
     ) {
@@ -797,22 +740,27 @@ private fun VideoMonitorPanel(
             )
         }
 
+        // Drag grip: resizes the player between 220 and 470 dp.
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(start = 18.dp, end = 18.dp, bottom = 5.dp)
-                .fillMaxWidth()
-                .height(1.5.dp)
-                .background(AcTokens.MediaKey)
+                .size(width = 72.dp, height = 24.dp)
+                .semantics { contentDescription = "Resize player" }
+                .testTag("cs_cut_player_grip")
+                .pointerInput(Unit) {
+                    detectVerticalDragGestures { change, dy ->
+                        change.consume()
+                        latestResize(with(density) { dy.toDp().value })
+                    }
+                },
+            contentAlignment = Alignment.Center
         ) {
-            if (progressFraction > 0f) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .fillMaxWidth(progressFraction)
-                        .background(AcTokens.OpRed)
-                )
-            }
+            Box(
+                Modifier
+                    .size(width = 34.dp, height = 3.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(AcTokens.OpGrey)
+            )
         }
     }
 }
@@ -822,306 +770,4 @@ internal fun clauseAtPlayhead(clauses: List<CoreStoryClause>, positionMs: Long):
     if (clauses.isEmpty()) return 0
     if (clauses.all { it.endMs <= 0L }) return 0
     return clauses.indexOfLast { it.startMs <= positionMs }.coerceAtLeast(0)
-}
-
-@Composable
-private fun TranscriptWordsPane(
-    state: StudioUiState,
-    vm: StudioViewModel,
-    positionMs: Long,
-    unsynced: List<Int>,
-    editingClause: Int?,
-    onEdit: (Int?) -> Unit,
-    onSeekLocal: (Long) -> Unit
-) {
-    val session = state.corePipelineSession
-    val listState = rememberLazyListState()
-    val activeClause = clauseAtPlayhead(session.clauses, positionMs)
-
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .testTag("cs_transcript"),
-        state = listState
-    ) {
-        itemsIndexed(session.clauses, key = { _, c -> c.id }) { idx, clause ->
-            val dirty = idx in unsynced
-            val broll = clause.segmentMode == BrollSegmentMode.BROLL_CUTAWAY
-            val isOpen = state.openClause == idx
-            val isActive = activeClause == idx && session.clauses.any { it.endMs > 0L }
-
-            val clauseWords = remember(dirty, session.alignedWords, clause.startMs, clause.endMs) {
-                if (dirty) {
-                    emptyList()
-                } else {
-                    session.alignedWords.filter {
-                        it.startMs >= clause.startMs && it.startMs < clause.endMs.coerceAtLeast(clause.startMs + 1L)
-                    }
-                }
-            }
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(if (isActive) AcTokens.Chassis.copy(alpha = 0.5f) else AcTokens.Ui.copy(alpha = 0f))
-                    .hairlineBottom()
-                    .then(
-                        if (editingClause != idx) {
-                            Modifier.clickable(role = Role.Button) {
-                                vm.toggleOpenCutClause(idx)
-                                onSeekLocal(clause.startMs)
-                            }
-                        } else {
-                            Modifier
-                        }
-                    )
-                    .padding(start = 12.dp, top = 12.dp, end = 14.dp, bottom = 12.dp)
-                    .testTag("cs_clause_$idx")
-            ) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = mmss(clause.startMs),
-                        style = AcType.Caption.copy(lineHeight = AcType.Body.lineHeight),
-                        maxLines = 1,
-                        modifier = Modifier.width(44.dp)
-                    )
-                    if (editingClause == idx) {
-                        InlineClauseWordsEditor(
-                            idx = idx,
-                            initialText = clause.spokenText,
-                            onSave = { updated ->
-                                vm.editCutClauseText(idx, updated)
-                                onEdit(null)
-                                vm.setOpenCutClause(null)
-                            },
-                            onCancel = { onEdit(null) },
-                            modifier = Modifier.weight(1f)
-                        )
-                    } else {
-                        ClauseKaraokeWords(
-                            spokenText = clause.spokenText,
-                            words = clauseWords,
-                            positionMs = positionMs,
-                            clauseStartMs = clause.startMs,
-                            dirty = dirty,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-
-                if (dirty && editingClause != idx) {
-                    Row(
-                        modifier = Modifier.padding(start = 52.dp, top = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(Icons.Sharp.SyncProblem, contentDescription = null, tint = AcTokens.Red, modifier = Modifier.size(16.dp))
-                        Text(
-                            text = if (broll) "edited · voice not synced · b-roll" else "edited · voice not synced",
-                            style = AcType.Caption.copy(color = AcTokens.Red),
-                            maxLines = 1
-                        )
-                    }
-                } else if (broll && editingClause != idx) {
-                    Row(
-                        modifier = Modifier.padding(start = 52.dp, top = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(Icons.Sharp.Movie, contentDescription = null, tint = AcTokens.Ink2, modifier = Modifier.size(16.dp))
-                        SectionCaption("B-roll")
-                    }
-                }
-
-                if (isOpen && editingClause != idx) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 52.dp, top = 10.dp, bottom = 2.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        AcKey(
-                            label = "edit words",
-                            icon = Icons.Sharp.Edit,
-                            onClick = { onEdit(idx) },
-                            size = AcKeySize.Small,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("cs_clause_edit_btn_$idx")
-                        )
-                        AcKey(
-                            label = if (broll) "back to face" else "b-roll here",
-                            icon = Icons.Sharp.Movie,
-                            selected = broll,
-                            onClick = { vm.toggleCutClauseBroll(idx) },
-                            size = AcKeySize.Small,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("cs_clause_broll_btn_$idx")
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ClauseKaraokeWords(
-    spokenText: String,
-    words: List<AlignedWord>,
-    positionMs: Long,
-    clauseStartMs: Long,
-    dirty: Boolean,
-    modifier: Modifier = Modifier
-) {
-    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
-
-    val built: Pair<AnnotatedString, IntRange?> = remember(spokenText, words, positionMs, clauseStartMs, dirty) {
-        if (words.isEmpty()) {
-            val color = if (dirty || positionMs >= clauseStartMs) AcTokens.Ink else AcTokens.Ink2
-            buildAnnotatedString {
-                pushStyle(SpanStyle(color = color))
-                append(spokenText)
-                pop()
-            } to null
-        } else {
-            var activeRange: IntRange? = null
-            val str = buildAnnotatedString {
-                words.forEachIndexed { idx, w ->
-                    val startChar = length
-                    val spoken = dirty || positionMs >= w.startMs
-                    val isCurrent = !dirty && positionMs >= w.startMs && positionMs < w.endMs
-                    pushStyle(SpanStyle(color = if (spoken) AcTokens.Ink else AcTokens.Ink2))
-                    append(w.word)
-                    pop()
-                    val endCharExcl = length
-                    if (isCurrent && endCharExcl > startChar) activeRange = startChar until endCharExcl
-                    if (idx < words.lastIndex) append(" ")
-                }
-            }
-            str to activeRange
-        }
-    }
-
-    val activeRange = built.second
-    Text(
-        text = built.first,
-        style = AcType.Body,
-        onTextLayout = { layout = it },
-        modifier = modifier.drawBehind {
-            val l = layout ?: return@drawBehind
-            val range = activeRange ?: return@drawBehind
-            if (range.isEmpty() || l.layoutInput.text.isEmpty()) return@drawBehind
-            val safeStart = range.first.coerceIn(0, l.layoutInput.text.length - 1)
-            val safeEnd = range.last.coerceIn(safeStart, l.layoutInput.text.length - 1)
-            val a = l.getBoundingBox(safeStart)
-            val b = l.getBoundingBox(safeEnd)
-            val y = maxOf(a.bottom, b.bottom) - 1.dp.toPx()
-            if (b.right > a.left) {
-                drawLine(AcTokens.Red, Offset(a.left, y), Offset(b.right, y), 2.dp.toPx())
-            }
-        }
-    )
-}
-
-@Composable
-private fun InlineClauseWordsEditor(
-    idx: Int,
-    initialText: String,
-    onSave: (String) -> Unit,
-    onCancel: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var text by rememberSaveable { mutableStateOf(initialText) }
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        AcField(
-            value = text,
-            onValueChange = { text = it },
-            minLines = 2,
-            maxLines = 5,
-            textStyle = AcType.Body,
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("cs_clause_editor_$idx")
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AcKey(
-                label = "save words",
-                onClick = { onSave(text) },
-                enabled = text.isNotBlank(),
-                size = AcKeySize.Small,
-                modifier = Modifier.testTag("cs_clause_apply_$idx")
-            )
-            AcKey(
-                label = "cancel",
-                onClick = onCancel,
-                size = AcKeySize.Small,
-                modifier = Modifier.testTag("cs_clause_cancel_$idx")
-            )
-        }
-    }
-}
-
-@Composable
-private fun BrollModePane(
-    clauses: List<CoreStoryClause>,
-    vm: StudioViewModel,
-    onOpenBrollStudio: () -> Unit,
-    onSeekLocal: (Long) -> Unit
-) {
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(8.dp)
-            .testTag("cs_timeline"),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        item(key = "broll_studio_banner") {
-            AcKey(
-                label = "Open B-Roll & Transition Studio",
-                icon = Icons.Sharp.Movie,
-                trailingIcon = Icons.Sharp.ChevronRight,
-                onClick = onOpenBrollStudio,
-                size = AcKeySize.Small,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("cs_open_broll_studio_inline")
-            )
-        }
-
-        itemsIndexed(clauses, key = { _, c -> c.id }) { idx, clause ->
-            val broll = clause.segmentMode == BrollSegmentMode.BROLL_CUTAWAY
-            val transition = ClipTransitionType.fromWire(clause.transitionType)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .defaultMinSize(minHeight = 56.dp)
-                    .hairlineBottom()
-                    .clickable(role = Role.Button) {
-                        vm.playerController.seekTo(clause.startMs)
-                        onSeekLocal(clause.startMs)
-                    }
-                    .padding(start = 8.dp, top = 6.dp, end = 2.dp, bottom = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text(mmss(clause.startMs), style = AcType.Caption, maxLines = 1, modifier = Modifier.width(40.dp))
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(clause.spokenText, style = AcType.BodySmall.copy(color = AcTokens.Ink), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (idx > 0 && transition != ClipTransitionType.CUT) {
-                        SectionCaption("Transition: ${transition.label} (${clause.transitionDurationMs}ms)")
-                    }
-                }
-                AcKey(
-                    label = if (broll) "b-roll" else "face",
-                    icon = if (broll) Icons.Sharp.Movie else Icons.Sharp.Person,
-                    selected = broll,
-                    onClick = { vm.toggleCutClauseBroll(idx) },
-                    size = AcKeySize.Small,
-                    modifier = Modifier.testTag("cs_timeline_toggle_$idx")
-                )
-            }
-        }
-    }
 }

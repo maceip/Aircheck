@@ -701,6 +701,66 @@ fun AcCard(
     }
 }
 
+/**
+ * Picture tile key (approved in the studio mockup, 2026-11-28): an [AcCard]-shaped raised `ui`
+ * tile (radius 16) holding a small [AcDisplay] picture over a Label. `selected = true` turns it red
+ * with white text, like [AcKey]. Use for visual choices: transitions, B-roll framing.
+ */
+@Composable
+fun AcTileKey(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    selected: Boolean = false,
+    enabled: Boolean = true,
+    picture: @Composable BoxScope.() -> Unit
+) {
+    val shape = RoundedCornerShape(16.dp)
+    val interaction = remember { MutableInteractionSource() }
+    val pressed = rememberAcPressed(interaction, enabled)
+    val fg = when {
+        !enabled -> AcTokens.Ink2
+        selected -> AcTokens.Ui
+        else -> AcTokens.Ink
+    }
+    Column(
+        modifier = modifier
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { this.selected = selected }
+            .acSink(pressed, 1.5.dp)
+            .then(if (pressed) Modifier else Modifier.acRaised(shape, red = selected, soft = true))
+            .clip(shape)
+            .background(if (selected) AcTokens.Red else AcTokens.Ui)
+            .then(if (pressed) Modifier.acInset(shape, red = selected) else Modifier)
+            .padding(6.dp)
+            .alpha(if (enabled) 1f else 0.5f),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        AcDisplay(
+            radius = 10.dp,
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(46.dp),
+            content = picture
+        )
+        Text(label, style = AcType.Label.copy(color = fg, fontSize = 11.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** On/off LED (red glow on, dark off), the same light as the [AcMediaKey] toggle LED. */
+@Composable
+fun AcLed(on: Boolean, modifier: Modifier = Modifier, size: Dp = 8.dp) {
+    Box(
+        modifier
+            .size(size)
+            .then(if (on) Modifier.dropShadow(CircleShape, Shadow(radius = 6.dp, color = AcTokens.RedHi)) else Modifier)
+            .clip(CircleShape)
+            .background(if (on) AcTokens.RedHi else AcTokens.MediaKeyLo)
+    )
+}
+
 // -----------------------------------------------------------------------------
 // 6. AcField — recessed text field
 // -----------------------------------------------------------------------------
