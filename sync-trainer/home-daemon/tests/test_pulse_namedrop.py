@@ -294,7 +294,7 @@ def test_malformed_llm_collections_degrade_to_empty(tmp_path: Path) -> None:
 
 
 def test_legacy_dotted_arxiv_id_is_recognised() -> None:
-    m = pn._ARXIV_RE.search("https://arxiv.org/abs/math.GT/0309136")
+    m = pn._link_match("https://arxiv.org/abs/math.GT/0309136", pn._ARXIV_HOSTS, pn._ARXIV_RE)
     assert m is not None and m.group(1) == "math.GT/0309136"
 
 
@@ -362,3 +362,46 @@ def test_doi_link_decorations_and_non_latin_names(tmp_path: Path) -> None:
     assert [p["name"] for p in out["people"]] == ["张伟", "王芳"]
     assert all(p["handles"]["bsky"]["status"] == "unknown" for p in out["people"])
     assert pn._norm_name("张伟") != pn._norm_name("王芳")
+
+
+def test_resolve_requires_exact_link_hosts(tmp_path: Path) -> None:
+    svc = pn.NameDropService(tmp_path, fetch=lambda url, **kw: (_ for _ in ()).throw(AssertionError(url)),
+                             clock=lambda: NOW)
+    for src in ("https://notx.com/alice/status/123", "https://x.com.evil.example/alice/status/123",
+                "https://evil.example/x.com/alice/status/123"):
+        out = svc.resolve({"url": src})
+        assert out["kind"] == "text", src
+        assert all(p["handles"]["x"]["handle"] != "@alice" for p in out["people"]), src
+    x = svc.resolve({"url": "https://twitter.com/alice/status/123"})
+    assert x["kind"] == "x_post"
+    assert x["people"][0]["handles"]["x"]["status"] == "likely"
+    assert x["taggable"]["x"] == 0
+
+
+def test_bare_arxiv_link_still_resolves(tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    def fetch(url: str, **kw: Any) -> Any:
+        seen.append(url)
+        raise pn.FetchError("offline")
+
+    svc = pn.NameDropService(tmp_path, fetch=fetch, clock=lambda: NOW)
+    out = svc.resolve({"text": "see arxiv.org/abs/2401.00001 for details"})
+    assert out["kind"] == "paper"
+    assert "2401.00001" in seen[0]
+    assert svc.resolve({"text": "see notarxiv.org/abs/2401.00001"})["kind"] != "paper"
+
+
+def test_orcid_in_bio_alone_is_only_likely(tmp_path: Path) -> None:
+    def fetch(url: str, **kw: Any) -> Any:
+        if "researcher-urls" in url:
+            return {"researcher-url": []}
+        if "searchActors" in url:
+            return {"actors": [{"handle": "ada.bsky.social", "displayName": "Ada Lovelace",
+                                "description": "orcid 0000-0001"}]}
+        raise pn.FetchError("unexpected")
+
+    svc = pn.NameDropService(tmp_path, fetch=fetch, clock=lambda: NOW)
+    person = svc._person("Ada Lovelace", 0, 1, "0000-0001", [])
+    assert person["handles"]["bsky"]["handle"] == "ada.bsky.social"
+    assert person["handles"]["bsky"]["status"] == "likely"

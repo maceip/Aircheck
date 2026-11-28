@@ -553,6 +553,8 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
     val uri = LocalUriHandler.current
     val clipboard = LocalClipboardManager.current
     var areasText by rememberSaveable { mutableStateOf("") }
+    // Set once the creator types, so a slow rig reply never overwrites their edits.
+    var areasEdited by rememberSaveable { mutableStateOf(false) }
     var areasNote by remember { mutableStateOf<String?>(null) }
     var list by remember { mutableStateOf<FirstLookList?>(null) }
     var listNote by remember { mutableStateOf<String?>(null) }
@@ -566,7 +568,7 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
 
     LaunchedEffect(Unit) {
         container.pulseClient.areas()
-            .onSuccess { areasText = it.areas.joinToString("\n") }
+            .onSuccess { if (!areasEdited) areasText = it.areas.joinToString("\n") }
             .onFailure { areasNote = "Couldn't load from the rig: ${it.message}" }
         container.pulseClient.firstLook()
             .onSuccess { list = it }
@@ -627,7 +629,7 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
                 Text("One per line. Pulse scores fit against these.", style = AcType.BodySmall)
                 AcField(
                     value = areasText,
-                    onValueChange = { areasText = it },
+                    onValueChange = { areasText = it; areasEdited = true },
                     placeholder = "AI chips\nRust\nHockey",
                     minLines = 3,
                     maxLines = 8,

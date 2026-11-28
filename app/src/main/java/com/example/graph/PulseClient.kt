@@ -169,9 +169,10 @@ class PulseClient(
         call("PUT", "/v1/namedrop/first-look", json.encodeToString(PeopleBody.serializer(), PeopleBody(people)), FirstLookList.serializer())
 
     suspend fun sendFirstLook(postUrl: String, text: String): Result<FirstLookSendResponse> =
-        call("POST", "/v1/namedrop/first-look/send", json.encodeToString(SendRequest.serializer(), SendRequest(postUrl, text)), FirstLookSendResponse.serializer())
+        // Never retried: the rig may already have sent the DMs when the reply is lost.
+        call("POST", "/v1/namedrop/first-look/send", json.encodeToString(SendRequest.serializer(), SendRequest(postUrl, text)), FirstLookSendResponse.serializer(), retry = false)
 
-    private suspend fun <T> call(method: String, path: String, body: String?, serializer: KSerializer<T>): Result<T> =
+    private suspend fun <T> call(method: String, path: String, body: String?, serializer: KSerializer<T>, retry: Boolean = true): Result<T> =
         withContext(Dispatchers.IO) {
             try {
                 val rigUrl = profileStore.current().tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
@@ -180,6 +181,7 @@ class PulseClient(
                 try {
                     execute(base, method, path, body, serializer)
                 } catch (e: IOException) {
+                    if (!retry) throw e
                     // The cached rig URL may be stale (e.g. USB unplugged); probe again once.
                     val refreshed = client.resolveActiveBaseUrl(forceRefresh = true)
                     if (refreshed == base) throw e

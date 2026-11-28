@@ -565,10 +565,15 @@ class PulseService:
 # Name-drop
 # --------------------------------------------------------------------------------------------
 
-_ARXIV_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?|[a-z\-]+(?:\.[A-Za-z\-]+)?/[0-9]{7})", re.I)
+_ARXIV_RE = re.compile(r"^/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?|[a-z\-]+(?:\.[A-Za-z\-]+)?/[0-9]{7})", re.I)
 _DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>]+)", re.I)
-_BSKY_POST_RE = re.compile(r"bsky\.app/profile/([^/\s]+)/post/([A-Za-z0-9]+)")
-_X_POST_RE = re.compile(r"(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status/(\d+)", re.I)
+_BSKY_POST_RE = re.compile(r"^/profile/([^/\s]+)/post/([A-Za-z0-9]+)")
+_X_POST_RE = re.compile(r"^/([A-Za-z0-9_]{1,15})/status/(\d+)", re.I)
+# "arxiv.org/abs/…" typed without a scheme; the lookbehind keeps it from starting mid-host or mid-URL.
+_BARE_LINK_RE = re.compile(r"(?<![\w.@/:-])((?:www\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/[^\s<>\"')]*)")
+_ARXIV_HOSTS = {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}
+_BSKY_HOSTS = {"bsky.app"}
+_X_HOSTS = {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com", "mobile.x.com"}
 _AT_HANDLE_RE = re.compile(r"(?<![\w@])@([A-Za-z0-9_]{1,15})(?![\w.])")
 _X_URL_RE = re.compile(r"^https?://(?:www\.)?(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/?$", re.I)
 _BSKY_URL_RE = re.compile(r"^https?://bsky\.app/profile/([^/?#\s]+)/?$", re.I)
@@ -581,6 +586,22 @@ def _handle(handle: str, status: str, evidence: str) -> dict[str, str]:
 def _norm_name(s: str) -> str:
     """Unicode-aware: keeps letters in any script, so 张伟 and 王芳 stay distinct (never both "")."""
     return "".join(ch for ch in s.casefold() if ch.isalpha())
+
+
+def _link_match(src: str, hosts: set[str], path_re: re.Pattern[str]) -> re.Match[str] | None:
+    """Matches [path_re] against the path of a link in [src] whose hostname is exactly one of
+    [hosts], so lookalikes such as notx.com or x.com.evil.example never count."""
+    links = _URL_RE.findall(src) + ["https://" + b for b in _BARE_LINK_RE.findall(src)]
+    for raw in links:
+        try:
+            parsed = urllib.parse.urlsplit(raw)
+        except ValueError:
+            continue
+        if (parsed.hostname or "").lower() in hosts:
+            m = path_re.match(parsed.path)
+            if m:
+                return m
+    return None
 
 
 class NameDropService:
@@ -602,20 +623,20 @@ class NameDropService:
         if not src:
             raise ValueError("url or text is required")
         notes: list[str] = []
-        m = _ARXIV_RE.search(src)
+        m = _link_match(src, _ARXIV_HOSTS, _ARXIV_RE)
+        bm = None if m else _link_match(src, _BSKY_HOSTS, _BSKY_POST_RE)
+        xm = None if m or bm else _link_match(src, _X_HOSTS, _X_POST_RE)
         if m:
             people, title = self._from_arxiv(m.group(1), notes)
             kind = "paper"
-        elif _BSKY_POST_RE.search(src):
-            bm = _BSKY_POST_RE.search(src)
-            assert bm is not None
+        elif bm:
             people, title = self._from_bsky_thread(bm.group(1), bm.group(2), notes)
             kind = "bsky_thread"
-        elif _X_POST_RE.search(src):
-            xm = _X_POST_RE.search(src)
-            assert xm is not None
+        elif xm:
+            # X opens a status link whatever name is in it, so the name is only a hint.
             people = [{"name": "", "role": "post author",
-                       "handles": {"x": _handle("@" + xm.group(1), "verified", "author in the post link"),
+                       "handles": {"x": _handle("@" + xm.group(1), "likely",
+                                                "name in the post link; X doesn't check it"),
                                    "bsky": _handle("", "unknown", "")}}]
             title = ""
             kind = "x_post"
@@ -726,7 +747,8 @@ class NameDropService:
             handle = str(actor.get("handle") or "")
             desc = str(actor.get("description") or "")
             if orcid and orcid in desc:
-                return _handle(handle, "verified", "Bluesky bio lists the same ORCID")
+                # A bio can claim any ORCID; only the ORCID record linking back verifies.
+                return _handle(handle, "likely", "Bluesky bio lists the same ORCID; ORCID record doesn't link back")
             return _handle(handle, "likely", "same display name on Bluesky; not cross-linked")
         return _handle("", "unknown", "no Bluesky profile with this name")
 
