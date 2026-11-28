@@ -150,6 +150,9 @@ class AircheckContainer(context: Context) {
         GraphRadarEngine(localGraphDatabase)
     }
     val xArchiveImporter: XArchiveImporter by lazy { XArchiveImporter }
+    val pulseClient: com.example.graph.PulseClient by lazy {
+        com.example.graph.PulseClient(profileStore, ::draftApiClientFor, okHttpClient)
+    }
     val profilingCoordinator: AircheckProfilingCoordinator by lazy {
         AircheckProfilingCoordinator(appContext)
     }
