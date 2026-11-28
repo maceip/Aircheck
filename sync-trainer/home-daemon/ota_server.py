@@ -15,6 +15,7 @@ Endpoints:
   POST /v1/namedrop/resolve                 -> Taggable people/handles from a paper or thread link
   GET|PUT /v1/namedrop/first-look           -> First look list (AIRCHECK_BSKY_HANDLE / _APP_PASSWORD for DMs)
   POST /v1/namedrop/first-look/send         -> Per-person delivery: sent / needs_you / failed
+                                               (both need header X-Aircheck-Token = AIRCHECK_RIG_TOKEN)
   POST /v1/render-video                     -> Enqueues a real Mac Studio talking-head render job
                                                (202 Accepted -> {job_id, status: "QUEUED"})
   GET  /v1/jobs/{job_id}                    -> Real persisted render job status, metrics, and video_url
@@ -37,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 import contextvars
 import datetime
 import hashlib
+import hmac
 import io
 import ipaddress
 import json
@@ -4391,6 +4393,9 @@ PULSE_POST_ROUTES: dict[str, Callable[[Any, Any], dict[str, Any]]] = {
     "/v1/namedrop/resolve": lambda server, body: server.namedrop.resolve(body),
     "/v1/namedrop/first-look/send": lambda server, body: server.namedrop.send_first_look(body),
 }
+RIG_TOKEN_HEADER = "X-Aircheck-Token"
+# Routes that need the shared rig token (they read contacts or send DMs as the creator).
+FIRST_LOOK_PATHS = frozenset({"/v1/namedrop/first-look", "/v1/namedrop/first-look/send"})
 PULSE_PUT_ROUTES: dict[str, Callable[[Any, Any], dict[str, Any]]] = {
     "/v1/pulse/areas": lambda server, body: server.pulse.put_areas(body),
     "/v1/namedrop/first-look": lambda server, body: server.namedrop.put_first_look(body),
@@ -4647,6 +4652,8 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             return
 
         if raw_path == "/v1/namedrop/first-look":
+            if not self._first_look_authorized():
+                return
             self._send_json(HTTPStatus.OK, self.server.namedrop.get_first_look(), head_only=head_only)
             return
 
@@ -5099,9 +5106,29 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path in PULSE_PUT_ROUTES:
+            if parsed.path in FIRST_LOOK_PATHS and not self._first_look_authorized():
+                return
             self._handle_pulse_json(PULSE_PUT_ROUTES[parsed.path])
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found", "detail": parsed.path})
+
+    def _first_look_authorized(self) -> bool:
+        """First Look holds contacts and sends DMs as the creator, so it needs the shared rig token
+        (AIRCHECK_RIG_TOKEN, set by aircheck-rig and pushed to the phone by `sync-phone`).
+        Fails closed: with no token configured, the routes stay locked."""
+        expected = os.environ.get("AIRCHECK_RIG_TOKEN", "").strip()
+        if not expected:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {
+                "error": "locked",
+                "detail": "First Look is locked: the rig has no AIRCHECK_RIG_TOKEN. Start it with aircheck-rig."})
+            return False
+        got = (self.headers.get(RIG_TOKEN_HEADER) or "").strip()
+        if not hmac.compare_digest(got.encode(), expected.encode()):
+            self._send_json(HTTPStatus.UNAUTHORIZED, {
+                "error": "unauthorized",
+                "detail": "Wrong or missing rig token. Run `aircheck-rig sync-phone` with the phone connected."})
+            return False
+        return True
 
     def _handle_pulse_json(self, call: Callable[["OtaHttpServer", Any], dict[str, Any]]) -> None:
         """Pulse / Name-drop JSON endpoints. Failed sources are reported inside the result, not as errors."""
@@ -5135,6 +5162,8 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             self._handle_post_ai_assist()
             return
         if parsed.path in PULSE_POST_ROUTES:
+            if parsed.path in FIRST_LOOK_PATHS and not self._first_look_authorized():
+                return
             self._handle_pulse_json(PULSE_POST_ROUTES[parsed.path])
             return
         if parsed.path == "/v1/draft/transcribe":

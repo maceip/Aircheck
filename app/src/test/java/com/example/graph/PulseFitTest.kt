@@ -44,6 +44,13 @@ class PulseFitTest {
     }
 
     @Test
+    fun rigTokenMustBeSafeAndLongEnough() {
+        assertTrue(RigTokenStore.isValid("0123456789abcdef0123456789abcdef"))
+        assertTrue(!RigTokenStore.isValid("short"))
+        assertTrue(!RigTokenStore.isValid("x'; rm -rf / 0123456789"))
+    }
+
+    @Test
     fun bskyWeaveKeepsDotsAndDoesNotRepeat() {
         assertEquals("new clip @alice.bsky.social", PulseFitScorer.weaveBskyHandle("new clip", "alice.bsky.social"))
         assertEquals("hi @Alice.bsky.social", PulseFitScorer.weaveBskyHandle("hi @Alice.bsky.social", "@alice.bsky.social"))

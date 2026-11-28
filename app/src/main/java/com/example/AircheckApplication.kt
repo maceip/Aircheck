@@ -151,7 +151,10 @@ class AircheckContainer(context: Context) {
     }
     val xArchiveImporter: XArchiveImporter by lazy { XArchiveImporter }
     val pulseClient: com.example.graph.PulseClient by lazy {
-        com.example.graph.PulseClient(profileStore, ::draftApiClientFor, okHttpClient)
+        com.example.graph.PulseClient(profileStore, ::draftApiClientFor, okHttpClient) { rigTokenStore.get() }
+    }
+    val rigTokenStore: com.example.graph.RigTokenStore by lazy {
+        com.example.graph.RigTokenStore(appContext)
     }
     val profilingCoordinator: AircheckProfilingCoordinator by lazy {
         AircheckProfilingCoordinator(appContext)

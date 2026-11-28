@@ -78,6 +78,15 @@ class MainActivity : ComponentActivity() {
 
     private fun consumeStagedRigEndpointFile() {
         val dir = getExternalFilesDir(null) ?: return
+        // Staged by `aircheck-rig sync-phone` next to the endpoint; read once, then deleted.
+        val tokenFile = java.io.File(dir, com.example.graph.RigTokenStore.BOOTSTRAP_FILE)
+        if (tokenFile.isFile) {
+            val token = runCatching { tokenFile.readText(Charsets.UTF_8).trim() }.getOrDefault("")
+            runCatching { tokenFile.delete() }
+            if (com.example.graph.RigTokenStore.isValid(token)) {
+                (application as? AircheckApplication)?.container?.rigTokenStore?.save(token)
+            }
+        }
         val marker = java.io.File(dir, RIG_ENDPOINT_BOOTSTRAP_FILE)
         if (!marker.isFile) return
         val candidate = runCatching { marker.readText(Charsets.UTF_8).trim() }.getOrDefault("")

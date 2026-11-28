@@ -142,10 +142,33 @@ private data class PeopleBody(val people: List<FirstLookPerson>)
  * Talks to the rig's Pulse and Name-drop endpoints. Every call returns a Result: a rig that is
  * offline is a failure the UI shows as "unknown", never a guessed value.
  */
+/**
+ * Shared rig token that unlocks First Look on the rig (AIRCHECK_RIG_TOKEN). It arrives from
+ * `aircheck-rig sync-phone` as a staged file and is kept in app-private preferences.
+ */
+class RigTokenStore(context: android.content.Context) {
+    private val prefs = context.applicationContext.getSharedPreferences("aircheck_rig", android.content.Context.MODE_PRIVATE)
+
+    fun get(): String? = prefs.getString(KEY, null)?.takeIf { it.isNotBlank() }
+
+    fun save(token: String) {
+        prefs.edit().putString(KEY, token.trim()).apply()
+    }
+
+    companion object {
+        private const val KEY = "rig_token"
+        const val BOOTSTRAP_FILE = "rig_token.txt"
+        private val VALID = Regex("^[A-Za-z0-9._-]{16,256}$")
+
+        fun isValid(token: String): Boolean = VALID.matches(token.trim())
+    }
+}
+
 class PulseClient(
     private val profileStore: AircheckProfileStore,
     private val draftApiClientProvider: (String) -> DraftApiClient,
-    private val okHttpClient: OkHttpClient
+    private val okHttpClient: OkHttpClient,
+    private val rigToken: () -> String? = { null }
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
 
@@ -195,7 +218,9 @@ class PulseClient(
         }
 
     private fun <T> execute(base: String, method: String, path: String, body: String?, serializer: KSerializer<T>): Result<T> {
-        val req = Request.Builder().url(base + path).method(method, body?.toRequestBody(JSON_MEDIA_TYPE)).build()
+        val builder = Request.Builder().url(base + path).method(method, body?.toRequestBody(JSON_MEDIA_TYPE))
+        rigToken()?.let { builder.header(RIG_TOKEN_HEADER, it) }
+        val req = builder.build()
         okHttpClient.newCall(req).execute().use { resp ->
             val raw = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
@@ -211,5 +236,6 @@ class PulseClient(
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+        const val RIG_TOKEN_HEADER = "X-Aircheck-Token"
     }
 }

@@ -116,6 +116,7 @@ type Config struct {
 	StateFile    string
 	PidFile      string
 	SecretFile   string
+	TokenFile    string
 	PythonBin    string
 	NodeBin      string
 	UvBin        string
@@ -267,6 +268,7 @@ func buildConfig(enableTunnel, enableLambda, syncPhone bool, lambdaTarget string
 		StateFile:    filepath.Join(stateDir, "state.json"),
 		PidFile:      filepath.Join(stateDir, "rig.pid"),
 		SecretFile:   filepath.Join(stateDir, "tunnel_secret"),
+		TokenFile:    filepath.Join(stateDir, "rig_token"),
 		PythonBin:    pythonBin,
 		NodeBin:      nodeBin,
 		UvBin:        uvBin,
@@ -361,6 +363,37 @@ func loadOrCreateTunnelSecret(path string) (string, error) {
 		return "", err
 	}
 	return secret, nil
+}
+
+// loadRigToken returns the shared token that First Look routes on :8443 require
+// (AIRCHECK_RIG_TOKEN). An explicit value from the environment or .aircheck-rig/env wins;
+// otherwise one is generated once into .aircheck-rig/rig_token (gitignored, mode 0600).
+func loadRigToken(cfg *Config) (string, error) {
+	tok := strings.TrimSpace(os.Getenv("AIRCHECK_RIG_TOKEN"))
+	for _, kv := range rigEnvFile(cfg.RepoRoot) {
+		if strings.HasPrefix(kv, "AIRCHECK_RIG_TOKEN=") {
+			tok = strings.Trim(strings.TrimSpace(strings.TrimPrefix(kv, "AIRCHECK_RIG_TOKEN=")), "\"'")
+		}
+	}
+	if tok == "" {
+		return loadOrCreateTunnelSecret(cfg.TokenFile)
+	}
+	if !validRigToken(tok) {
+		return "", errors.New("AIRCHECK_RIG_TOKEN may only use letters, digits, '.', '_' or '-'")
+	}
+	return tok, nil
+}
+
+func validRigToken(tok string) bool {
+	if len(tok) < 16 {
+		return false
+	}
+	for _, r := range tok {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func newCapabilityProxyHandler(target *url.URL, secret string) http.Handler {
@@ -520,6 +553,10 @@ func runSupervisor(cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("tunnel secret: %w", err)
 	}
+	rigToken, err := loadRigToken(cfg)
+	if err != nil {
+		return fmt.Errorf("rig token: %w", err)
+	}
 
 	remotionServerJs := filepath.Join(cfg.RepoRoot, "backend", "remotion-worker", "dist", "server.js")
 	if _, err := os.Stat(remotionServerJs); err != nil {
@@ -650,6 +687,7 @@ func runSupervisor(cfg *Config) error {
 			fmt.Sprintf("AIRCHECK_MLX_URL=http://127.0.0.1:%d", cfg.MlxPort),
 			fmt.Sprintf("AIRCHECK_VIDEO_ENDPOINT=http://127.0.0.1:%d", defaultVideoPort),
 			fmt.Sprintf("AIRCHECK_VOICE_ENDPOINT=http://127.0.0.1:%d", defaultVoicePort),
+			"AIRCHECK_RIG_TOKEN="+rigToken,
 		)
 		return c
 	}, nil)
@@ -675,7 +713,7 @@ func runSupervisor(cfg *Config) error {
 					logf("5G HTTPS Rig URL live: %s", full)
 					saveState()
 					if cfg.SyncPhone {
-						if dev, err := pushRigEndpointToPhone(cfg.AdbBin, full); err == nil && dev != "" {
+						if dev, err := pushRigEndpointToPhone(cfg.AdbBin, full, rigToken); err == nil && dev != "" {
 							stateMu.Lock()
 							state.SyncedDevice = dev
 							stateMu.Unlock()
@@ -722,7 +760,7 @@ func runSupervisor(cfg *Config) error {
 					target = lan
 				}
 				if serial := firstOnlineDevice(cfg.AdbBin); serial != "" && target != "" && serial+"|"+target != lastPhoneSync {
-					if dev, err := pushRigEndpointToPhone(cfg.AdbBin, target); err == nil && dev != "" {
+					if dev, err := pushRigEndpointToPhone(cfg.AdbBin, target, rigToken); err == nil && dev != "" {
 						lastPhoneSync = serial + "|" + target
 						stateMu.Lock()
 						state.SyncedDevice = dev
@@ -900,7 +938,11 @@ func syncPhoneNow(cfg *Config) error {
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("http://%s:%d", detectLanIPv4(), defaultOtaPort)
 	}
-	dev, err := pushRigEndpointToPhone(cfg.AdbBin, targetURL)
+	rigToken, err := loadRigToken(cfg)
+	if err != nil {
+		return fmt.Errorf("rig token: %w", err)
+	}
+	dev, err := pushRigEndpointToPhone(cfg.AdbBin, targetURL, rigToken)
 	if err != nil {
 		return err
 	}
@@ -908,7 +950,7 @@ func syncPhoneNow(cfg *Config) error {
 	return nil
 }
 
-func pushRigEndpointToPhone(adbBin, rigURL string) (string, error) {
+func pushRigEndpointToPhone(adbBin, rigURL, rigToken string) (string, error) {
 	if adbBin == "" {
 		return "", errors.New("adb not found")
 	}
@@ -919,9 +961,13 @@ func pushRigEndpointToPhone(adbBin, rigURL string) (string, error) {
 	_ = exec.Command(adbBin, "-s", serial, "reverse", fmt.Sprintf("tcp:%d", defaultOtaPort), fmt.Sprintf("tcp:%d", defaultOtaPort)).Run()
 	remoteDir := fmt.Sprintf("/sdcard/Android/data/%s/files", androidAppId)
 	escaped := strings.ReplaceAll(rigURL, "'", "")
+	if !validRigToken(rigToken) {
+		return "", errors.New("rig token has characters other than letters, digits, '.', '_' or '-'")
+	}
+	// The app reads and deletes both files on launch; the token unlocks First Look on the rig.
 	shellCmd := fmt.Sprintf(
-		"mkdir -p %s && printf '%%s' '%s' > %s/rig_endpoint.txt && am start -n %s >/dev/null 2>&1 || true",
-		remoteDir, escaped, remoteDir, androidMainActivity,
+		"mkdir -p %s && printf '%%s' '%s' > %s/rig_token.txt && printf '%%s' '%s' > %s/rig_endpoint.txt && am start -n %s >/dev/null 2>&1 || true",
+		remoteDir, rigToken, remoteDir, escaped, remoteDir, androidMainActivity,
 	)
 	if out, err := exec.Command(adbBin, "-s", serial, "shell", shellCmd).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("adb shell failed: %v (%s)", err, strings.TrimSpace(string(out)))

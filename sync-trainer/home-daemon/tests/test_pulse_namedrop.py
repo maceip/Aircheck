@@ -326,6 +326,7 @@ def test_http_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ota_server import create_ota_server
 
     monkeypatch.delenv("AIRCHECK_BSKY_HANDLE", raising=False)
+    monkeypatch.delenv("AIRCHECK_RIG_TOKEN", raising=False)
     server = create_ota_server(host="127.0.0.1", port=0, bundles_root=tmp_path / "bundles",
                                preferences_path=tmp_path / "prefs.jsonl", quiet=True)
     import threading
@@ -333,17 +334,32 @@ def test_http_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     try:
-        def call(method: str, path: str, body: Any | None = None) -> tuple[int, Any]:
+        def call(method: str, path: str, body: Any | None = None, token: str | None = None) -> tuple[int, Any]:
             conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
             data = json.dumps(body).encode() if body is not None else None
-            conn.request(method, path, body=data, headers={"Content-Type": "application/json"} if data else {})
+            headers = {"Content-Type": "application/json"} if data else {}
+            if token is not None:
+                headers["X-Aircheck-Token"] = token
+            conn.request(method, path, body=data, headers=headers)
             r = conn.getresponse()
             return r.status, json.loads(r.read() or b"null")
 
         assert call("PUT", "/v1/pulse/areas", {"areas": ["AI chips"]})[1]["areas"] == ["AI chips"]
         assert call("GET", "/v1/pulse/areas")[1]["areas"] == ["AI chips"]
-        status, body = call("PUT", "/v1/namedrop/first-look", {"people": [{"platform": "x", "address": "@a"}]})
+        people = {"people": [{"platform": "x", "address": "@a"}]}
+        # No token configured on the rig: First Look stays locked (fails closed).
+        assert call("PUT", "/v1/namedrop/first-look", people, token="x")[0] == 503
+        monkeypatch.setenv("AIRCHECK_RIG_TOKEN", "s3cret-token")
+        for method, path, body in (("GET", "/v1/namedrop/first-look", None),
+                                   ("PUT", "/v1/namedrop/first-look", people),
+                                   ("POST", "/v1/namedrop/first-look/send", {"text": "hi"})):
+            assert call(method, path, body)[0] == 401
+            assert call(method, path, body, token="wrong")[0] == 401
+        status, body = call("PUT", "/v1/namedrop/first-look", people, token="s3cret-token")
         assert status == 200 and body["people"][0]["address"] == "@a"
+        assert call("GET", "/v1/namedrop/first-look", token="s3cret-token")[0] == 200
+        # Pulse and Name-drop lookups don't need the token.
+        assert call("GET", "/v1/pulse/areas")[0] == 200
         assert call("POST", "/v1/namedrop/resolve", {})[0] == 400
         assert call("PUT", "/v1/nope", {})[0] == 404
     finally:
