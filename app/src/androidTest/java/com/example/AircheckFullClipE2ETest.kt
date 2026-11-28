@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.Log
+import android.view.WindowManager
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
@@ -85,6 +86,15 @@ class AircheckFullClipE2ETest {
         val inst = InstrumentationRegistry.getInstrumentation()
         inst.uiAutomation.grantRuntimePermission(inst.targetContext.packageName, Manifest.permission.RECORD_AUDIO)
         inst.uiAutomation.grantRuntimePermission(inst.targetContext.packageName, Manifest.permission.POST_NOTIFICATIONS)
+        // The run lasts far longer than the screen timeout: wake the device and keep this activity
+        // visible (over the lock screen too) for the whole run. Test-only window flags, no settings.
+        inst.uiAutomation.executeShellCommand("input keyevent KEYCODE_WAKEUP").close()
+        composeRule.runOnUiThread {
+            composeRule.activity.setShowWhenLocked(true)
+            composeRule.activity.setTurnScreenOn(true)
+            composeRule.activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        inst.waitForIdleSync()
     }
 
     @After
