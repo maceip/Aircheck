@@ -208,8 +208,13 @@ private fun PulseSheet(
                         if (score.boostsHeld) {
                             AcCard(modifier = Modifier.fillMaxWidth().testTag("pulse_claim_held")) {
                                 SectionCaption("Claim about a real person", color = AcTokens.Red)
+                                val failed = score.claims.filter { it.kind == "allegation" && it.status == "unknown" }
                                 Text(
-                                    "${score.heldReason}. No news source found. Boosts stay off until you add a source or use a reframe.",
+                                    if (failed.isEmpty()) {
+                                        "${score.heldReason}. No news source found. Boosts stay off until you add a source or use a reframe."
+                                    } else {
+                                        "${score.heldReason}. The news check didn't run (${failed.first().detail}), so it's unknown whether a source exists. Boosts stay off until you add a source or use a reframe."
+                                    },
                                     style = AcType.Body
                                 )
                             }
@@ -557,6 +562,7 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
     var newPlatform by rememberSaveable { mutableStateOf("x") }
     var postLink by rememberSaveable { mutableStateOf("") }
     var sendResult by remember { mutableStateOf<FirstLookSendResponse?>(null) }
+    var sending by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         container.pulseClient.areas()
@@ -720,13 +726,17 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().testTag("first_look_post_link")
                 )
                 AcPrimaryKey(
-                    label = "send to first look",
-                    enabled = postLink.trim().startsWith("http") && current?.people?.any { it.on } == true,
+                    label = if (sending) "sending…" else "send to first look",
+                    enabled = !sending && postLink.trim().startsWith("http") && current?.people?.any { it.on } == true,
                     onClick = {
+                        if (sending) return@AcPrimaryKey
+                        // One send at a time: a double tap must not DM everyone twice.
+                        sending = true
                         scope.launch {
                             container.pulseClient.sendFirstLook(postLink.trim(), "")
                                 .onSuccess { sendResult = it }
                                 .onFailure { listNote = "Couldn't send: ${it.message}" }
+                            sending = false
                         }
                     },
                     modifier = Modifier.fillMaxWidth().testTag("first_look_send")

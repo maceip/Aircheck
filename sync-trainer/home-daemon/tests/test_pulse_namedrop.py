@@ -263,7 +263,8 @@ def test_http_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_cited_link_in_text_releases_boosts_without_news_lookup(tmp_path: Path) -> None:
-    fetch = FakeFetch({"timelinevolraw": _gdelt_timeline})
+    fetch = FakeFetch({"timelinevolraw": _gdelt_timeline,
+                       "news.example/story-1": "<p>Reports about Jensen Huang this week</p>"})
     llm = FakeLlm(ANALYSIS, json.dumps({"boosts": [{"kind": "hook", "text": "L", "why": "w"}]}))
     svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW)
     out = svc.score({"text": "jensen story https://news.example/story-1"})
@@ -271,6 +272,29 @@ def test_cited_link_in_text_releases_boosts_without_news_lookup(tmp_path: Path) 
     assert out["claims"][0]["sources"][0]["url"] == "https://news.example/story-1"
     assert out["boosts_held"] is False and out["boosts"][0]["kind"] == "hook"
     assert not any("artlist" in url for url, _ in fetch.calls)
+
+
+def test_unrelated_link_does_not_release_an_allegation(tmp_path: Path) -> None:
+    fetch = FakeFetch({"timelinevolraw": _gdelt_timeline, "artlist": {"articles": []},
+                       "me.example": "<p>my homepage about baking</p>"})
+    llm = FakeLlm(ANALYSIS, json.dumps({"boosts": [{"kind": "hook", "text": "He CHEATED", "why": "w"}]}))
+    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW)
+    out = svc.score({"text": "jensen cheated lol https://me.example/"})
+    assert out["claims"][0]["status"] == "unsourced"
+    assert out["boosts_held"] is True and out["boosts"] == []
+
+
+def test_malformed_llm_collections_degrade_to_empty(tmp_path: Path) -> None:
+    llm = FakeLlm(json.dumps({"query": "q", "entities": "x", "claims": 1}), json.dumps({"boosts": {"a": 1}}))
+    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=FakeFetch({}), bsky=pn.BskySession("", ""),
+                          clock=lambda: NOW)
+    out = svc.score({"text": "some idea about chips"})
+    assert out["entities"] == [] and out["claims"] == [] and out["boosts"] == []
+
+
+def test_legacy_dotted_arxiv_id_is_recognised() -> None:
+    m = pn._ARXIV_RE.search("https://arxiv.org/abs/math.GT/0309136")
+    assert m is not None and m.group(1) == "math.GT/0309136"
 
 
 def test_heat_ratio_averages_two_middle_values_and_empty_query_is_unmeasured(tmp_path: Path) -> None:

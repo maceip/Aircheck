@@ -339,6 +339,26 @@ def _llm_json(llm_router: Any, system: str, user: str, *, max_tokens: int = 700)
     return parsed, f"{getattr(result, 'provider', '?')}/{getattr(result, 'model', '?')}"
 
 
+def _as_list(value: Any) -> list[Any]:
+    """LLM JSON fields that should be arrays; anything else counts as empty, never a crash."""
+    return value if isinstance(value, list) else []
+
+
+def _link_mentions(url: str, about: str, fetch: Fetcher) -> bool:
+    """True only if the cited page loads and names the person/org the claim is about."""
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z'\-]+", about) if len(w) > 2]
+    if not words:
+        return False
+    try:
+        page = fetch(url, want="text")
+    except FetchError:
+        return False
+    if not isinstance(page, str):
+        return False
+    lowered = page.lower()
+    return words[-1].lower() in lowered
+
+
 def check_claim(claim: dict[str, Any], fetch: Fetcher) -> dict[str, Any]:
     query = str(claim.get("search") or "").strip() or f"{claim.get('about', '')} {claim.get('text', '')}".strip()
     out = {"text": str(claim.get("text") or ""), "about": str(claim.get("about") or ""),
@@ -415,12 +435,12 @@ class PulseService:
         entities: list[dict[str, str]] = []
         raw_claims: list[dict[str, Any]] = []
         if analysis:
-            for e in analysis.get("entities") or []:
+            for e in _as_list(analysis.get("entities")):
                 if isinstance(e, dict) and str(e.get("name") or "").strip():
                     entities.append({"name": str(e.get("name")).strip(),
                                      "corrected_name": str(e.get("corrected_name") or "").strip(),
                                      "kind": str(e.get("kind") or "topic")})
-            raw_claims = [c for c in analysis.get("claims") or [] if isinstance(c, dict)]
+            raw_claims = [c for c in _as_list(analysis.get("claims")) if isinstance(c, dict)]
         query = (str(analysis.get("query") or "").strip() if analysis else "") or naive_query(text)
 
         cited = [{"title": "", "url": u, "domain": urllib.parse.urlsplit(u).netloc}
@@ -429,11 +449,14 @@ class PulseService:
         for c in raw_claims:
             if c.get("kind") not in ("allegation", "fact"):
                 continue
-            if cited:
+            supporting = [link for link in cited if _link_mentions(link["url"], str(c.get("about") or ""), fetch)]
+            if supporting:
                 claims.append({"text": str(c.get("text") or ""), "about": str(c.get("about") or ""),
                                "kind": str(c.get("kind") or ""), "query": "", "status": "cited",
-                               "sources": cited[:3], "detail": "you cited a source in the text"})
+                               "sources": supporting[:3],
+                               "detail": f"your link mentions {c.get('about') or 'them'}; check it backs the claim"})
             else:
+                # A link that doesn't even name the person can't stand in for a source.
                 claims.append(check_claim(c, fetch))
         held = [c for c in claims if c["kind"] == "allegation" and c["status"] not in ("sourced", "cited")]
 
@@ -458,7 +481,7 @@ class PulseService:
             text=text, field=field, areas=", ".join(areas) or "unknown", heat=heat_summary,
             held=HELD_NOTE if held else "", n=2 if held else 3))
         if boost_json:
-            for b in boost_json.get("boosts") or []:
+            for b in _as_list(boost_json.get("boosts")):
                 if not isinstance(b, dict) or not str(b.get("text") or "").strip():
                     continue
                 kind = str(b.get("kind") or "angle")
@@ -488,7 +511,7 @@ class PulseService:
 # Name-drop
 # --------------------------------------------------------------------------------------------
 
-_ARXIV_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?|[a-z\-]+/[0-9]{7})", re.I)
+_ARXIV_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?|[a-z\-]+(?:\.[A-Za-z\-]+)?/[0-9]{7})", re.I)
 _DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>]+)", re.I)
 _BSKY_POST_RE = re.compile(r"bsky\.app/profile/([^/\s]+)/post/([A-Za-z0-9]+)")
 _X_POST_RE = re.compile(r"(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status/(\d+)", re.I)

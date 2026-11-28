@@ -47,6 +47,7 @@ class PulseFitTest {
             "Jensen Huang got caught",
             PulseFitScorer.applyCorrection("jhensen wang got caught", "jhensen wang", "Jensen Huang")
         )
+        assertEquals("Anne made an announcement", PulseFitScorer.applyCorrection("Ann made an announcement", "Ann", "Anne"))
     }
 
     @Test

@@ -45,10 +45,12 @@ object PulseFitScorer {
         return if (pct >= 0) "+$pct%" else "$pct%"
     }
 
-    /** Replaces [from] with [to] in [text], ignoring case, for the "did you mean" fix. */
+    /** Replaces whole-word [from] with [to] in [text], ignoring case, for the "did you mean" fix. */
     fun applyCorrection(text: String, from: String, to: String): String {
         if (from.isBlank() || to.isBlank()) return text
-        return text.replace(from, to, ignoreCase = true)
+        // Whole words only, so fixing "Ann" never rewrites "announcement".
+        val pattern = Regex("(?<![\\p{L}\\p{N}])" + Regex.escape(from) + "(?![\\p{L}\\p{N}])", RegexOption.IGNORE_CASE)
+        return pattern.replace(text) { to }
     }
 }
 
