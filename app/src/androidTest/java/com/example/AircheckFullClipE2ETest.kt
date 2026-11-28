@@ -2,6 +2,7 @@ package com.example
 
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -92,6 +93,11 @@ class AircheckFullClipE2ETest {
         // The run lasts far longer than the screen timeout: wake the device and keep this activity
         // visible (over the lock screen too) for the whole run. Test-only window flags, no settings.
         inst.uiAutomation.executeShellCommand("input keyevent KEYCODE_WAKEUP").close()
+        // The Cut timeline sits below the player in portrait; a phone held sideways hides it.
+        // This may recreate the activity, so the window flags below go on the current one.
+        composeRule.runOnUiThread { composeRule.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
+        inst.waitForIdleSync()
+        Thread.sleep(1_500L)
         composeRule.runOnUiThread {
             composeRule.activity.setShowWhenLocked(true)
             composeRule.activity.setTurnScreenOn(true)
