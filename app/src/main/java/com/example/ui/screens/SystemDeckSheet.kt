@@ -59,6 +59,7 @@ import com.example.data.BrandChannel
 import com.example.data.HardwareTheme
 import com.example.ui.RigConnectionStatus
 import com.example.ui.StudioUiState
+import com.example.ui.clipstudio.PulseSettingsCard
 import com.example.ui.clipstudio.SectionCaption
 import com.example.ui.clipstudio.StudioStatusLine
 import com.example.ui.clipstudio.StudioToast
@@ -336,6 +337,11 @@ fun SystemDeckSheet(
                     item(key = "activity_card") {
                         ActivityLogCard(loadLogs = onLoadActivity)
                     }
+                }
+
+                item(key = "pulse_settings_entry") {
+                    SettingsGroupCaption("Pulse")
+                    PulseSettingsCard()
                 }
 
                 item(key = "newsroom_studio_entry") {

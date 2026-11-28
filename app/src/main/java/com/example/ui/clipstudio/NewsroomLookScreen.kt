@@ -655,6 +655,7 @@ private fun ChyronEditSheet(state: StudioUiState, vm: StudioViewModel, currentTi
                     }
                 }
             )
+            PulseLine(text = headline, field = PulseField.HEADLINE, onReplace = { headline = it })
             AcField(
                 value = subline,
                 onValueChange = { subline = it },

@@ -868,6 +868,7 @@ private fun OutlineBeatCard(
                     .fillMaxWidth()
                     .testTag("cs_beat_editor_$index")
             )
+            PulseLine(text = text, field = PulseField.BEAT, onReplace = { text = it })
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AcKey(
                     label = "save",
@@ -921,6 +922,12 @@ private fun TypedIdeaBottomSheet(
                 .fillMaxWidth()
                 .testTag("cs_voice_note_editor")
         )
+        PulseLine(
+            text = text,
+            field = PulseField.NOTE,
+            onReplace = { text = it },
+            modifier = Modifier.padding(horizontal = 14.dp)
+        )
         StudioDock(
             primaryLabel = "outline this idea",
             primaryIcon = Icons.AutoMirrored.Sharp.ArrowForward,
@@ -962,6 +969,12 @@ private fun NoteEditBottomSheet(
                 .padding(horizontal = 14.dp)
                 .fillMaxWidth()
                 .testTag("cs_voice_note_editor")
+        )
+        PulseLine(
+            text = text,
+            field = PulseField.NOTE,
+            onReplace = { text = it },
+            modifier = Modifier.padding(horizontal = 14.dp)
         )
 
         Row(

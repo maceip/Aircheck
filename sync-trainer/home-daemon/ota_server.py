@@ -10,6 +10,12 @@ Endpoints:
   POST /v1/preferences                      -> Strictly validates every NDJSON/JSONL line against
                                                preference_tuple.schema.json (400 on any malformed record)
                                                and atomically appends valid lines to preferences.jsonl
+  POST /v1/pulse/score                      -> Pulse: claim check, per-source heat, boosts (pulse_namedrop.py)
+  GET|PUT /v1/pulse/areas                   -> Creator's areas list
+  POST /v1/namedrop/resolve                 -> Taggable people/handles from a paper or thread link
+  GET|PUT /v1/namedrop/first-look           -> First look list (AIRCHECK_BSKY_HANDLE / _APP_PASSWORD for DMs)
+  POST /v1/namedrop/first-look/send         -> Per-person delivery: sent / needs_you / failed
+                                               (both need header X-Aircheck-Token = AIRCHECK_RIG_TOKEN)
   POST /v1/render-video                     -> Enqueues a real Mac Studio talking-head render job
                                                (202 Accepted -> {job_id, status: "QUEUED"})
   GET  /v1/jobs/{job_id}                    -> Real persisted render job status, metrics, and video_url
@@ -32,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 import contextvars
 import datetime
 import hashlib
+import hmac
 import io
 import ipaddress
 import json
@@ -99,6 +106,7 @@ from media_providers.registry import (
     build_provider_catalog,
     load_config as load_media_config,
 )
+from pulse_namedrop import NameDropService, PulseService
 from llm_router import (
     LlmProviderError,
     LlmRouter,
@@ -4457,6 +4465,21 @@ def _run_ai_assist(
     return {"mode": mode, "text": polished, "llm_meta": res.llm_meta}
 
 
+MAX_PULSE_BODY_BYTES = 64 * 1024
+PULSE_POST_ROUTES: dict[str, Callable[[Any, Any], dict[str, Any]]] = {
+    "/v1/pulse/score": lambda server, body: server.pulse.score(body),
+    "/v1/namedrop/resolve": lambda server, body: server.namedrop.resolve(body),
+    "/v1/namedrop/first-look/send": lambda server, body: server.namedrop.send_first_look(body),
+}
+RIG_TOKEN_HEADER = "X-Aircheck-Token"
+# Routes that need the shared rig token (they read contacts or send DMs as the creator).
+FIRST_LOOK_PATHS = frozenset({"/v1/namedrop/first-look", "/v1/namedrop/first-look/send"})
+PULSE_PUT_ROUTES: dict[str, Callable[[Any, Any], dict[str, Any]]] = {
+    "/v1/pulse/areas": lambda server, body: server.pulse.put_areas(body),
+    "/v1/namedrop/first-look": lambda server, body: server.namedrop.put_first_look(body),
+}
+
+
 class OtaHttpServer(ThreadingHTTPServer):
     """Multi-threaded stdlib HTTP server holding OtaBundleStore, RenderJobManager & DraftPassEngine."""
 
@@ -4493,6 +4516,8 @@ class OtaHttpServer(ThreadingHTTPServer):
         self.llm_config_path = resolved_llm_cfg
         self.llm_router = llm_router or LlmRouter(config_path=resolved_llm_cfg)
         self.draft_engine = draft_engine or DraftPassEngine(llm_router=self.llm_router)
+        self.pulse = PulseService(self.render_manager.renders_dir, llm_router=self.llm_router)
+        self.namedrop = NameDropService(self.render_manager.renders_dir)
         self.quiet = quiet
         self._remotion_lock = threading.Lock()
         self._remotion_state_path = self.render_manager.renders_dir / "remotion_state.json"
@@ -4698,6 +4723,16 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
 
         if raw_path == "/v1/logs":
             self._handle_get_logs(head_only=head_only)
+            return
+
+        if raw_path == "/v1/pulse/areas":
+            self._send_json(HTTPStatus.OK, self.server.pulse.get_areas(), head_only=head_only)
+            return
+
+        if raw_path == "/v1/namedrop/first-look":
+            if not self._first_look_authorized():
+                return
+            self._send_json(HTTPStatus.OK, self.server.namedrop.get_first_look(), head_only=head_only)
             return
 
         if raw_path.startswith("/v1/plates/") and raw_path.endswith(".png"):
@@ -5146,6 +5181,50 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             )
             return None
 
+    def do_PUT(self) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path in PULSE_PUT_ROUTES:
+            if parsed.path in FIRST_LOOK_PATHS and not self._first_look_authorized():
+                return
+            self._handle_pulse_json(PULSE_PUT_ROUTES[parsed.path])
+            return
+        self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found", "detail": parsed.path})
+
+    def _first_look_authorized(self) -> bool:
+        """First Look holds contacts and sends DMs as the creator, so it needs the shared rig token
+        (AIRCHECK_RIG_TOKEN, set by aircheck-rig and pushed to the phone by `sync-phone`).
+        Fails closed: with no token configured, the routes stay locked."""
+        expected = os.environ.get("AIRCHECK_RIG_TOKEN", "").strip()
+        if not expected:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {
+                "error": "locked",
+                "detail": "First Look is locked: the rig has no AIRCHECK_RIG_TOKEN. Start it with aircheck-rig."})
+            return False
+        got = (self.headers.get(RIG_TOKEN_HEADER) or "").strip()
+        if not hmac.compare_digest(got.encode(), expected.encode()):
+            self._send_json(HTTPStatus.UNAUTHORIZED, {
+                "error": "unauthorized",
+                "detail": "Wrong or missing rig token. Run `aircheck-rig sync-phone` with the phone connected."})
+            return False
+        return True
+
+    def _handle_pulse_json(self, call: Callable[["OtaHttpServer", Any], dict[str, Any]]) -> None:
+        """Pulse / Name-drop JSON endpoints. Failed sources are reported inside the result, not as errors."""
+        text_body = self._read_post_utf8_body(max_bytes=MAX_PULSE_BODY_BYTES, empty_detail="Empty request body")
+        if text_body is None:
+            return
+        try:
+            decoded = json.loads(text_body)
+        except json.JSONDecodeError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bad_request", "detail": f"Invalid JSON body: {exc}"})
+            return
+        try:
+            result = call(self.server, decoded)
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, result)
+
     def do_POST(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path == "/v1/preferences":
@@ -5159,6 +5238,11 @@ class OtaRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/ai-assist":
             self._handle_post_ai_assist()
+            return
+        if parsed.path in PULSE_POST_ROUTES:
+            if parsed.path in FIRST_LOOK_PATHS and not self._first_look_authorized():
+                return
+            self._handle_pulse_json(PULSE_POST_ROUTES[parsed.path])
             return
         if parsed.path == "/v1/draft/transcribe":
             self._handle_post_draft_pass("transcribe", max_bytes=MAX_DRAFT_AUDIO_BODY_BYTES)

@@ -166,3 +166,37 @@ func TestRotateLogKeepsOnePreviousFile(t *testing.T) {
 		t.Fatalf("small log must not be rotated")
 	}
 }
+
+func TestLoadRigTokenGeneratesOnceAndHonoursEnv(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".aircheck-rig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{RepoRoot: root, TokenFile: filepath.Join(root, ".aircheck-rig", "rig_token")}
+	t.Setenv("AIRCHECK_RIG_TOKEN", "")
+	first, err := loadRigToken(cfg)
+	if err != nil || len(first) < 32 {
+		t.Fatalf("generated token = %q, %v", first, err)
+	}
+	again, _ := loadRigToken(cfg)
+	if again != first {
+		t.Fatalf("token changed between loads: %q vs %q", first, again)
+	}
+	if info, err := os.Stat(cfg.TokenFile); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("token file mode: %v %v", info, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".aircheck-rig", "env"), []byte("AIRCHECK_RIG_TOKEN=abcdefghijklmnop-123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := loadRigToken(cfg); got != "abcdefghijklmnop-123" {
+		t.Fatalf("env file token not used: %q", got)
+	}
+	if validRigToken(strings.Repeat("a", 257)) {
+		t.Fatal("token longer than the phone accepts was allowed")
+	}
+	t.Setenv("AIRCHECK_RIG_TOKEN", "x'; rm -rf /")
+	os.Remove(filepath.Join(root, ".aircheck-rig", "env"))
+	if _, err := loadRigToken(cfg); err == nil {
+		t.Fatal("unsafe token accepted")
+	}
+}
