@@ -11,11 +11,13 @@ The paid X API is not used.
 from __future__ import annotations
 
 import datetime as _dt
+import http.client
 import ipaddress
 import json
 import os
 import re
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -30,6 +32,7 @@ USER_AGENT = "Aircheck-rig/1.0 (+https://github.com/maceip/Aircheck)"
 HTTP_TIMEOUT_SEC = 8.0
 CACHE_TTL_SEC = 15 * 60
 MAX_TEXT_CHARS = 2000
+KEY_AUTHOR_LOOKUPS = 5
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 HN_SEARCH_URL = "https://hn.algolia.com/api/v1/search_by_date"
@@ -37,6 +40,7 @@ WIKI_OPENSEARCH_URL = "https://en.wikipedia.org/w/api.php"
 WIKI_PAGEVIEWS_URL = "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user"
 BSKY_PUBLIC_URL = "https://public.api.bsky.app/xrpc"
 BSKY_PDS_URL = "https://bsky.social/xrpc"
+PLC_DIRECTORY_URL = "https://plc.directory"
 BSKY_CHAT_PROXY = "did:web:api.bsky.chat#bsky_chat"
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 OPENALEX_URL = "https://api.openalex.org"
@@ -148,6 +152,8 @@ _STOPWORDS = frozenset(
 
 
 def naive_query(text: str) -> str:
+    # Links aren't topic words: "https example com" would be measured as the idea's heat.
+    text = _URL_RE.sub(" ", text)
     words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]+", text.lower()) if w not in _STOPWORDS]
     return " ".join(words[:5])
 
@@ -242,7 +248,7 @@ def heat_bsky(query: str, fetch: Fetcher, now: _dt.datetime, session: "BskySessi
         return _source_result("bsky", ok=False, detail="Bluesky search needs an app password on the rig")
     try:
         token = session.token(fetch)
-        url = BSKY_PDS_URL + "/app.bsky.feed.searchPosts?" + urllib.parse.urlencode(
+        url = session.pds(fetch) + "/app.bsky.feed.searchPosts?" + urllib.parse.urlencode(
             {"q": query, "since": _iso(now - _dt.timedelta(hours=24)), "limit": 100, "sort": "latest"})
         posts = fetch(url, headers={"Authorization": f"Bearer {token}"}).get("posts", [])
     except FetchError as exc:
@@ -276,17 +282,46 @@ class BskySession:
         self._lock = threading.Lock()
         self._jwt: str | None = None
         self._did: str | None = None
+        self._pds: str | None = None
         self._at = 0.0
 
     @property
     def configured(self) -> bool:
         return bool(self.handle and self.app_password)
 
+    def pds(self, fetch: Fetcher) -> str:
+        """The sender's own PDS xrpc base (authenticated calls must go there), from handle -> DID
+        -> DID document. Falls back to bsky.social only when the lookup can't be done."""
+        with self._lock:
+            if self._pds:
+                return self._pds
+        base = BSKY_PDS_URL
+        try:
+            did = str(fetch(BSKY_PUBLIC_URL + "/com.atproto.identity.resolveHandle?" +
+                            urllib.parse.urlencode({"handle": self.handle.lstrip("@")}))["did"])
+            if did.startswith("did:plc:"):
+                doc = fetch(PLC_DIRECTORY_URL + "/" + urllib.parse.quote(did, safe=":"))
+            elif did.startswith("did:web:"):
+                doc = fetch("https://" + did[len("did:web:"):] + "/.well-known/did.json")
+            else:
+                doc = {}
+            for svc in (doc.get("service") or []) if isinstance(doc, dict) else []:
+                endpoint = str(svc.get("serviceEndpoint") or "") if isinstance(svc, dict) else ""
+                if str(svc.get("id") or "").endswith("#atproto_pds") and endpoint.startswith("https://"):
+                    base = endpoint.rstrip("/") + "/xrpc"
+                    break
+        except (FetchError, KeyError, TypeError):
+            pass
+        with self._lock:
+            self._pds = base
+        return base
+
     def token(self, fetch: Fetcher) -> str:
+        pds = self.pds(fetch)
         with self._lock:
             if self._jwt and time.monotonic() - self._at < 30 * 60:
                 return self._jwt
-            data = fetch(BSKY_PDS_URL + "/com.atproto.server.createSession", method="POST",
+            data = fetch(pds + "/com.atproto.server.createSession", method="POST",
                          body={"identifier": self.handle, "password": self.app_password})
             try:
                 self._jwt = str(data["accessJwt"])
@@ -346,49 +381,81 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-def is_public_http_url(url: str, resolve: Callable[[str], list[str]] | None = None) -> bool:
-    """http(s) URL whose host resolves only to public addresses (no loopback, LAN, link-local)."""
+def public_addresses(url: str, resolve: Callable[[str], list[str]] | None = None) -> list[str]:
+    """The addresses an http(s) URL's host resolves to, or [] unless every one is public
+    (no loopback, LAN, link-local)."""
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
-        return False
+        return []
     if parts.scheme not in ("http", "https") or not parts.hostname:
-        return False
+        return []
     resolver = resolve or (lambda host: [ai[4][0] for ai in socket.getaddrinfo(host, None)])
     try:
         addrs = resolver(parts.hostname)
     except (OSError, UnicodeError):
-        return False
-    if not addrs:
-        return False
+        return []
     for addr in addrs:
         try:
             if not ipaddress.ip_address(addr.split("%", 1)[0]).is_global:
-                return False
+                return []
         except ValueError:
-            return False
-    return True
+            return []
+    return list(addrs)
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
-        return None
+def is_public_http_url(url: str, resolve: Callable[[str], list[str]] | None = None) -> bool:
+    return bool(public_addresses(url, resolve))
 
 
-def fetch_public_page(url: str, *, max_bytes: int = 512 * 1024) -> str:
-    """Fetch a user-cited page for the claim check. Public hosts only, redirects not followed,
-    so a request to the rig can't be bounced to loopback/LAN services."""
-    if not is_public_http_url(url):
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """Connects to an address already checked as public, so DNS can't change between the check
+    and the request (rebinding)."""
+
+    def __init__(self, host: str, ip: str, **kw: Any) -> None:
+        super().__init__(host, **kw)
+        self._ip = ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._ip, self.port), self.timeout)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """As above; TLS still verifies the certificate against the hostname (SNI + Host header)."""
+
+    def __init__(self, host: str, ip: str, **kw: Any) -> None:
+        super().__init__(host, context=ssl.create_default_context(), **kw)
+        self._ip = ip
+
+    def connect(self) -> None:
+        raw = socket.create_connection((self._ip, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(raw, server_hostname=self.host)  # type: ignore[attr-defined]
+
+
+def fetch_public_page(url: str, *, max_bytes: int = 512 * 1024,
+                      resolve: Callable[[str], list[str]] | None = None) -> str:
+    """Fetch a user-cited page for the claim check. Public hosts only, connected to the address
+    that was checked, redirects not followed, so a request to the rig can't reach LAN services."""
+    addrs = public_addresses(url, resolve)
+    if not addrs:
         raise FetchError("not a public web address")
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,*/*"})
-    opener = urllib.request.build_opener(_NoRedirect)
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    cls = _PinnedHTTPSConnection if parts.scheme == "https" else _PinnedHTTPConnection
+    conn = cls(host, addrs[0].split("%", 1)[0], port=parts.port, timeout=HTTP_TIMEOUT_SEC)
     try:
-        with opener.open(req, timeout=HTTP_TIMEOUT_SEC) as resp:
-            return resp.read(max_bytes).decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        raise FetchError(f"HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        conn.request("GET", path, headers={"User-Agent": USER_AGENT, "Accept": "text/html,*/*",
+                                           "Host": parts.netloc.rsplit("@", 1)[-1]})
+        resp = conn.getresponse()
+        if resp.status >= 300:
+            # 3xx included: a redirect could point back at the LAN, so it is never followed.
+            raise FetchError(f"HTTP {resp.status}")
+        return resp.read(max_bytes).decode("utf-8", errors="replace")
+    except (http.client.HTTPException, TimeoutError, OSError, ssl.SSLError) as exc:
         raise FetchError(f"unreachable ({exc.__class__.__name__})") from exc
+    finally:
+        conn.close()
 
 
 def _link_mentions(url: str, about: str, fetch: Callable[[str], str]) -> bool:
@@ -432,6 +499,17 @@ def check_claim(claim: dict[str, Any], fetch: Fetcher) -> dict[str, Any]:
     return out
 
 
+def _held_reason(held: list[dict[str, Any]], truncated: bool) -> str:
+    if held:
+        c = held[0]
+        state = "Claim about" if c["status"] == "sourced" else "Unsourced claim about"
+        tail = " (news matches the search; cite one that backs it)" if c["status"] == "sourced" else ""
+        return f"{state} {c['about'] or 'a real person'}: \"{c['text']}\"{tail}"
+    if truncated:
+        return f"Only the first {MAX_TEXT_CHARS} characters were checked"
+    return ""
+
+
 class PulseService:
     def __init__(self, state_dir: Path, *, llm_router: Any = None, fetch: Fetcher = http_fetch,
                  bsky: BskySession | None = None, clock: Callable[[], _dt.datetime] = _utc_now,
@@ -473,9 +551,12 @@ class PulseService:
     def score(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("body must be a JSON object")
-        text = str(payload.get("text") or "").strip()[:MAX_TEXT_CHARS]
-        if not text:
+        full = str(payload.get("text") or "").strip()
+        if not full:
             raise ValueError("text is required")
+        text = full[:MAX_TEXT_CHARS]
+        # Claims past the cutoff were never checked, so the result can't release boosts.
+        truncated = len(full) > MAX_TEXT_CHARS
         field = str(payload.get("field") or "note").strip()[:40]
         now = self.clock()
         fetch = self._cached_fetch
@@ -508,7 +589,10 @@ class PulseService:
             else:
                 # A link that doesn't even name the person can't stand in for a source.
                 claims.append(check_claim(c, fetch))
-        held = [c for c in claims if c["kind"] == "allegation" and c["status"] not in ("sourced", "cited")]
+        # A search hit only means articles share the query words, not that they back the claim,
+        # so allegations stay held until a link the creator cites names who it's about.
+        held = [c for c in claims if c["kind"] == "allegation" and c["status"] != "cited"]
+        held_any = bool(held) or truncated
 
         wiki_term = next((e["corrected_name"] or e["name"] for e in entities if e["kind"] in ("person", "org")), query)
         if query:
@@ -533,13 +617,13 @@ class PulseService:
         else:
             boost_json, boosts_via = _llm_json(self.llm_router, BOOST_SYSTEM, BOOST_USER.format(
                 text=text, field=field, areas=", ".join(areas) or "unknown", heat=heat_summary,
-                held=HELD_NOTE if held else "", n=2 if held else 3))
+                held=HELD_NOTE if held_any else "", n=2 if held_any else 3))
         if boost_json:
             for b in _as_list(boost_json.get("boosts")):
                 if not isinstance(b, dict) or not str(b.get("text") or "").strip():
                     continue
                 kind = str(b.get("kind") or "angle")
-                if held and kind != "reframe":
+                if held_any and kind != "reframe":
                     continue
                 boosts.append({"kind": kind, "text": str(b["text"]).strip(), "why": str(b.get("why") or "").strip()})
 
@@ -549,9 +633,9 @@ class PulseService:
             "query": query,
             "entities": entities,
             "claims": claims,
-            "boosts_held": bool(held),
-            "held_reason": (f"Unsourced claim about {held[0]['about'] or 'a real person'}: \"{held[0]['text']}\""
-                            if held else ""),
+            "boosts_held": held_any,
+            "truncated": truncated,
+            "held_reason": _held_reason(held, truncated),
             "heat": {"ratio": ratio, "sources": sources},
             "boosts": boosts,
             "analysis_via": analysis_via,
@@ -714,6 +798,13 @@ class NameDropService:
     def _person(self, name: str, index: int, total: int, orcid: str | None, notes: list[str]) -> dict[str, Any]:
         role = "1st author" if index == 0 else ("last author" if index == total - 1 and total > 1 else "author")
         handles: dict[str, dict[str, str]] = {"x": _handle("", "unknown", ""), "bsky": _handle("", "unknown", "")}
+        if index >= KEY_AUTHOR_LOOKUPS and index != total - 1:
+            # Big collaborations would take minutes of lookups; only key authors are checked.
+            skipped = f"Handles looked up for the first {KEY_AUTHOR_LOOKUPS} and last author only."
+            if skipped not in notes:
+                notes.append(skipped)
+            gap = _handle("", "unknown", "not looked up")
+            return {"name": name, "role": role, "orcid": orcid or "", "handles": {"x": gap, "bsky": dict(gap)}}
         if orcid:
             try:
                 data = self.fetch(f"{ORCID_URL}/{orcid}/researcher-urls")
@@ -796,6 +887,7 @@ class NameDropService:
         if not isinstance(payload, dict) or not isinstance(payload.get("people"), list):
             raise ValueError("body must be {\"people\": [...]}")
         people = []
+        seen: set[tuple[str, str]] = set()
         for raw in payload["people"]:
             if not isinstance(raw, dict):
                 raise ValueError("each person must be an object")
@@ -807,6 +899,10 @@ class NameDropService:
                 raise ValueError("address is required")
             if platform == "email" and "@" not in address.strip("@"):
                 raise ValueError(f"not an email address: {address}")
+            key = (platform, address.lstrip("@").casefold())
+            if key in seen:
+                continue  # one DM per person, however the address was typed
+            seen.add(key)
             people.append({"id": str(raw.get("id") or uuid.uuid4().hex[:12]),
                            "name": str(raw.get("name") or "").strip()[:80],
                            "platform": platform, "address": address[:254], "on": bool(raw.get("on", True))})
@@ -865,9 +961,10 @@ class NameDropService:
             did = self.fetch(BSKY_PUBLIC_URL + "/com.atproto.identity.resolveHandle?" +
                              urllib.parse.urlencode({"handle": handle.lstrip("@")}))["did"]
             hdr = {"Authorization": f"Bearer {token}", "atproto-proxy": BSKY_CHAT_PROXY}
-            convo = self.fetch(BSKY_PDS_URL + "/chat.bsky.convo.getConvoForMembers?" +
+            pds = self.bsky.pds(self.fetch)
+            convo = self.fetch(pds + "/chat.bsky.convo.getConvoForMembers?" +
                                urllib.parse.urlencode({"members": did}), headers=hdr)["convo"]["id"]
-            sent = self.fetch(BSKY_PDS_URL + "/chat.bsky.convo.sendMessage", method="POST", headers=hdr,
+            sent = self.fetch(pds + "/chat.bsky.convo.sendMessage", method="POST", headers=hdr,
                               body={"convoId": convo, "message": {"text": message}})
             if not sent.get("id"):
                 return {"status": "failed", "detail": "Bluesky did not confirm the message"}

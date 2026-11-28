@@ -38,6 +38,16 @@ class PulseFitTest {
         assertEquals(PulseRank(position = 1, of = 3), rank)
         val low = PulseFitScorer.rank("baking bread", listOf("rust compiler speedups"), areas)!!
         assertEquals(2, low.position)
+        // Unmeasurable saved ideas (emoji, links only) are left out rather than ranked as 0.
+        assertNull(PulseFitScorer.rank("rust compiler speedups", listOf("😀 🔥", "🚀"), areas))
+        assertEquals(PulseRank(1, 2), PulseFitScorer.rank("rust compiler speedups", listOf("😀", "baking bread"), areas))
+    }
+
+    @Test
+    fun bskyWeaveKeepsDotsAndDoesNotRepeat() {
+        assertEquals("new clip @alice.bsky.social", PulseFitScorer.weaveBskyHandle("new clip", "alice.bsky.social"))
+        assertEquals("hi @Alice.bsky.social", PulseFitScorer.weaveBskyHandle("hi @Alice.bsky.social", "@alice.bsky.social"))
+        assertEquals("@a.bsky.social ", PulseFitScorer.weaveBskyHandle("", "a.bsky.social"))
     }
 
     @Test

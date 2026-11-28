@@ -34,13 +34,29 @@ object PulseFitScorer {
         return PulseFit((bestSim.coerceIn(0.0, 1.0) * 100).roundToInt(), area)
     }
 
-    /** Rank among [otherIdeas] (excluding exact duplicates of [idea]); null when fewer than 2 ideas or no areas. */
+    /**
+     * Rank among [otherIdeas] (excluding exact duplicates of [idea]) that can be measured; null when
+     * no other idea has a known fit or there are no areas. Unknown fits are left out, never ranked as 0.
+     */
     fun rank(idea: String, otherIdeas: List<String>, areas: List<String>): PulseRank? {
         val mine = fit(idea, areas) ?: return null
         val others = otherIdeas.map { it.trim() }.filter { it.isNotEmpty() && it != idea.trim() }.distinct()
+            .mapNotNull { fit(it, areas)?.score }
         if (others.isEmpty()) return null
-        val better = others.count { (fit(it, areas)?.score ?: 0) > mine.score }
-        return PulseRank(position = better + 1, of = others.size + 1)
+        return PulseRank(position = others.count { it > mine.score } + 1, of = others.size + 1)
+    }
+
+    /**
+     * Adds a Bluesky mention, keeping its dots ("@alice.bsky.social"); the X weaver would strip them.
+     * Appended at the end, and left alone when the draft already mentions that handle.
+     */
+    fun weaveBskyHandle(draft: String, handle: String): String {
+        val clean = handle.trim().removePrefix("@")
+        if (clean.isBlank()) return draft
+        val already = Regex("(?<![\\w.@])@" + Regex.escape(clean) + "(?![\\w.-])", RegexOption.IGNORE_CASE)
+        if (already.containsMatchIn(draft)) return draft
+        val trimmed = draft.trimEnd()
+        return if (trimmed.isEmpty()) "@$clean " else "$trimmed @$clean"
     }
 
     /** Heat ratio as a signed percent change ("+40%"), or null when unmeasured. */

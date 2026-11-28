@@ -86,16 +86,105 @@ def test_unsourced_allegation_holds_boosts_and_only_reframes_come_back(tmp_path:
     assert out["heat"]["ratio"] == 2.0
 
 
-def test_sourced_claim_releases_boosts(tmp_path: Path) -> None:
+def test_news_match_shows_sources_but_keeps_allegation_boosts_held(tmp_path: Path) -> None:
     fetch = FakeFetch({"artlist": {"articles": [{"title": "T", "url": "https://n.example/a", "domain": "n.example"}]},
                        "timelinevolraw": _gdelt_timeline})
-    llm = FakeLlm(ANALYSIS, json.dumps({"boosts": [{"kind": "hook", "text": "Lead line", "why": "news heat 2x"}]}))
+    llm = FakeLlm(ANALYSIS, json.dumps({"boosts": [{"kind": "hook", "text": "Lead line", "why": "news heat 2x"},
+                                                   {"kind": "reframe", "text": "Ask it", "why": "safer"}]}))
     svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW)
     out = svc.score({"text": "idea"})
-    assert out["boosts_held"] is False
     assert out["claims"][0]["status"] == "sourced"
     assert out["claims"][0]["sources"][0]["url"] == "https://n.example/a"
+    # A search hit isn't proof the article backs the allegation.
+    assert out["boosts_held"] is True
+    assert "cite one that backs it" in out["held_reason"]
+    assert [b["kind"] for b in out["boosts"]] == ["reframe"]
+
+
+def test_factual_claim_with_news_releases_boosts(tmp_path: Path) -> None:
+    fetch = FakeFetch({"artlist": {"articles": [{"title": "T", "url": "https://n.example/a", "domain": "n.example"}]},
+                       "timelinevolraw": _gdelt_timeline})
+    analysis = json.dumps({"query": "rust 2.0 release", "entities": [],
+                           "claims": [{"text": "rust 2.0 shipped", "about": "Rust", "kind": "fact",
+                                       "search": "rust 2.0 release"}]})
+    llm = FakeLlm(analysis, json.dumps({"boosts": [{"kind": "hook", "text": "Lead line", "why": "news heat 2x"}]}))
+    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW)
+    out = svc.score({"text": "idea"})
+    assert out["boosts_held"] is False and out["truncated"] is False
     assert out["boosts"] == [{"kind": "hook", "text": "Lead line", "why": "news heat 2x"}]
+
+
+def test_oversized_text_holds_boosts_and_says_so(tmp_path: Path) -> None:
+    analysis = json.dumps({"query": "rust", "entities": [], "claims": []})
+    llm = FakeLlm(analysis, json.dumps({"boosts": [{"kind": "hook", "text": "Lead", "why": "w"},
+                                                   {"kind": "reframe", "text": "R", "why": "w"}]}))
+    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=FakeFetch({}), bsky=pn.BskySession("", ""),
+                          clock=lambda: NOW)
+    out = svc.score({"text": "rust " * 600})
+    assert out["truncated"] is True and out["boosts_held"] is True
+    assert "first 2000 characters" in out["held_reason"]
+    assert [b["kind"] for b in out["boosts"]] == ["reframe"]
+
+
+def test_naive_query_ignores_links() -> None:
+    assert pn.naive_query("https://example.com/foo") == ""
+    assert pn.naive_query("https://example.com/foo rust compile times") == "rust compile times"
+
+
+def test_first_look_dedupes_addresses(tmp_path: Path) -> None:
+    svc = pn.NameDropService(tmp_path, fetch=lambda url, **kw: {}, clock=lambda: NOW)
+    out = svc.put_first_look({"people": [{"platform": "bsky", "address": "Ada.bsky.social"},
+                                         {"platform": "bsky", "address": "@ada.bsky.social"},
+                                         {"platform": "x", "address": "@ada.bsky.social"}]})
+    assert [(p["platform"], p["address"]) for p in out["people"]] == [("bsky", "Ada.bsky.social"),
+                                                                     ("x", "@ada.bsky.social")]
+
+
+def test_bsky_session_uses_the_senders_own_pds() -> None:
+    calls: list[str] = []
+
+    def fetch(url: str, **kw: Any) -> Any:
+        calls.append(url)
+        if "resolveHandle" in url:
+            return {"did": "did:plc:abc"}
+        if url.startswith(pn.PLC_DIRECTORY_URL):
+            return {"service": [{"id": "#atproto_pds", "type": "AtprotoPersonalDataServer",
+                                 "serviceEndpoint": "https://pds.example.net"}]}
+        if "createSession" in url:
+            return {"accessJwt": "jwt", "did": "did:plc:abc"}
+        raise pn.FetchError("unexpected")
+
+    session = pn.BskySession("me.example.net", "pw")
+    assert session.token(fetch) == "jwt"
+    assert calls[-1] == "https://pds.example.net/xrpc/com.atproto.server.createSession"
+
+
+def test_large_author_lists_only_look_up_key_authors(tmp_path: Path) -> None:
+    looked: list[str] = []
+
+    def fetch(url: str, **kw: Any) -> Any:
+        looked.append(url)
+        return {"actors": []}
+
+    svc = pn.NameDropService(tmp_path, fetch=fetch, clock=lambda: NOW)
+    notes: list[str] = []
+    people = [svc._person(f"Author {i}", i, 40, None, notes) for i in range(40)]
+    assert len(looked) == pn.KEY_AUTHOR_LOOKUPS + 1
+    assert people[20]["handles"]["bsky"]["evidence"] == "not looked up"
+    assert len(notes) == 1
+
+
+def test_fetch_public_page_connects_to_the_checked_address(monkeypatch: Any) -> None:
+    seen: list[Any] = []
+
+    def fake_conn(addr: Any, timeout: Any = None, *a: Any) -> Any:
+        seen.append(addr)
+        raise OSError("stop")
+
+    monkeypatch.setattr(pn.socket, "create_connection", fake_conn)
+    with pytest.raises(pn.FetchError):
+        pn.fetch_public_page("http://news.example/a", resolve=lambda h: ["93.184.216.34"])
+    assert seen == [("93.184.216.34", 80)]
 
 
 def test_no_llm_and_no_network_reports_everything_unknown(tmp_path: Path) -> None:

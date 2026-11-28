@@ -516,8 +516,13 @@ private fun NameDropSheet(draftText: String, onWeave: (String) -> Unit, onClose:
                             enabled = chosen.isNotEmpty(),
                             onClick = {
                                 var woven = draftText
-                                chosen.mapNotNull { it.bestTag()?.handle }.forEach { handle ->
-                                    woven = container.graphRadarEngine.weaveHandleIntoDraft(woven, handle)
+                                chosen.forEach { p ->
+                                    val tag = p.bestTag() ?: return@forEach
+                                    woven = if (p.handles["x"] == tag) {
+                                        container.graphRadarEngine.weaveHandleIntoDraft(woven, tag.handle)
+                                    } else {
+                                        PulseFitScorer.weaveBskyHandle(woven, tag.handle)
+                                    }
                                 }
                                 onWeave(woven)
                             },
