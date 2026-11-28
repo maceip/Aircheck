@@ -45,6 +45,11 @@ All keys: raised at rest, pressed state sinks (inset shadow, 1–2dp down, scale
 5. **AcCard** — `ui` surface, radius 20, soft raised shadow, Caption tag + Body text. No left accent bars, no colored borders.
 6. **AcField** — recessed well text field (inset shadow), Inter 16. Replaces Material OutlinedTextField.
 7. **AcPanel** — chassis-colored grouping panel with bevel (Recorder body), e.g. the Recorder block on Spark.
+8. **AcVideoOverlayKey** — a control drawn on top of video (e.g. play on the Cut player): translucent dark disc, white glyph, no elevation, raise or skirt. Use only over video.
+
+**Exception:** Controls overlaid on video are flat (no elevation); the only exception to raised keys. Approved by Ryan 2026-11-28.
+
+`AcKey(icon, badgeColor = …)` may carry a small status dot (e.g. the rig connection on the Cut settings key).
 
 ## Banned everywhere
 - Vertical highlight bars / left accent rails on cards, keys or rows.
@@ -67,6 +72,7 @@ All keys: raised at rest, pressed state sinks (inset shadow, 1–2dp down, scale
 - Spark record: Recorder panel (AcPanel) with live waveform display and media well (record, play, stop). Tone choices = AcKey, selected red. "type it instead" = AcKey. Follow-up cards = AcCard, no rails.
 - Spark beats: Body 17 beat text; each beat card has AcKey edit + AcKey AI rewrite (selected/red while generating). Bottom: media well record + AcPrimaryKey "make the video".
 - Anchors sheet: Accept = AcPrimaryKey (not a notification-style bar); toggles become AcKey selected states; show what toggling does.
+- Cut status (option C, approved by Ryan 2026-11-28): no black status boxes. One Caption line under the "02 CUT" step header shows voice / head / cut / export as ✓ done (ink), working… or redo (red), · not yet (muted). The rig connection is a dot on the settings AcKey: ink = online, red = offline. The freed height goes to the player.
 - Cut: AcDisplay player ~2x larger with drag-resize grip; AcDisplay timeline with trim brackets and a draggable b-roll track (removes per-sentence b-roll tags and the b-roll tab); zoom key removed; media well: play, split, b-roll, captions(toggle); AcPrimaryKey render.
 - Settings: one look per video (mapped per provider internally); regroup; no rails.
 - Newsroom studio (unreachable): remove lime and pills; candidate for deletion (ask Ryan).
