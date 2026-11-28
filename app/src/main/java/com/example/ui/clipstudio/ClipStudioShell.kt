@@ -33,14 +33,14 @@ import com.example.ui.draft.DraftDeckUiState
 import com.example.ui.draft.DraftDeckViewModel
 import kotlinx.coroutines.flow.StateFlow
 
-/** Clip Studio screens: `01 SPARK`, `02 SCRIPT`, `03 CUT`, `Newsroom Overlays`, `B-Roll & Transitions`. */
-enum class ClipStudioScreen { SPARK, SCRIPT, CUT, NEWSROOM, BROLL_STUDIO }
+/** Clip Studio screens: `01 SPARK`, `02 SCRIPT`, `03 CUT`, `Newsroom`. */
+enum class ClipStudioScreen { SPARK, SCRIPT, CUT, NEWSROOM }
 
 private const val DOUBLE_BACK_EXIT_WINDOW_MS = 2_500L
 
 /**
- * Default Aircheck surface: `01 SPARK` -> `02 SCRIPT` -> `03 CUT`, with dedicated full-view
- * `Newsroom Overlays` and `B-Roll & Transitions` studios reachable from `03 CUT`, real Back
+ * Default Aircheck surface: `01 SPARK` -> `02 SCRIPT` -> `03 CUT`, with the `Newsroom` graphics
+ * screen reachable from `03 CUT`, real Back
  * navigation history, and a double-back-to-exit guard on root `01 SPARK`.
  */
 @Composable
@@ -105,7 +105,7 @@ fun ClipStudioShell(
 
     val navigateBack: () -> Unit = {
         when {
-            screen == ClipStudioScreen.NEWSROOM || screen == ClipStudioScreen.BROLL_STUDIO -> {
+            screen == ClipStudioScreen.NEWSROOM -> {
                 val prev = navHistory.lastOrNull()
                 navHistory = if (navHistory.isNotEmpty()) navHistory.dropLast(1) else emptyList()
                 onScreen(prev ?: ClipStudioScreen.CUT)
@@ -209,16 +209,6 @@ fun ClipStudioShell(
                     onTestOnClip = { lookId ->
                         studioVm.runCoreStage4ChopBroll(lookIdOverride = lookId)
                         navHistory = navHistory.filterNot { it == ClipStudioScreen.NEWSROOM }
-                        onScreen(ClipStudioScreen.CUT)
-                    },
-                    renderGlobalOverlays = false
-                )
-                ClipStudioScreen.BROLL_STUDIO -> BrollStudioScreen(
-                    state = studioState,
-                    vm = studioVm,
-                    onBack = navigateBack,
-                    onRenderStarted = {
-                        navHistory = navHistory.filterNot { it == ClipStudioScreen.BROLL_STUDIO }
                         onScreen(ClipStudioScreen.CUT)
                     },
                     renderGlobalOverlays = false

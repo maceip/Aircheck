@@ -1431,17 +1431,6 @@ class StudioViewModel internal constructor(
         )
     }
 
-    fun setCoreBrollFraming(framing: String) {
-        val valid = framing.trim().lowercase().takeIf {
-            it in setOf(
-                CoreRenderOptions.BROLL_FRAMING_PIP,
-                CoreRenderOptions.BROLL_FRAMING_FULL,
-                CoreRenderOptions.BROLL_FRAMING_SPLIT
-            )
-        } ?: CoreRenderOptions.BROLL_FRAMING_PIP
-        updateRenderOptions("B-roll layout") { it.copy(brollFraming = valid) }
-    }
-
     fun setCoreDefaultTransition(transition: ClipTransitionType) {
         updateRenderOptions("Default transition") { it.copy(defaultTransition = transition.wire) }
     }
@@ -1476,28 +1465,6 @@ class StudioViewModel internal constructor(
                 }
             ),
             label = "Cut ${index + 1} transition"
-        )
-    }
-
-    /** Updates per-clause cutaway framing override (`""` inherits default, or `"pip"`, `"full"`, `"split"`). */
-    fun setClauseBrollFraming(index: Int, framingOverride: String) {
-        val clean = framingOverride.trim().lowercase().takeIf {
-            it.isEmpty() || it in setOf(
-                CoreRenderOptions.BROLL_FRAMING_PIP,
-                CoreRenderOptions.BROLL_FRAMING_FULL,
-                CoreRenderOptions.BROLL_FRAMING_SPLIT
-            )
-        } ?: ""
-        val current = _uiState.value.corePipelineSession
-        if (index !in current.clauses.indices) return
-        if (current.clauses[index].brollFramingOverride == clean) return
-        commitCoreEdit(
-            current.copy(
-                clauses = current.clauses.mapIndexed { i, c ->
-                    if (i == index) c.copy(brollFramingOverride = clean) else c
-                }
-            ),
-            label = "Cut ${index + 1} framing"
         )
     }
 
@@ -1833,25 +1800,6 @@ class StudioViewModel internal constructor(
         }
     }
 
-    /** Clears custom or generated B-roll media on clause [index]. */
-    fun clearClauseCustomBroll(index: Int) {
-        val current = _uiState.value.corePipelineSession
-        if (index !in current.clauses.indices) return
-        commitCoreEdit(
-            current.copy(
-                clauses = current.clauses.mapIndexed { i, c ->
-                    if (i == index) {
-                        c.copy(bRollSha = null, customBrollExt = "", brollMediaId = null, brollPreviewUrl = null)
-                    } else {
-                        c
-                    }
-                }
-            ),
-            label = "Clear B-roll media"
-        )
-        showToast("Cleared custom media on cut ${index + 1}")
-    }
-
     /** Edits an existing saved overlay inline from the Newsroom Overlays Editor and persists to Room. */
     fun updateSavedOverlayInline(
         overlayId: String,
@@ -1980,32 +1928,6 @@ class StudioViewModel internal constructor(
         val next = transform(current.renderOptions)
         if (next == current.renderOptions) return
         commitCoreEdit(current.copy(renderOptions = next), label = label)
-    }
-
-    /** Toggles clause [index] between talking head and B-roll cutaway, with undo. */
-    fun toggleCutClauseBroll(index: Int) {
-        val current = _uiState.value.corePipelineSession
-        if (index !in current.clauses.indices) return
-        val willBeBroll = current.clauses[index].segmentMode == BrollSegmentMode.TALKING_HEAD
-        commitCoreEdit(
-            current.copy(
-                clauses = current.clauses.mapIndexed { i, c ->
-                    if (i != index) {
-                        c
-                    } else if (willBeBroll) {
-                        c.copy(
-                            segmentMode = BrollSegmentMode.BROLL_CUTAWAY,
-                            brollCaption = c.brollCaption.ifBlank { c.spokenText.take(48) },
-                            bRollPrompt = c.bRollPrompt.ifBlank { c.brollCaption.ifBlank { c.spokenText.take(72) } }
-                        )
-                    } else {
-                        c.copy(segmentMode = BrollSegmentMode.TALKING_HEAD)
-                    }
-                }
-            ),
-            label = if (willBeBroll) "Add B-roll cut ${index + 1}" else "Remove B-roll cut ${index + 1}"
-        )
-        showToast(if (willBeBroll) "B-roll enabled on cut ${index + 1}" else "Switched cut ${index + 1} to talking head")
     }
 
     /**

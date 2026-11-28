@@ -33,7 +33,7 @@ import com.example.data.NewsroomLook
 import com.example.data.SilenceGap
 import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.draft.DraftApiClient
-import com.example.ui.clipstudio.BrollStudioScreen
+import com.example.ui.clipstudio.CutScreen
 import com.example.ui.clipstudio.ClipStudioScreen
 import com.example.ui.clipstudio.ClipStudioShell
 import com.example.ui.clipstudio.NewsroomLookScreen
@@ -47,6 +47,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
+import androidx.compose.ui.test.assertCountEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -395,7 +397,7 @@ class StudioOverhaulE2ETest {
     }
 
     @Test
-    fun brollStudio_transitionsPromptPreviewGenerationAndUndo_persistToRoom() = runComposeUiTest {
+    fun cutTimeline_transitionAndBrollSheets_persistToRoom() = runComposeUiTest {
         val pngBytes = realPngBytes()
         val previewPrompts = CopyOnWriteArrayList<String>()
         val server = startTestServer()
@@ -439,6 +441,7 @@ class StudioOverhaulE2ETest {
                             bRollPrompt = "Desk macro"
                         )
                     ),
+                    ttsDurationMs = 4500L,
                     talkingHeadJobId = "head_1",
                     talkingHeadVideoUrl = "$rigUrl/v1/renders/head.mp4"
                 )
@@ -450,58 +453,88 @@ class StudioOverhaulE2ETest {
             val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
             val st by studioVm.uiState.collectAsStateWithLifecycle()
             AircheckTheme {
-                BrollStudioScreen(
-                    state = st,
-                    vm = studioVm,
-                    onBack = {},
-                    onRenderStarted = {}
-                )
+                CutScreen(state = st, vm = studioVm, onOpenSettings = {}, onOpenNewsroom = {})
             }
         }
         val studioVm = checkNotNull(studioVmRef)
+        fun session() = studioVm.uiState.value.corePipelineSession
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            studioVm.uiState.value.corePipelineSession.clauses.size == 2
+            session().clauses.size == 2 && session().brollSegments.any { it.originClauseId == "c1" }
         }
+        onNodeWithTag("cs_cut_timeline").assertExists()
+        onNodeWithTag("cs_lane_voice").assertExists()
 
-        // 1. Default framing + default transition + apply to all
-        onNodeWithTag("cs_broll_framing_split").performClick()
-        onNodeWithTag("cs_default_trans_wipeleft").performScrollTo().performClick()
-        onNodeWithTag("cs_apply_all_transitions").performClick()
+        // 1. Transitions key (blue icon) sets every join: pick wipe left, slow, use for every join.
+        onNodeWithTag("cs_cut_transitions").performClick()
+        onNodeWithTag("cs_transition_sheet").assertExists()
+        onNodeWithTag("cs_transition_tile_wipeleft").performClick()
+        onNodeWithTag("cs_transition_speed_600").performClick()
+        onNodeWithTag("cs_transition_apply_all").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            studioVm.uiState.value.corePipelineSession.clauses[1].transitionType == ClipTransitionType.WIPE_LEFT.wire
+            val c1 = session().clauses[1]
+            c1.transitionType == ClipTransitionType.WIPE_LEFT.wire && c1.transitionDurationMs == 600 &&
+                session().renderOptions.defaultTransition == ClipTransitionType.WIPE_LEFT.wire
         }
+        onNodeWithTag("cs_transition_done").performClick()
 
-        // 2. Per-cut transition selector + speed change
-        onNodeWithTag("cs_clause_trans_chip_1").performScrollTo().performClick()
-        onNodeWithTag("cs_clause_trans_opt_1_slideup").performScrollTo().performClick()
-        onNodeWithTag("cs_clause_trans_dur_1_600").performScrollTo().performClick()
+        // 2. The ◆ at the join opens the same sheet for that join only.
+        onNodeWithTag("cs_cut_join_1").performClick()
+        onNodeWithTag("cs_transition_tile_slideup").performClick()
+        onNodeWithTag("cs_transition_speed_200").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            val c1 = studioVm.uiState.value.corePipelineSession.clauses[1]
-            c1.transitionType == ClipTransitionType.SLIDE_UP.wire && c1.transitionDurationMs == 600
+            val c1 = session().clauses[1]
+            c1.transitionType == ClipTransitionType.SLIDE_UP.wire && c1.transitionDurationMs == 200
         }
+        onNodeWithTag("cs_transition_done").performClick()
+        onAllNodesWithTag("cs_transition_sheet").assertCountEquals(0)
 
-        // 3. Edit B-roll prompt & generate real B-roll still preview from rig
-        onNodeWithTag("cs_broll_prompt_1").performScrollTo().performTextReplacement("Close-up of studio audio console")
-        onNodeWithTag("cs_broll_generate_1").performScrollTo().performClick()
+        // 3. Tap the sentence's B-roll block: new prompt, generate a real still on the rig, framing.
+        val linkedId = session().brollSegments.first { it.originClauseId == "c1" }.id
+        onNodeWithTag("cs_broll_block_$linkedId").performClick()
+        onNodeWithTag("cs_broll_sheet_prompt").performTextReplacement("Close-up of studio audio console")
+        onNodeWithTag("cs_broll_sheet_generate").performClick()
         waitUntil(timeoutMillis = 8_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            studioVm.uiState.value.corePipelineSession.clauses[1].brollMediaId == "bmedia_gen001.png"
+            session().clauses[1].brollMediaId == "bmedia_gen001.png"
         }
         assertTrue(previewPrompts.any { it.contains("Close-up of studio audio console") })
-
-        // 4. Undo restores prior state with descriptive toast
-        onNodeWithTag("cs_broll_studio_undo").performClick()
+        onNodeWithTag("cs_broll_framing_full").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            studioVm.uiState.value.toastMessage?.startsWith("Undid:") == true
+            session().clauses[1].brollFramingOverride == "full" && session().renderOptions.brollFraming == "full"
+        }
+        onNodeWithTag("cs_broll_sheet_done").performClick()
+
+        // 4. b-roll key adds a block at the playhead; its sheet deletes it.
+        val before = session().brollSegments.map { it.id }.toSet()
+        onNodeWithTag("cs_cut_add_broll").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            session().brollSegments.size == before.size + 1
+        }
+        val added = session().brollSegments.first { it.id !in before }
+        assertNull(added.originClauseId)
+        onNodeWithTag("cs_broll_block_${added.id}").performClick()
+        onNodeWithTag("cs_broll_sheet_delete").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            session().brollSegments.none { it.id == added.id }
+        }
+
+        // 5. Undo restores the block with a descriptive toast.
+        onNodeWithTag("cs_cut_undo").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.toastMessage?.startsWith("Undid:") == true &&
+                session().brollSegments.any { it.id == added.id }
         }
     }
 
     @Test
-    fun cutScreen_pipelineStripDirtyBannerLiveAspectFrame_andDoubleBackGuard() = runComposeUiTest {
+    fun cutScreen_statusLineFrameGfxLane_andNewsroomRoundTrip() = runComposeUiTest {
         runBlocking {
             app.container.localRepo.saveCorePipelineSession(
                 CorePipelineSession(
@@ -551,28 +584,21 @@ class StudioOverhaulE2ETest {
             studioVm.uiState.value.corePipelineSession.clauses.size == 2
         }
 
-        // Pipeline progress strip + explicit stale re-render banner visible
+        // Status line, vertical frame, and the GFX lane shows the chyron over the whole clip.
         onNodeWithTag("cs_cut_pipeline_strip").assertIsDisplayed()
-        onNodeWithTag("cs_cut_dirty_banner").assertIsDisplayed()
-        onNodeWithText("Trim (2)").assertIsDisplayed()
-        onNodeWithText("Auto Zoom").assertIsDisplayed()
-
-        // Toggling aspect 9:16 -> 16:9 immediately reshapes the monitor viewport frame!
         onNodeWithTag("cs_cut_frame_vertical", useUnmergedTree = true).assertIsDisplayed()
-        onNodeWithTag("cs_cut_aspect").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_cut_frame_horizontal", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
-        }
-        onNodeWithTag("cs_cut_frame_horizontal", useUnmergedTree = true).assertIsDisplayed()
+        onNodeWithTag("cs_gfx_chyron", useUnmergedTree = true).assertExists()
+        // Removed by the approved Cut mockup: words/b-roll tabs, zoom, trim-pauses and aspect keys, B-roll studio.
+        listOf("cs_cut_mode_transcript", "cs_cut_mode_timeline", "cs_cut_punch_in", "cs_cut_strip_silence", "cs_cut_aspect", "cs_cut_broll_studio")
+            .forEach { onAllNodesWithTag(it).assertCountEquals(0) }
 
-        // Studio entry buttons navigate cleanly into Overlays and B-Roll studios
-        onNodeWithTag("cs_cut_broll_studio").performClick()
+        // The overlays key opens Newsroom; Back returns to Cut.
+        onNodeWithTag("cs_cut_look").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            activeScreen == ClipStudioScreen.BROLL_STUDIO
+            activeScreen == ClipStudioScreen.NEWSROOM
         }
-        onNodeWithTag("cs_broll_studio_back").performClick()
+        onNodeWithTag("cs_newsroom_back").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             activeScreen == ClipStudioScreen.CUT
