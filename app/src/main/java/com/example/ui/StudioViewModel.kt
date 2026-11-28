@@ -118,7 +118,6 @@ data class StudioUiState(
     val toastMessage: String? = null,
     val lastCompletedVideo: LastVideoSummary? = null,
     val isRefreshingHeadline: Boolean = false,
-    val isTweakingLook: Boolean = false,
     val otaBundleState: OtaBundleState = OtaBundleState(),
     val rigHealth: RigHealthUiState = RigHealthUiState(),
     val studioRigOptions: StudioRigOptions? = null,
@@ -1084,13 +1083,13 @@ class StudioViewModel internal constructor(
 
     /**
      * Runs the Stage 4 studio cut with the session's render options and a Newsroom look:
-     * [lookIdOverride] (from "test on clip"), otherwise the saved default look, otherwise none.
+     * the saved default look, otherwise none.
      */
-    fun runCoreStage4ChopBroll(lookIdOverride: String? = null) {
+    fun runCoreStage4ChopBroll() {
         if (_uiState.value.isCoreStageBusy) return
         startCoreStage(
             CoreStageWorker.OP_CUT,
-            mapOf(CoreStageWorker.KEY_LOOK_ID to lookIdOverride, CoreStageWorker.KEY_PHOTO_SHA to activePhotoSha())
+            mapOf(CoreStageWorker.KEY_LOOK_ID to null, CoreStageWorker.KEY_PHOTO_SHA to activePhotoSha())
         )
     }
 
@@ -1835,88 +1834,6 @@ class StudioViewModel internal constructor(
         }
         viewModelScope.launch(Dispatchers.IO) {
             localRepo.saveNewsroomOverlay(updated)
-        }
-    }
-
-    /**
-     * Calls real `POST /v1/ai-assist` (`mode = "tweak_video_look"`) on the Mac rig to apply
-     * natural-language design/color/logo/framing/headline tweaks directly to Room & live preview.
-     */
-    fun tweakVideoLookWithAi(
-        instruction: String,
-        currentLook: NewsroomLook,
-        onLookUpdated: (NewsroomLook) -> Unit
-    ) {
-        val clean = instruction.trim()
-        if (clean.isEmpty() || _uiState.value.isTweakingLook) return
-        val session = _uiState.value.corePipelineSession
-        val storyContext = session.fullStoryText.trim()
-            .ifBlank { _uiState.value.activeProject.ideaSpark.trim() }
-            .ifBlank { session.title.trim() }
-
-        viewModelScope.launch(Dispatchers.IO) {
-            _uiState.update { it.copy(isTweakingLook = true, errorMessage = null) }
-            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
-            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
-            val result = runCatching {
-                val health = macRigGateway.resolveAndCheckHealth(rigUrl)
-                macRigGateway.tweakVideoLook(
-                    rigBaseUrl = health.resolvedUrl,
-                    instruction = clean,
-                    currentLook = currentLook,
-                    currentOptions = session.renderOptions,
-                    storyContext = storyContext
-                )
-            }
-            result.onSuccess { tweak ->
-                val updatedLook = currentLook.copy(
-                    accentHex = tweak.accentHex ?: currentLook.accentHex,
-                    light = tweak.light ?: currentLook.light,
-                    blurPercent = tweak.blurPercent ?: currentLook.blurPercent,
-                    brightnessEv = tweak.brightnessEv ?: currentLook.brightnessEv,
-                    updatedAtMillis = System.currentTimeMillis()
-                )
-                if (updatedLook != currentLook) {
-                    updateNewsroomLook(updatedLook)
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                        onLookUpdated(updatedLook)
-                    }
-                }
-                val latest = _uiState.value.corePipelineSession
-                val nextOpts = latest.renderOptions.copy(
-                    breakingStyle = tweak.breakingStyle ?: latest.renderOptions.breakingStyle,
-                    showBrandBug = tweak.showBrandBug ?: latest.renderOptions.showBrandBug,
-                    cornerBugText = tweak.cornerBugText?.ifBlank { null } ?: latest.renderOptions.cornerBugText,
-                    brollFraming = tweak.brollFraming ?: latest.renderOptions.brollFraming,
-                    chyronHeadline = tweak.chyronHeadline?.ifBlank { null } ?: latest.renderOptions.chyronHeadline
-                )
-                if (nextOpts != latest.renderOptions) {
-                    commitCoreEdit(
-                        latest.copy(
-                            title = tweak.chyronHeadline?.ifBlank { null } ?: latest.title,
-                            renderOptions = nextOpts
-                        )
-                    )
-                }
-                if (!tweak.backdropPrompt.isNullOrBlank()) {
-                    generateBackdropForLook(updatedLook.id, tweak.backdropPrompt)
-                }
-                _uiState.update {
-                    it.copy(
-                        isTweakingLook = false,
-                        toastMessage = tweak.summary.ifBlank { "look tweaked with AI" },
-                        errorMessage = null
-                    )
-                }
-            }.onFailure { err ->
-                if (err is CancellationException) throw err
-                _uiState.update {
-                    it.copy(
-                        isTweakingLook = false,
-                        errorMessage = "AI look tweak failed: ${err.localizedMessage ?: "rig unreachable"}."
-                    )
-                }
-            }
         }
     }
 

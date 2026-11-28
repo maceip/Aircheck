@@ -33,8 +33,8 @@ import com.example.ui.draft.DraftDeckUiState
 import com.example.ui.draft.DraftDeckViewModel
 import kotlinx.coroutines.flow.StateFlow
 
-/** Clip Studio screens: `01 SPARK`, `02 SCRIPT`, `03 CUT`, `Newsroom`. */
-enum class ClipStudioScreen { SPARK, SCRIPT, CUT, NEWSROOM }
+/** Clip Studio screens: `01 SPARK`, `02 SCRIPT`, `03 CUT`, `Newsroom`, `Backdrop` (from Newsroom). */
+enum class ClipStudioScreen { SPARK, SCRIPT, CUT, NEWSROOM, BACKDROP }
 
 private const val DOUBLE_BACK_EXIT_WINDOW_MS = 2_500L
 
@@ -105,7 +105,7 @@ fun ClipStudioShell(
 
     val navigateBack: () -> Unit = {
         when {
-            screen == ClipStudioScreen.NEWSROOM -> {
+            screen == ClipStudioScreen.NEWSROOM || screen == ClipStudioScreen.BACKDROP -> {
                 val prev = navHistory.lastOrNull()
                 navHistory = if (navHistory.isNotEmpty()) navHistory.dropLast(1) else emptyList()
                 onScreen(prev ?: ClipStudioScreen.CUT)
@@ -206,11 +206,17 @@ fun ClipStudioShell(
                     state = studioState,
                     vm = studioVm,
                     onBack = navigateBack,
-                    onTestOnClip = { lookId ->
-                        studioVm.runCoreStage4ChopBroll(lookIdOverride = lookId)
-                        navHistory = navHistory.filterNot { it == ClipStudioScreen.NEWSROOM }
+                    onDone = {
+                        navHistory = navHistory.filterNot { it == ClipStudioScreen.NEWSROOM || it == ClipStudioScreen.BACKDROP }
                         onScreen(ClipStudioScreen.CUT)
                     },
+                    onOpenBackdrop = { navigateTo(ClipStudioScreen.BACKDROP) },
+                    renderGlobalOverlays = false
+                )
+                ClipStudioScreen.BACKDROP -> BackdropScreen(
+                    state = studioState,
+                    vm = studioVm,
+                    onBack = navigateBack,
                     renderGlobalOverlays = false
                 )
             }
