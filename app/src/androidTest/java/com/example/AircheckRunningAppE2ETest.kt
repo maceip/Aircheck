@@ -602,7 +602,7 @@ class AircheckRunningAppE2ETest {
         captureScreenshot(screenshotDir, "11c_video_look_tweak_ai_sheet.png")
         composeRule.onNodeWithTag("cs_ai_tweak_submit").performClick()
         composeRule.waitUntil(timeoutMillis = 90_000L) {
-            !studioVm.uiState.value.isTweakingLook &&
+            !studioVm.uiState.value.isCoreStageBusy &&
                 composeRule.onAllNodesWithTag("cs_toast").fetchSemanticsNodes().isNotEmpty()
         }
         assertNull("Tweak AI must succeed without error", studioVm.uiState.value.errorMessage)

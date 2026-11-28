@@ -184,8 +184,9 @@ class AircheckContainer(context: Context) {
         )
     }
     /**
-     * Route Spark drafting and Script editing to this phone (AICore, Gemma fallback) or back to the
-     * Mac rig default. Persisted; [LlmStageRouter] reads it on every pass.
+     * Route Spark drafting, Script editing, and Newsroom overlay generation to this phone
+     * (AICore `nano-v4-full`, Gemma 4 E2B fallback) or back to the Mac rig default. Persisted;
+     * [LlmStageRouter] reads it on every pass.
      */
     fun setDraftOnPhone(onPhone: Boolean) {
         val provider = if (onPhone) {
@@ -196,7 +197,8 @@ class AircheckContainer(context: Context) {
         appScope.launch {
             profileStore.setLlmStageConfig(com.example.data.LlmStage.DRAFTING, provider)
             profileStore.setLlmStageConfig(com.example.data.LlmStage.SCRIPT_EDIT, provider)
-            pipelineLogger.info("model", "drafting location set to ${provider.id}")
+            profileStore.setLlmStageConfig(com.example.data.LlmStage.NEWSROOM_OVERLAY, provider)
+            pipelineLogger.info("model", "drafting & overlay location set to ${provider.id}")
         }
     }
 

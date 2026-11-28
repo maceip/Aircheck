@@ -1200,6 +1200,26 @@ class LlmStageRouterAndSchemaTest {
         }
     }
 
+    @Test
+    fun setDraftOnPhone_updatesDraftingScriptEditAndNewsroomOverlayStages() {
+        val app = ApplicationProvider.getApplicationContext<AircheckApplication>()
+        val container = app.container
+        container.setDraftOnPhone(true)
+        waitForCondition(timeoutMs = 5_000L) {
+            val r = runBlocking { container.profileStore.current().llmRouting }
+            r.drafting.provider == LlmProviderChoice.LOCAL_AICORE_NANO &&
+                r.scriptEdit.provider == LlmProviderChoice.LOCAL_AICORE_NANO &&
+                r.newsroomOverlay.provider == LlmProviderChoice.LOCAL_AICORE_NANO
+        }
+        container.setDraftOnPhone(false)
+        waitForCondition(timeoutMs = 5_000L) {
+            val r = runBlocking { container.profileStore.current().llmRouting }
+            r.drafting.provider == LlmProviderChoice.MAC_RIG_DEFAULT &&
+                r.scriptEdit.provider == LlmProviderChoice.MAC_RIG_DEFAULT &&
+                r.newsroomOverlay.provider == LlmProviderChoice.MAC_RIG_DEFAULT
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------

@@ -71,7 +71,7 @@ fun OnDeviceModelsCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Write scripts on", style = AcType.BodySmall.copy(color = AcTokens.Ink))
+            Text("Scripts & overlays on", style = AcType.BodySmall.copy(color = AcTokens.Ink))
             Text(
                 text = if (draftOnPhone) "This phone" else "Mac Studio",
                 style = AcType.Label,
