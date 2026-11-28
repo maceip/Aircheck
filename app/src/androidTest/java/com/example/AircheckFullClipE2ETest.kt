@@ -84,6 +84,8 @@ class AircheckFullClipE2ETest {
     private val stages = mutableListOf<JSONObject>()
     private val facts = JSONObject()
     private var savedRigUrl: String? = null
+    // Unique per run so the rig makes a fresh still instead of returning one cached for the same prompt.
+    private val brollPrompt = "close up of a phone editing a video timeline on a desk, warm light, take ${System.currentTimeMillis()}"
 
     @Before
     fun setUp() {
@@ -327,14 +329,14 @@ class AircheckFullClipE2ETest {
             Thread.sleep(1_000L)
             screenshot("cut_broll_sheet_open")
             assertTrue("b-roll sheet must stay open", composeRule.onAllNodesWithTag("cs_broll_sheet").fetchSemanticsNodes().isNotEmpty())
-            composeRule.onNodeWithTag("cs_broll_sheet_prompt").performTextReplacement(BROLL_PROMPT)
+            composeRule.onNodeWithTag("cs_broll_sheet_prompt").performTextReplacement(brollPrompt)
             Espresso.closeSoftKeyboard()
             composeRule.onNodeWithTag("cs_broll_sheet_generate").performClick()
             waitFor("b-roll generated", 10 * 60_000L) {
                 val segs = persisted().brollSegments
                 val seg = segs.firstOrNull { it.id == segId }
                 failOnError("b-roll")
-                segs.firstOrNull { it.id != segId && it.prompt == BROLL_PROMPT && !it.mediaId.isNullOrBlank() }?.let {
+                segs.firstOrNull { it.id != segId && it.prompt == brollPrompt && !it.mediaId.isNullOrBlank() }?.let {
                     throw AssertionError("b-roll sheet edited ${it.id}, not the new segment $segId")
                 }
                 seg != null && (!seg.sha.isNullOrBlank() || !seg.mediaId.isNullOrBlank()) &&
@@ -629,7 +631,6 @@ class AircheckFullClipE2ETest {
             "captions and multi-shot cuts locally with no monthly rent."
         const val CUSTOM_ANCHOR = "Pay one-time for the phone you already own"
         const val EDITED_HOOK = "Stop paying monthly rent for AI video editing."
-        const val BROLL_PROMPT = "close up of a phone editing a video timeline on a desk, warm light"
         const val CHYRON = "Editing rent is over"
         const val SUBLINE = "Phones now cut video locally"
         const val BUG = "AIRCHECK E2E"
