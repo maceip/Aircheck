@@ -38,6 +38,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.ShaderBrush
+import androidx.compose.ui.graphics.ImageShader
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -742,6 +750,105 @@ fun AcCard(
         }
         content()
     }
+}
+
+/** What a notice is about; picks its stripe colour (the one place op colours are used outside a display). */
+enum class AcNoticeKind {
+    ERROR, SUCCESS, INFO, BUSY;
+
+    val stripe: Color
+        get() = when (this) {
+            ERROR -> AcTokens.OpRed
+            SUCCESS -> AcTokens.OpGreen
+            INFO -> AcTokens.OpBlue
+            BUSY -> AcTokens.OpOrange
+        }
+}
+
+/** 4x4 Bayer threshold matrix (values 0..15). */
+private val Bayer4 = intArrayOf(0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
+
+/** Stripe period along the 45-degree diagonal, in dither cells; the tile repeats every period. */
+private const val NOTICE_STRIPE_PERIOD = 16
+
+private val noticeTileCache = HashMap<Triple<Int, Int, Int>, ImageBitmap>()
+
+/**
+ * One repeating tile of diagonal (45-degree) stripes, ordered-dithered from [stripe] onto [base]:
+ * each stripe fades in and out along the diagonal, thresholded per cell by the Bayer matrix.
+ * Built once per (colours, cell size) and drawn as a repeating shader, so it costs nothing per frame.
+ */
+internal fun noticeStripeTile(stripe: Color, base: Color, cellPx: Int): ImageBitmap {
+    val key = Triple(stripe.toArgb(), base.toArgb(), cellPx)
+    return synchronized(noticeTileCache) {
+        noticeTileCache.getOrPut(key) {
+            val cells = NOTICE_STRIPE_PERIOD
+            val size = cells * cellPx
+            val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+            val on = stripe.toArgb()
+            val off = base.toArgb()
+            for (cy in 0 until cells) for (cx in 0 until cells) {
+                // Triangle wave across the diagonal: 0 at the stripe edge, 1 at its centre.
+                val phase = ((cx + cy) % cells).toFloat() / cells
+                val intensity = 1f - kotlin.math.abs(phase * 2f - 1f)
+                val threshold = (Bayer4[(cy % 4) * 4 + (cx % 4)] + 0.5f) / 16f
+                val color = if (intensity * 0.85f > threshold) on else off
+                for (py in 0 until cellPx) for (px in 0 until cellPx) {
+                    bmp.setPixel(cx * cellPx + px, cy * cellPx + py, color)
+                }
+            }
+            bmp.asImageBitmap()
+        }
+    }
+}
+
+/**
+ * Notice (Ryan, 2026-11-28): toasts, error / notice lines, progress and the return-to-last-video
+ * card. A raised card whose rim is a dithered diagonal stripe in the [kind] colour; the content
+ * sits on a solid `ui` panel inside it so the text stays fully legible.
+ */
+@Composable
+fun AcNotice(
+    kind: AcNoticeKind,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+    verticalArrangement: Arrangement.Vertical = Arrangement.spacedBy(6.dp),
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val shape = RoundedCornerShape(20.dp)
+    val inner = RoundedCornerShape(15.dp)
+    val interaction = remember { MutableInteractionSource() }
+    val pressed = rememberAcPressed(interaction, onClick != null)
+    val density = LocalDensity.current
+    val cellPx = with(density) { 1.5.dp.roundToPx() }.coerceAtLeast(1)
+    val stripe = kind.stripe
+    val base = AcTokens.Ui
+    Column(
+        modifier = modifier
+            .acSink(pressed, 1.dp)
+            .then(if (pressed) Modifier else Modifier.acRaised(shape, soft = true))
+            .clip(shape)
+            .drawWithCache {
+                val brush = ShaderBrush(ImageShader(noticeStripeTile(stripe, base, cellPx), TileMode.Repeated, TileMode.Repeated))
+                onDrawBehind { drawRect(brush) }
+            }
+            .then(
+                if (onClick != null) {
+                    Modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+                } else {
+                    Modifier
+                }
+            )
+            .semantics { stateDescription = kind.name.lowercase() }
+            .padding(5.dp)
+            .clip(inner)
+            .background(base)
+            .then(if (pressed) Modifier.acInset(inner) else Modifier)
+            .padding(contentPadding),
+        verticalArrangement = verticalArrangement,
+        content = content
+    )
 }
 
 /**

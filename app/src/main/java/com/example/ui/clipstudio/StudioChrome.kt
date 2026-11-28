@@ -55,6 +55,8 @@ import com.example.ui.design.AcCard
 import com.example.ui.design.AcDisplay
 import com.example.ui.design.AcKey
 import com.example.ui.design.AcKeySize
+import com.example.ui.design.AcNotice
+import com.example.ui.design.AcNoticeKind
 import com.example.ui.design.AcPrimaryKey
 import com.example.ui.design.AcTokens
 import com.example.ui.design.AcType
@@ -147,12 +149,16 @@ fun StudioTopBar(
     }
 }
 
-/** Floating notice card below the top bar with auto-dismiss + tap-to-close. */
+/**
+ * Floating notice below the top bar with auto-dismiss + tap-to-close. Toasts confirm a finished
+ * action, so they default to [AcNoticeKind.SUCCESS].
+ */
 @Composable
 fun BoxScope.StudioToast(
     message: String?,
     onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    kind: AcNoticeKind = AcNoticeKind.SUCCESS
 ) {
     if (message.isNullOrBlank()) return
     val currentDismiss by rememberUpdatedState(onDismiss)
@@ -160,14 +166,15 @@ fun BoxScope.StudioToast(
         kotlinx.coroutines.delay(3_000L)
         currentDismiss()
     }
-    AcCard(
+    AcNotice(
+        kind = kind,
         modifier = modifier
             .align(Alignment.TopCenter)
             .padding(start = 14.dp, top = 64.dp, end = 14.dp)
             .fillMaxWidth()
             .testTag("cs_toast"),
         onClick = onDismiss,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 16.dp, top = 6.dp, end = 6.dp, bottom = 6.dp)
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 14.dp, top = 4.dp, end = 4.dp, bottom = 4.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
@@ -187,7 +194,7 @@ fun BoxScope.StudioToast(
     }
 }
 
-/** Tappable error or notice line. */
+/** Tappable error (red stripes) or notice (blue stripes) line. */
 @Composable
 fun StudioStatusLine(
     error: String?,
@@ -195,24 +202,30 @@ fun StudioStatusLine(
     onDismissError: () -> Unit,
     onDismissNotice: () -> Unit
 ) {
-    val (text, color, dismiss) = when {
-        !error.isNullOrBlank() -> Triple(error, AcTokens.Red, onDismissError)
-        !notice.isNullOrBlank() -> Triple(notice, AcTokens.Ink2, onDismissNotice)
+    val (text, kind, dismiss) = when {
+        !error.isNullOrBlank() -> Triple(error, AcNoticeKind.ERROR, onDismissError)
+        !notice.isNullOrBlank() -> Triple(notice, AcNoticeKind.INFO, onDismissNotice)
         else -> return
     }
-    AcCard(
+    AcNotice(
+        kind = kind,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 4.dp)
             .testTag("cs_status_line"),
         onClick = dismiss,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 10.dp)
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Text(text, style = AcType.BodySmall.copy(color = color), maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(
+            text,
+            style = AcType.BodySmall.copy(color = if (kind == AcNoticeKind.ERROR) AcTokens.Red else AcTokens.Ink),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
-/** Progress meter shown in place of the primary key while a real job runs (tag `cs_busy_box`). */
+/** Progress notice (orange stripes) shown in place of the primary key while a real job runs (tag `cs_busy_box`). */
 @Composable
 fun StudioProgressDisplay(
     label: String,
@@ -223,41 +236,46 @@ fun StudioProgressDisplay(
 ) {
     val target = (progressFraction ?: 0f).coerceIn(0f, 1f)
     val animated by animateFloatAsState(target, tween(80, easing = LinearEasing), label = "busy_progress")
-    AcDisplay(
+    AcNotice(
+        kind = AcNoticeKind.BUSY,
         modifier = modifier
             .height(height)
             .testTag(tag),
-        contentAlignment = Alignment.CenterStart
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
     ) {
-        if (progressFraction != null) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .fillMaxHeight()
-                    .drawBehind {
-                        val y = size.height - 3.dp.toPx()
-                        drawLine(AcTokens.MediaKey, Offset(0f, y), Offset(size.width, y), 1.5.dp.toPx())
-                        drawLine(AcTokens.OpRed, Offset(0f, y), Offset(size.width * animated, y), 1.5.dp.toPx())
-                    }
-            )
-        }
-        Row(
-            modifier = Modifier
+        Box(
+            Modifier
                 .fillMaxSize()
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                .then(
+                    if (progressFraction != null) {
+                        Modifier.drawBehind {
+                            val y = size.height - 2.dp.toPx()
+                            drawLine(AcTokens.Hairline, Offset(0f, y), Offset(size.width, y), 1.5.dp.toPx())
+                            drawLine(AcTokens.Red, Offset(0f, y), Offset(size.width * animated, y), 1.5.dp.toPx())
+                        }
+                    } else {
+                        Modifier
+                    }
+                )
         ) {
-            ThinkingOrbSolving(size = 28.dp, tint = AcTokens.DisplayInk)
-            Text(
-                text = label,
-                style = AcType.Label.copy(color = AcTokens.DisplayInk),
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            if (progressFraction != null) {
-                Text("${(target * 100f).roundToInt()}%", style = AcType.numeral(20.sp), maxLines = 1)
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                ThinkingOrbSolving(size = 26.dp, tint = AcTokens.Ink)
+                Text(
+                    text = label,
+                    style = AcType.Label.copy(color = AcTokens.Ink),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (progressFraction != null) {
+                    Text("${(target * 100f).roundToInt()}%", style = AcType.numeral(20.sp).copy(color = AcTokens.Ink), maxLines = 1)
+                }
             }
         }
     }

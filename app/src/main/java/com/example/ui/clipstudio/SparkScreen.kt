@@ -72,6 +72,8 @@ import com.example.ui.design.AcDisplay
 import com.example.ui.design.AcField
 import com.example.ui.design.AcKey
 import com.example.ui.design.AcKeySize
+import com.example.ui.design.AcNotice
+import com.example.ui.design.AcNoticeKind
 import com.example.ui.design.AcMediaKey
 import com.example.ui.design.AcMediaWell
 import com.example.ui.design.AcPanel
@@ -511,9 +513,11 @@ private fun ContinueLastVideoBlock(
         }
     }
 
-    AcCard(
+    // Return-to-last-video card: a finished video, so the success (green) notice stripes.
+    AcNotice(
+        kind = AcNoticeKind.SUCCESS,
         onClick = { vm.toggleDirectionsPanel(video) },
-        contentPadding = PaddingValues(10.dp),
+        contentPadding = PaddingValues(8.dp),
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = 14.dp, end = 14.dp, bottom = 12.dp)

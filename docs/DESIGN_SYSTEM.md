@@ -51,6 +51,7 @@ All keys: raised at rest, pressed state sinks (inset shadow, 1–2dp down, scale
 8. **AcVideoOverlayKey** — a control drawn on top of video (e.g. play on the Cut player): translucent dark disc, white glyph, no elevation, raise or skirt. Use only over video.
 9. **AcTileKey** — picture tile (studio mockup, 2026-11-28): raised `ui` tile, radius 16, a small AcDisplay picture over a Label; `selected = true` turns it red like AcKey. Use for visual choices: transition tiles, B-roll framing.
 10. **AcLed** — the media-key on/off light on its own (red glow on, dark off). Only for real on/off state, e.g. a Newsroom graphic card's on-this-clip light.
+11. **AcNotice** — every notification surface (toast, error / notice line, progress-in-place-of-primary, the Spark "continue your last video" card): a raised card whose 5dp rim is 45° diagonal stripes ordered-dithered (4×4 Bayer) in the kind colour on `ui`, with the text on a solid `ui` panel inside. Kind → colour: error = opRed, success / done = opGreen, info / notice = opBlue, in progress / busy = opOrange. This is the one place op colours are used outside a display (Ryan, 2026-11-28). The stripe tile is built once and drawn as a repeating shader.
 
 **Exception:** Controls overlaid on video are flat (no elevation); the only exception to raised keys. Approved by Ryan 2026-11-28.
 
