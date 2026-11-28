@@ -136,6 +136,8 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+_URL_RE = re.compile(r"https?://[^\s<>\"')]+")
+
 _STOPWORDS = frozenset(
     "a an and are as at be but by for from got has have he her his i if in is it its me my of on or "
     "our she so that the their them they this to was we what when who will with you your just very "
@@ -419,8 +421,19 @@ class PulseService:
             raw_claims = [c for c in analysis.get("claims") or [] if isinstance(c, dict)]
         query = (str(analysis.get("query") or "").strip() if analysis else "") or naive_query(text)
 
-        claims = [check_claim(c, fetch) for c in raw_claims if c.get("kind") in ("allegation", "fact")]
-        held = [c for c in claims if c["kind"] == "allegation" and c["status"] != "sourced"]
+        cited = [{"title": "", "url": u, "domain": urllib.parse.urlsplit(u).netloc}
+                 for u in dict.fromkeys(_URL_RE.findall(text))]
+        claims = []
+        for c in raw_claims:
+            if c.get("kind") not in ("allegation", "fact"):
+                continue
+            if cited:
+                claims.append({"text": str(c.get("text") or ""), "about": str(c.get("about") or ""),
+                               "kind": str(c.get("kind") or ""), "query": "", "status": "cited",
+                               "sources": cited[:3], "detail": "you cited a source in the text"})
+            else:
+                claims.append(check_claim(c, fetch))
+        held = [c for c in claims if c["kind"] == "allegation" and c["status"] not in ("sourced", "cited")]
 
         wiki_term = next((e["corrected_name"] or e["name"] for e in entities if e["kind"] in ("person", "org")), query)
         sources = [heat_gdelt(query, fetch, now), heat_hn(query, fetch, now),

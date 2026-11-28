@@ -260,3 +260,14 @@ def test_http_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_cited_link_in_text_releases_boosts_without_news_lookup(tmp_path: Path) -> None:
+    fetch = FakeFetch({"timelinevolraw": _gdelt_timeline})
+    llm = FakeLlm(ANALYSIS, json.dumps({"boosts": [{"kind": "hook", "text": "L", "why": "w"}]}))
+    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW)
+    out = svc.score({"text": "jensen story https://news.example/story-1"})
+    assert out["claims"][0]["status"] == "cited"
+    assert out["claims"][0]["sources"][0]["url"] == "https://news.example/story-1"
+    assert out["boosts_held"] is False and out["boosts"][0]["kind"] == "hook"
+    assert not any("artlist" in url for url, _ in fetch.calls)
