@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import time
 import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
@@ -626,3 +627,97 @@ def test_did_profile_link_on_orcid_is_resolved_to_a_handle(tmp_path: Path) -> No
     person = svc._person("Ada Lovelace", 0, 1, "0000-0001", [])
     assert person["handles"]["bsky"] == {"handle": "ada.bsky.social", "status": "verified",
                                          "evidence": "listed on ORCID 0000-0001"}
+
+
+def test_citation_must_name_the_whole_subject() -> None:
+    page = "<p>Acme   Corporation was caught cheating</p>"
+    assert not pn._link_mentions("u", "Nvidia Corporation", lambda u: page, "caught cheating")
+    assert pn._link_mentions("u", "Acme Corporation", lambda u: page, "caught cheating")
+
+
+def test_held_reason_keeps_the_truncation_warning() -> None:
+    held = [{"status": "unsourced", "about": "X", "text": "did a thing"}]
+    assert "first 2000 characters" in pn._held_reason(held, True)
+    assert "first 2000 characters" not in pn._held_reason(held, False)
+
+
+def test_duplicate_author_names_get_no_orcid(tmp_path: Path) -> None:
+    work = {"authorships": [{"raw_author_name": "Wei Zhang", "author": {"orcid": "https://orcid.org/A"}},
+                            {"raw_author_name": "Wei Zhang", "author": {"orcid": "https://orcid.org/B"}},
+                            {"raw_author_name": "Ada Lovelace", "author": {"orcid": "https://orcid.org/C"}}]}
+    svc = pn.NameDropService(tmp_path, fetch=lambda url, **kw: work, clock=lambda: NOW)
+    out = svc._openalex_orcids("10.1/x", [])
+    assert out[pn._norm_name("Wei Zhang")][1] is None
+    assert out[pn._norm_name("Ada Lovelace")][1] == "C"
+
+
+def test_cited_urls_drop_sentence_punctuation() -> None:
+    assert pn._find_urls("See https://news.example/story. And https://a.example/b?, ok") == [
+        "https://news.example/story", "https://a.example/b"]
+
+
+def test_bad_port_is_a_source_failure_not_a_crash(tmp_path: Path) -> None:
+    with pytest.raises(pn.FetchError):
+        pn.fetch_public_page("https://example.com:bad/a", resolve=lambda h: ["93.184.216.34"])
+    llm = FakeLlm(ANALYSIS, "{}")
+    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=FakeFetch({}), bsky=pn.BskySession("", ""),
+                          clock=lambda: NOW)
+    out = svc.score({"text": "jensen story https://example.com:99999/a"})
+    assert out["boosts_held"] is True
+
+
+def test_unreadable_claim_kind_fails_closed(tmp_path: Path) -> None:
+    for claims in ([{"text": "t", "about": "A", "kind": "ALLEGATION?"}], [{"text": "t"}], ["oops"]):
+        llm = FakeLlm(json.dumps({"query": "q", "entities": [], "claims": claims}),
+                      json.dumps({"boosts": [{"kind": "hook", "text": "L", "why": "w"}]}))
+        svc = pn.PulseService(tmp_path, llm_router=llm, fetch=FakeFetch({}), bsky=pn.BskySession("", ""),
+                              clock=lambda: NOW)
+        out = svc.score({"text": "idea"})
+        assert out["boosts"] == [] and "unreadable claim" in out["boosts_via"], claims
+    # Upper-case but known kinds are normalised, not rejected.
+    llm = FakeLlm(json.dumps({"query": "q", "entities": [], "claims": [
+        {"text": "caught", "about": "A B", "kind": "Allegation", "search": "a"}]}), "{}")
+    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=FakeFetch({}), bsky=pn.BskySession("", ""), clock=lambda: NOW)
+    assert svc.score({"text": "idea"})["boosts_held"] is True
+
+
+def test_extra_claims_are_not_checked_but_still_hold(tmp_path: Path) -> None:
+    claims = [{"text": f"claim {i}", "about": "A B", "kind": "allegation", "search": f"s{i}"} for i in range(5)]
+    fetch = FakeFetch({})
+    svc = pn.PulseService(tmp_path, llm_router=FakeLlm(json.dumps({"query": "q", "entities": [], "claims": claims}), "{}"),
+                          fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW)
+    out = svc.score({"text": "idea"})
+    assert sum(1 for u, _ in fetch.calls if "artlist" in u) == pn.MAX_CHECKED_CLAIMS
+    assert out["claims"][-1]["detail"].startswith("not checked") and out["boosts_held"] is True
+
+
+def test_slow_heat_source_times_out_without_blocking(tmp_path: Path, monkeypatch: Any) -> None:
+    import threading as _th
+    gate = _th.Event()
+    monkeypatch.setattr(pn, "HEAT_TIMEOUT_SEC", 0.1)
+
+    def slow(url: str, _kw: Any) -> Any:
+        gate.wait(2)
+        return {"nbHits": 1}
+
+    svc = pn.PulseService(tmp_path, llm_router=None, fetch=FakeFetch({"hn.algolia": slow}),
+                          bsky=pn.BskySession("", ""), clock=lambda: NOW)
+    t0 = time.monotonic()
+    out = svc.score({"text": "rust compile times"})
+    gate.set()
+    assert time.monotonic() - t0 < 1.5
+    hn = next(s for s in out["heat"]["sources"] if s["name"] == "hn")
+    assert hn["ok"] is False and hn["detail"] == "timed out"
+
+
+def test_thread_mentions_without_a_valid_handle_stay_unknown(tmp_path: Path) -> None:
+    fetch = FakeFetch({
+        "getPostThread": {"thread": {"post": {"author": {"handle": "handle.invalid", "displayName": "Op"},
+            "record": {"text": "hi", "facets": [{"features": [
+                {"$type": "app.bsky.richtext.facet#mention", "did": "did:plc:x"}]}]}}}},
+        "getProfile": {"handle": "handle.invalid"},
+    })
+    svc = pn.NameDropService(tmp_path, fetch=fetch, clock=lambda: NOW)
+    out = svc.resolve({"url": "https://bsky.app/profile/did:plc:op/post/3abc"})
+    assert [p["handles"]["bsky"]["status"] for p in out["people"]] == ["unknown", "unknown"]
+    assert out["taggable"]["bsky"] == 0

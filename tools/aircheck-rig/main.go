@@ -385,7 +385,8 @@ func loadRigToken(cfg *Config) (string, error) {
 }
 
 func validRigToken(tok string) bool {
-	if len(tok) < 16 {
+	// Same 16-256 range the phone accepts (RigTokenStore), so a synced token is never dropped.
+	if len(tok) < 16 || len(tok) > 256 {
 		return false
 	}
 	for _, r := range tok {

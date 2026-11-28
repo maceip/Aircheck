@@ -191,6 +191,9 @@ func TestLoadRigTokenGeneratesOnceAndHonoursEnv(t *testing.T) {
 	if got, _ := loadRigToken(cfg); got != "abcdefghijklmnop-123" {
 		t.Fatalf("env file token not used: %q", got)
 	}
+	if validRigToken(strings.Repeat("a", 257)) {
+		t.Fatal("token longer than the phone accepts was allowed")
+	}
 	t.Setenv("AIRCHECK_RIG_TOKEN", "x'; rm -rf /")
 	os.Remove(filepath.Join(root, ".aircheck-rig", "env"))
 	if _, err := loadRigToken(cfg); err == nil {

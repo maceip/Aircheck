@@ -35,6 +35,12 @@ CACHE_TTL_SEC = 15 * 60
 MAX_TEXT_CHARS = 2000
 KEY_AUTHOR_LOOKUPS = 5
 MAX_CITED_LINKS = 3
+MAX_CHECKED_CLAIMS = 3
+CLAIM_KINDS = frozenset({"allegation", "fact", "opinion", "joke"})
+# The phone gives up after 120 s; the whole score must answer well before that.
+SCORE_BUDGET_SEC = 100.0
+HEAT_TIMEOUT_SEC = 20.0
+BOOST_MIN_SEC = 46.0
 FIRST_LOOK_WORKERS = 6
 FIRST_LOOK_DEADLINE_SEC = 60.0
 
@@ -147,6 +153,15 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')]+")
+
+
+def _clean_url(url: str) -> str:
+    """Drop sentence punctuation stuck to a link ("…/story." -> "…/story")."""
+    return url.rstrip(".,;:!?'\u2019\u201d]")
+
+
+def _find_urls(text: str) -> list[str]:
+    return [u for u in (_clean_url(m) for m in _URL_RE.findall(text)) if u]
 
 _STOPWORDS = frozenset(
     "a an and are as at be but by for from got has have he her his i if in is it its me my of on or "
@@ -404,7 +419,10 @@ def public_addresses(url: str, resolve: Callable[[str], list[str]] | None = None
         parts = urllib.parse.urlsplit(url)
     except ValueError:
         return []
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    try:
+        if parts.scheme not in ("http", "https") or not parts.hostname or (parts.port or 1) <= 0:
+            return []
+    except ValueError:
         return []
     resolver = resolve or (lambda host: [ai[4][0] for ai in socket.getaddrinfo(host, None)])
     try:
@@ -457,9 +475,13 @@ def fetch_public_page(url: str, *, max_bytes: int = 512 * 1024,
         raise FetchError("not a public web address")
     parts = urllib.parse.urlsplit(url)
     host = parts.hostname or ""
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise FetchError("bad port in link") from exc
     path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
     cls = _PinnedHTTPSConnection if parts.scheme == "https" else _PinnedHTTPConnection
-    conn = cls(host, addrs[0].split("%", 1)[0], port=parts.port, timeout=HTTP_TIMEOUT_SEC)
+    conn = cls(host, addrs[0].split("%", 1)[0], port=port, timeout=HTTP_TIMEOUT_SEC)
     try:
         conn.request("GET", path, headers={"User-Agent": USER_AGENT, "Accept": "text/html,*/*",
                                            "Host": parts.netloc.rsplit("@", 1)[-1]})
@@ -489,8 +511,10 @@ def _link_mentions(url: str, about: str, fetch: Callable[[str], str], claim: str
         return False
     if not isinstance(page, str):
         return False
-    lowered = page.lower()
-    if words[-1].lower() not in lowered:
+    lowered = " ".join(page.lower().split())
+    # The whole name, not just its last word: "Acme Corporation" must not stand in for
+    # "Nvidia Corporation".
+    if " ".join(w.lower() for w in words) not in lowered:
         return False
     hits = sum(1 for w in dict.fromkeys(claim_words) if w in lowered)
     return hits * 2 >= len(dict.fromkeys(claim_words))
@@ -527,7 +551,8 @@ def _held_reason(held: list[dict[str, Any]], truncated: bool) -> str:
         c = held[0]
         state = "Claim about" if c["status"] == "sourced" else "Unsourced claim about"
         tail = " (news matches the search; cite one that backs it)" if c["status"] == "sourced" else ""
-        return f"{state} {c['about'] or 'a real person'}: \"{c['text']}\"{tail}"
+        cut = f"; only the first {MAX_TEXT_CHARS} characters were checked" if truncated else ""
+        return f"{state} {c['about'] or 'a real person'}: \"{c['text']}\"{tail}{cut}"
     if truncated:
         return f"Only the first {MAX_TEXT_CHARS} characters were checked"
     return ""
@@ -571,6 +596,28 @@ class PulseService:
         key = json.dumps([args, kwargs], sort_keys=True, default=str)
         return self._cache.get_or(key, lambda: self.fetch(*args, **kwargs))
 
+    def _heat_sources(self, query: str, wiki_term: str, fetch: Fetcher, now: _dt.datetime,
+                      started: float) -> list[dict[str, Any]]:
+        """The four heat sources in parallel, each given up on (unmeasured) at the deadline."""
+        jobs = [("news", lambda: heat_gdelt(query, fetch, now)), ("hn", lambda: heat_hn(query, fetch, now)),
+                ("wiki", lambda: heat_wiki(wiki_term, fetch, now)),
+                ("bsky", lambda: heat_bsky(query, fetch, now, self.bsky))]
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs))
+        futures = [(name, pool.submit(fn)) for name, fn in jobs]
+        left = SCORE_BUDGET_SEC - (time.monotonic() - started) - BOOST_MIN_SEC
+        concurrent.futures.wait([f for _, f in futures], timeout=max(1.0, min(HEAT_TIMEOUT_SEC, left)))
+        out = []
+        for name, fut in futures:
+            if not fut.done():
+                out.append(_source_result(name, ok=False, detail="timed out"))
+                continue
+            try:
+                out.append(fut.result())
+            except Exception as exc:
+                out.append(_source_result(name, ok=False, detail=f"failed ({exc.__class__.__name__})"))
+        pool.shutdown(wait=False)
+        return out
+
     def score(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("body must be a JSON object")
@@ -581,6 +628,7 @@ class PulseService:
         # Claims past the cutoff were never checked, so the result can't release boosts.
         truncated = len(full) > MAX_TEXT_CHARS
         field = str(payload.get("field") or "note").strip()[:40]
+        started = time.monotonic()
         now = self.clock()
         fetch = self._cached_fetch
 
@@ -588,6 +636,14 @@ class PulseService:
         if analysis is not None and not isinstance(analysis.get("claims"), list):
             # No claims list means the claim check didn't really run: fail closed, like no JSON.
             analysis, analysis_via = None, f"claim check returned no claims list ({analysis_via})"
+        elif analysis is not None:
+            for c in analysis["claims"]:
+                kind = str(c.get("kind") or "").strip().lower() if isinstance(c, dict) else ""
+                if kind not in CLAIM_KINDS:
+                    # An entry we can't read might be an allegation; treat the check as not run.
+                    analysis, analysis_via = None, f"claim check returned an unreadable claim ({analysis_via})"
+                    break
+                c["kind"] = kind
         entities: list[dict[str, str]] = []
         raw_claims: list[dict[str, Any]] = []
         if analysis:
@@ -602,7 +658,7 @@ class PulseService:
         # At most MAX_CITED_LINKS links, each fetched once for all claims, so citation checks stay
         # well inside the app's read timeout.
         cited = [{"title": "", "url": u, "domain": urllib.parse.urlsplit(u).netloc}
-                 for u in list(dict.fromkeys(_URL_RE.findall(text)))[:MAX_CITED_LINKS]]
+                 for u in list(dict.fromkeys(_find_urls(text)))[:MAX_CITED_LINKS]]
         pages: dict[str, Any] = {}
 
         def fetch_citation_once(u: str) -> str:
@@ -616,9 +672,17 @@ class PulseService:
             return pages[u]
 
         claims = []
+        checked = 0
         for c in raw_claims:
             if c.get("kind") not in ("allegation", "fact"):
                 continue
+            if checked >= MAX_CHECKED_CLAIMS:
+                # Not looked up (time budget); an allegation here still holds boosts.
+                claims.append({"text": str(c.get("text") or ""), "about": str(c.get("about") or ""),
+                               "kind": str(c.get("kind") or ""), "query": "", "status": "unknown",
+                               "sources": [], "detail": "not checked: too many claims in one idea"})
+                continue
+            checked += 1
             supporting = [link for link in cited
                           if _link_mentions(link["url"], str(c.get("about") or ""), fetch_citation_once,
                                         str(c.get("text") or ""))]
@@ -637,8 +701,7 @@ class PulseService:
 
         wiki_term = next((e["corrected_name"] or e["name"] for e in entities if e["kind"] in ("person", "org")), query)
         if query:
-            sources = [heat_gdelt(query, fetch, now), heat_hn(query, fetch, now),
-                       heat_wiki(wiki_term, fetch, now), heat_bsky(query, fetch, now, self.bsky)]
+            sources = self._heat_sources(query, wiki_term, fetch, now, started)
         else:
             # Searching an empty query would count site-wide activity as this idea's heat.
             sources = [_source_result(n, ok=False, detail="no topic words to search for")
@@ -655,6 +718,8 @@ class PulseService:
         if analysis is None:
             # Fail closed: without a claim check we can't know the idea is safe to amplify.
             boost_json, boosts_via = None, f"skipped: claim check didn't run ({analysis_via})"
+        elif SCORE_BUDGET_SEC - (time.monotonic() - started) < BOOST_MIN_SEC:
+            boost_json, boosts_via = None, "skipped: out of time for this check; try again"
         else:
             boost_json, boosts_via = _llm_json(self.llm_router, BOOST_SYSTEM, BOOST_USER.format(
                 text=text, field=field, areas=", ".join(areas) or "unknown", heat=heat_summary,
@@ -708,6 +773,11 @@ def _handle(handle: str, status: str, evidence: str) -> dict[str, str]:
     return {"handle": handle, "status": status, "evidence": evidence}
 
 
+def _usable_bsky_handle(handle: str) -> bool:
+    """A handle we can tag or DM: not empty, not a DID, not Bluesky's "handle.invalid"."""
+    return bool(handle) and "." in handle and not handle.startswith("did:") and handle != "handle.invalid"
+
+
 def _norm_name(s: str) -> str:
     """Unicode-aware: keeps letters in any script, so 张伟 and 王芳 stay distinct (never both "")."""
     return "".join(ch for ch in s.casefold() if ch.isalpha())
@@ -716,7 +786,7 @@ def _norm_name(s: str) -> str:
 def _link_match(src: str, hosts: set[str], path_re: re.Pattern[str]) -> re.Match[str] | None:
     """Matches [path_re] against the path of a link in [src] whose hostname is exactly one of
     [hosts], so lookalikes such as notx.com or x.com.evil.example never count."""
-    links = _URL_RE.findall(src) + ["https://" + b for b in _BARE_LINK_RE.findall(src)]
+    links = _find_urls(src) + ["https://" + _clean_url(b) for b in _BARE_LINK_RE.findall(src)]
     for raw in links:
         try:
             parsed = urllib.parse.urlsplit(raw)
@@ -828,12 +898,20 @@ class NameDropService:
             notes.append(f"OpenAlex lookup failed: {exc}")
             return {}
         out: dict[str, tuple[str, str | None]] = {}
+        seen: set[str] = set()
         for a in work.get("authorships") or []:
             author = a.get("author") or {}
             orcid = str(author.get("orcid") or "").rsplit("/", 1)[-1] or None
             raw_name = str(a.get("raw_author_name") or author.get("display_name") or "")
-            if raw_name and _norm_name(raw_name):
-                out[_norm_name(raw_name)] = (raw_name, orcid)
+            key = _norm_name(raw_name)
+            if not raw_name or not key:
+                continue
+            if key in seen:
+                # Two authors with the same name: we can't tell whose ORCID is whose.
+                out[key] = (out[key][0], None)
+                continue
+            seen.add(key)
+            out[key] = (raw_name, orcid)
         return out
 
     def _person(self, name: str, index: int, total: int, orcid: str | None, notes: list[str]) -> dict[str, Any]:
@@ -875,7 +953,7 @@ class NameDropService:
             notes.append(f"Bluesky profile {did} lookup failed: {exc}")
             return ""
         handle = str(prof.get("handle") or "") if isinstance(prof, dict) else ""
-        return "" if not handle or handle == "handle.invalid" else handle
+        return handle if _usable_bsky_handle(handle) else ""
 
     def _bsky_candidate(self, name: str, orcid: str | None, notes: list[str]) -> dict[str, str]:
         try:
@@ -915,8 +993,10 @@ class NameDropService:
             notes.append("Bluesky did not return that post")
             return [], ""
         author = post.get("author") or {}
+        author_handle = next((h for h in (str(author.get("handle") or ""), actor) if _usable_bsky_handle(h)), "")
         people = [{"name": str(author.get("displayName") or ""), "role": "post author",
-                   "handles": {"bsky": _handle(str(author.get("handle") or actor), "verified", "author of the post"),
+                   "handles": {"bsky": (_handle(author_handle, "verified", "author of the post") if author_handle
+                                        else _handle("", "unknown", "Bluesky has no valid handle for this account")),
                                "x": _handle("", "unknown", "")}}]
         record = post.get("record") or {}
         dids: list[str] = []
@@ -927,8 +1007,12 @@ class NameDropService:
         for did in dict.fromkeys(dids):
             try:
                 prof = self.fetch(BSKY_PUBLIC_URL + "/app.bsky.actor.getProfile?" + urllib.parse.urlencode({"actor": did}))
+                prof = prof if isinstance(prof, dict) else {}
+                handle = str(prof.get("handle") or "")
                 people.append({"name": str(prof.get("displayName") or ""), "role": "mentioned",
-                               "handles": {"bsky": _handle(str(prof.get("handle") or did), "verified", "mentioned in the post"),
+                               "handles": {"bsky": (_handle(handle, "verified", "mentioned in the post")
+                                                    if _usable_bsky_handle(handle)
+                                                    else _handle("", "unknown", "Bluesky has no valid handle for this account")),
                                            "x": _handle("", "unknown", "")}})
             except FetchError as exc:
                 notes.append(f"Bluesky profile {did} lookup failed: {exc}")

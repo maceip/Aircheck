@@ -5,16 +5,22 @@ import com.example.data.local.DEFAULT_MAC_RIG_LAN_URL
 import com.example.draft.DraftApiClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 // ---- Wire models for the rig's /v1/pulse and /v1/namedrop endpoints (pulse_namedrop.py) ----
 
@@ -217,11 +223,12 @@ class PulseClient(
             }
         }
 
-    private fun <T> execute(base: String, method: String, path: String, body: String?, serializer: KSerializer<T>): Result<T> {
+    private suspend fun <T> execute(base: String, method: String, path: String, body: String?, serializer: KSerializer<T>): Result<T> {
         val builder = Request.Builder().url(base + path).method(method, body?.toRequestBody(JSON_MEDIA_TYPE))
-        rigToken()?.let { builder.header(RIG_TOKEN_HEADER, it) }
+        // Only the routes that need it get the token, so a wrong rig URL never sees it from Pulse.
+        if (path.startsWith(FIRST_LOOK_PATH)) rigToken()?.let { builder.header(RIG_TOKEN_HEADER, it) }
         val req = builder.build()
-        okHttpClient.newCall(req).execute().use { resp ->
+        okHttpClient.newCall(req).await().use { resp ->
             val raw = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 val detail = DraftApiClient.parseServerErrorInfoStatic(json, raw).detail
@@ -231,11 +238,26 @@ class PulseClient(
         }
     }
 
+    /** Runs the call so that cancelling the coroutine (text changed, sheet closed) cancels the request. */
+    private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
+        cont.invokeOnCancellation { runCatching { cancel() } }
+        enqueue(object : Callback {
+            override fun onResponse(call: Call, response: Response) {
+                if (cont.isActive) cont.resume(response) else response.close()
+            }
+
+            override fun onFailure(call: Call, e: IOException) {
+                if (!cont.isCancelled) cont.resumeWithException(e)
+            }
+        })
+    }
+
     /** A rig HTTP error (not a transport failure), so it is not retried on another URL. */
     class HttpFailure(message: String) : Exception(message)
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         const val RIG_TOKEN_HEADER = "X-Aircheck-Token"
+        const val FIRST_LOOK_PATH = "/v1/namedrop/first-look"
     }
 }
