@@ -417,6 +417,8 @@ def test_malformed_llm_collections_degrade_to_empty(tmp_path: Path) -> None:
                           clock=lambda: NOW)
     out = svc.score({"text": "some idea about chips"})
     assert out["entities"] == [] and out["claims"] == [] and out["boosts"] == []
+    # A non-list "claims" means the check didn't run, so the boost call is never made.
+    assert "no claims list" in out["boosts_via"] and len(llm.prompts) == 1
 
 
 def test_legacy_dotted_arxiv_id_is_recognised() -> None:
@@ -554,3 +556,57 @@ def test_first_look_send_stops_starting_dms_at_the_deadline(tmp_path: Path, monk
     statuses = [r["status"] for r in out["results"]]
     assert statuses == ["sent", "failed"] and started == ["a.bsky.social"]
     assert "ran out of time" in out["results"][1]["detail"]
+
+
+def test_each_cited_link_is_fetched_once_and_capped(tmp_path: Path) -> None:
+    two_claims = json.dumps({"query": "q", "entities": [], "claims": [
+        {"text": "caught cheating", "about": "Jensen Huang", "kind": "allegation", "search": "a"},
+        {"text": "stole funds", "about": "Jensen Huang", "kind": "allegation", "search": "b"}]})
+    fetched: list[str] = []
+
+    def cite(u: str) -> str:
+        fetched.append(u)
+        raise pn.FetchError("timeout")
+
+    svc = pn.PulseService(tmp_path, llm_router=FakeLlm(two_claims, "{}"), fetch=FakeFetch({}),
+                          bsky=pn.BskySession("", ""), clock=lambda: NOW, fetch_citation=cite)
+    links = " ".join(f"https://n{i}.example/" for i in range(8))
+    svc.score({"text": "idea " + links})
+    assert len(fetched) == pn.MAX_CITED_LINKS == len(set(fetched))
+
+
+def test_one_bad_dm_reply_does_not_abort_the_send(tmp_path: Path, monkeypatch: Any) -> None:
+    svc = pn.NameDropService(tmp_path, fetch=lambda url, **kw: {}, clock=lambda: NOW)
+    calls: list[str] = []
+
+    def dm(handle: str, message: str) -> dict[str, str]:
+        calls.append(handle)
+        if handle.startswith("bad"):
+            raise AttributeError("boom")
+        return {"status": "sent", "detail": "ok"}
+
+    monkeypatch.setattr(svc, "_send_bsky_dm", dm)
+    svc.put_first_look({"people": [{"platform": "bsky", "address": "bad.bsky.social"},
+                                   {"platform": "bsky", "address": "good.bsky.social"}]})
+    out = svc.send_first_look({"text": "hi"})
+    assert sorted(r["status"] for r in out["results"]) == ["failed", "sent"]
+
+
+def test_malformed_actor_search_leaves_bluesky_unknown(tmp_path: Path) -> None:
+    for reply in ([1], {"actors": None}, {"actors": [None, 3]}):
+        svc = pn.NameDropService(tmp_path, fetch=lambda url, r=reply, **kw: r, clock=lambda: NOW)
+        assert svc._bsky_candidate("Ada Lovelace", None, [])["status"] == "unknown"
+
+
+def test_did_profile_link_on_orcid_is_resolved_to_a_handle(tmp_path: Path) -> None:
+    def fetch(url: str, **kw: Any) -> Any:
+        if "researcher-urls" in url:
+            return {"researcher-url": [{"url": {"value": "https://bsky.app/profile/did:plc:ada"}}]}
+        if "getProfile" in url:
+            return {"handle": "ada.bsky.social"}
+        raise pn.FetchError("unexpected")
+
+    svc = pn.NameDropService(tmp_path, fetch=fetch, clock=lambda: NOW)
+    person = svc._person("Ada Lovelace", 0, 1, "0000-0001", [])
+    assert person["handles"]["bsky"] == {"handle": "ada.bsky.social", "status": "verified",
+                                         "evidence": "listed on ORCID 0000-0001"}

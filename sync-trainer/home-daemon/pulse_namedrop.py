@@ -34,6 +34,7 @@ HTTP_TIMEOUT_SEC = 8.0
 CACHE_TTL_SEC = 15 * 60
 MAX_TEXT_CHARS = 2000
 KEY_AUTHOR_LOOKUPS = 5
+MAX_CITED_LINKS = 3
 FIRST_LOOK_WORKERS = 6
 FIRST_LOOK_DEADLINE_SEC = 60.0
 
@@ -584,6 +585,9 @@ class PulseService:
         fetch = self._cached_fetch
 
         analysis, analysis_via = _llm_json(self.llm_router, ANALYZE_SYSTEM, ANALYZE_USER.format(text=text))
+        if analysis is not None and not isinstance(analysis.get("claims"), list):
+            # No claims list means the claim check didn't really run: fail closed, like no JSON.
+            analysis, analysis_via = None, f"claim check returned no claims list ({analysis_via})"
         entities: list[dict[str, str]] = []
         raw_claims: list[dict[str, Any]] = []
         if analysis:
@@ -595,14 +599,28 @@ class PulseService:
             raw_claims = [c for c in _as_list(analysis.get("claims")) if isinstance(c, dict)]
         query = (str(analysis.get("query") or "").strip() if analysis else "") or naive_query(text)
 
+        # At most MAX_CITED_LINKS links, each fetched once for all claims, so citation checks stay
+        # well inside the app's read timeout.
         cited = [{"title": "", "url": u, "domain": urllib.parse.urlsplit(u).netloc}
-                 for u in dict.fromkeys(_URL_RE.findall(text))]
+                 for u in list(dict.fromkeys(_URL_RE.findall(text)))[:MAX_CITED_LINKS]]
+        pages: dict[str, Any] = {}
+
+        def fetch_citation_once(u: str) -> str:
+            if u not in pages:
+                try:
+                    pages[u] = self.fetch_citation(u)
+                except FetchError as exc:
+                    pages[u] = exc
+            if isinstance(pages[u], FetchError):
+                raise pages[u]
+            return pages[u]
+
         claims = []
         for c in raw_claims:
             if c.get("kind") not in ("allegation", "fact"):
                 continue
             supporting = [link for link in cited
-                          if _link_mentions(link["url"], str(c.get("about") or ""), self.fetch_citation,
+                          if _link_mentions(link["url"], str(c.get("about") or ""), fetch_citation_once,
                                         str(c.get("text") or ""))]
             if supporting:
                 claims.append({"text": str(c.get("text") or ""), "about": str(c.get("about") or ""),
@@ -838,12 +856,26 @@ class NameDropService:
                     if xm:
                         handles["x"] = _handle("@" + xm.group(1), "verified", f"listed on ORCID {orcid}")
                     elif bm:
-                        handles["bsky"] = _handle(bm.group(1), "verified", f"listed on ORCID {orcid}")
+                        actor = bm.group(1)
+                        if actor.startswith("did:"):
+                            # Profile links can use the DID; tags and DMs need the handle.
+                            actor = self._bsky_handle_for(actor, notes)
+                        if actor:
+                            handles["bsky"] = _handle(actor, "verified", f"listed on ORCID {orcid}")
             except FetchError as exc:
                 notes.append(f"ORCID {orcid} lookup failed: {exc}")
         if handles["bsky"]["status"] != "verified":
             handles["bsky"] = self._bsky_candidate(name, orcid, notes)
         return {"name": name, "role": role, "orcid": orcid or "", "handles": handles}
+
+    def _bsky_handle_for(self, did: str, notes: list[str]) -> str:
+        try:
+            prof = self.fetch(BSKY_PUBLIC_URL + "/app.bsky.actor.getProfile?" + urllib.parse.urlencode({"actor": did}))
+        except FetchError as exc:
+            notes.append(f"Bluesky profile {did} lookup failed: {exc}")
+            return ""
+        handle = str(prof.get("handle") or "") if isinstance(prof, dict) else ""
+        return "" if not handle or handle == "handle.invalid" else handle
 
     def _bsky_candidate(self, name: str, orcid: str | None, notes: list[str]) -> dict[str, str]:
         try:
@@ -855,8 +887,12 @@ class NameDropService:
         target = _norm_name(name)
         if not target:
             return _handle("", "unknown", "")
-        for actor in data.get("actors") or []:
-            if _norm_name(str(actor.get("displayName") or "")) != target:
+        actors = data.get("actors") if isinstance(data, dict) else None
+        if not isinstance(actors, list):
+            notes.append(f"Bluesky search for {name} returned an unexpected reply")
+            return _handle("", "unknown", "")
+        for actor in actors:
+            if not isinstance(actor, dict) or _norm_name(str(actor.get("displayName") or "")) != target:
                 continue
             handle = str(actor.get("handle") or "")
             desc = str(actor.get("description") or "")
@@ -978,7 +1014,11 @@ class NameDropService:
             if i in cancelled:
                 outcome = {"status": "failed", "detail": "not sent: ran out of time; send again for this person"}
             else:
-                outcome = fut.result()  # already running: bounded by its own HTTP timeouts
+                try:
+                    outcome = fut.result()  # already running: bounded by its own HTTP timeouts
+                except Exception as exc:  # one bad reply must not hide the others' results
+                    outcome = {"status": "failed",
+                               "detail": f"unexpected error ({exc.__class__.__name__}); it may not have sent"}
             results[i] = {**results[i], **outcome}
         pool.shutdown(wait=False)
         summary = {"at": _iso(self.clock()), "sent": sum(r["status"] == "sent" for r in results),
@@ -1004,7 +1044,7 @@ class NameDropService:
                                urllib.parse.urlencode({"members": did}), headers=hdr)["convo"]["id"]
             sent = self.fetch(pds + "/chat.bsky.convo.sendMessage", method="POST", headers=hdr,
                               body={"convoId": convo, "message": {"text": message}})
-            if not sent.get("id"):
+            if not isinstance(sent, dict) or not sent.get("id"):
                 return {"status": "failed", "detail": "Bluesky did not confirm the message"}
         except FetchError as exc:
             return {"status": "failed", "detail": f"Bluesky {exc}"}
