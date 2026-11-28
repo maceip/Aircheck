@@ -46,6 +46,8 @@ All keys: raised at rest, pressed state sinks (inset shadow, 1–2dp down, scale
 6. **AcField** — recessed well text field (inset shadow), Inter 16. Replaces Material OutlinedTextField.
 7. **AcPanel** — chassis-colored grouping panel with bevel (Recorder body), e.g. the Recorder block on Spark.
 8. **AcVideoOverlayKey** — a control drawn on top of video (e.g. play on the Cut player): translucent dark disc, white glyph, no elevation, raise or skirt. Use only over video.
+9. **AcTileKey** — picture tile (studio mockup, 2026-11-28): raised `ui` tile, radius 16, a small AcDisplay picture over a Label; `selected = true` turns it red like AcKey. Use for visual choices: transition tiles, B-roll framing.
+10. **AcLed** — the media-key on/off light on its own (red glow on, dark off). Only for real on/off state, e.g. a Newsroom graphic card's on-this-clip light.
 
 **Exception:** Controls overlaid on video are flat (no elevation); the only exception to raised keys. Approved by Ryan 2026-11-28.
 
@@ -73,6 +75,10 @@ All keys: raised at rest, pressed state sinks (inset shadow, 1–2dp down, scale
 - Spark beats: Body 17 beat text; each beat card has AcKey edit + AcKey AI rewrite (selected/red while generating). Bottom: media well record + AcPrimaryKey "make the video".
 - Anchors sheet: Accept = AcPrimaryKey (not a notification-style bar); toggles become AcKey selected states; show what toggling does.
 - Cut status (option C, approved by Ryan 2026-11-28): no black status boxes. One Caption line under the "02 CUT" step header shows voice / head / cut / export as ✓ done (ink), working… or redo (red), · not yet (muted). The rig connection is a dot on the settings AcKey: ink = online, red = offline. The freed height goes to the player.
-- Cut: AcDisplay player ~2x larger with drag-resize grip; AcDisplay timeline with trim brackets and a draggable b-roll track (removes per-sentence b-roll tags and the b-roll tab); zoom key removed; media well: play, split, b-roll, captions(toggle); AcPrimaryKey render.
+- Cut: AcDisplay player ~2x larger with drag-resize grip; AcDisplay timeline with trim brackets and a draggable b-roll track (removes per-sentence b-roll tags and the b-roll tab); zoom key removed; media well: play, split, b-roll, captions(toggle); AcPrimaryKey render. Keys over the video are flat (AcVideoOverlayKey).
+- Cut joins and lanes (studio mockup, approved 2026-11-28): blue ◆ at each sentence join on the VOICE lane (filled = not a hard cut) opens the Transition sheet; the read-only GFX lane shows when each graphic is on screen (chyron and bug span the clip), following the compositor the cut will use. Bottom row: overlays AcKey (Newsroom), transitions AcKey with the blue glyph (all joins), AcPrimaryKey. Renders start only from Cut.
+- Transition sheet: 7 AcTileKey tiles, each a looping A→B preview (thin op lines), selected red; speed fast/med/slow AcKeys; "use for every join"; AcPrimaryKey done.
+- B-roll sheet (tap a block): preview display, prompt AcField with AI key, pick photo/video, framing AcTileKey pictures (corner / full / split; a new block copies the last framing), delete, AcPrimaryKey done.
+- Newsroom: one screen, no tabs. Preview display ~60% of the height, selected graphic outlined; one row of + new / AI 3-pack AcKeys and a card per graphic (AcCard with a miniature on a display and an AcLed for on/off); tapping a card opens a sheet with only that kind's fields + save. Bottom: backdrop AcKey + AcPrimaryKey done.
+- Backdrop: set preview display, room prompt, accent, light, blur/exposure rulers, grain/border, presenter photo, saved looks; AcPrimaryKey "generate set". Window video / objects / outfit / motion wait for rig support.
 - Settings: one look per video (mapped per provider internally); regroup; no rails.
-- Newsroom studio (unreachable): remove lime and pills; candidate for deletion (ask Ryan).
