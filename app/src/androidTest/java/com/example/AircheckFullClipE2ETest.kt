@@ -340,6 +340,13 @@ class AircheckFullClipE2ETest {
                 seg != null && (!seg.sha.isNullOrBlank() || !seg.mediaId.isNullOrBlank()) &&
                     segId !in studioVm.uiState.value.generatingBrollSegmentIds
             }
+            // The generated still loads into the sheet's preview right after this and resizes the sheet;
+            // full run 1 saw the sheet close right after the framing tap, likely a tap that hit the scrim. Let it settle.
+            composeRule.waitForIdle()
+            Thread.sleep(3_000L)
+            composeRule.waitForIdle()
+            screenshot("cut_broll_generated")
+            assertTrue("b-roll sheet must still be open after generating", composeRule.onAllNodesWithTag("cs_broll_sheet").fetchSemanticsNodes().isNotEmpty())
             composeRule.onNodeWithTag("cs_broll_framing_${CoreRenderOptions.BROLL_FRAMING_FULL}").scrollIntoView().performClick()
             waitFor("framing full", 5_000L) {
                 persisted().brollSegments.first { it.id == segId }.framingOverride == CoreRenderOptions.BROLL_FRAMING_FULL
