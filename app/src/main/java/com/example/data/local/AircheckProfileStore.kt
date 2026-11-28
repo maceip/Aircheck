@@ -8,6 +8,7 @@ import androidx.datastore.core.Serializer
 import androidx.datastore.dataStoreFile
 import com.example.data.BrandChannel
 import com.example.data.DEFAULT_REMOTE_LLM_PROVIDER_ID
+import com.example.data.HardwareTheme
 import com.example.data.LlmProviderChoice
 import com.example.data.LlmRoutingSettings
 import com.example.data.LlmStage
@@ -84,11 +85,13 @@ data class AircheckProfileProto(
     @ProtoNumber(38) val heygenEngine: String = "heygen-avatar-6",
     @ProtoNumber(39) val heygenResolution: String = "1080p",
     @ProtoNumber(40) val heygenMotionPrompt: String = "",
-    @ProtoNumber(41) val rigVideoBackend: String = "heygen"
+    @ProtoNumber(41) val rigVideoBackend: String = "heygen",
+    @ProtoNumber(42) val hardwareTheme: String = HardwareTheme.LIGHT.wireValue
 )
 
 data class StudioSettings(
     val brandChannel: BrandChannel = BrandChannel.VOLT_LIME,
+    val hardwareTheme: HardwareTheme = HardwareTheme.LIGHT,
     val voiceSource: VoiceSource = VoiceSource.MIC_VOICEOVER,
     val stage4Mode: Stage4Mode = Stage4Mode.PHOTO_HEAD_LORA,
     val activeScriptId: String = "",
@@ -155,6 +158,10 @@ class AircheckProfileStore(
 
     suspend fun setBrandChannel(channel: BrandChannel) {
         dataStore.updateData { it.copy(brandChannel = channel.name) }
+    }
+
+    suspend fun setHardwareTheme(theme: HardwareTheme) {
+        dataStore.updateData { it.copy(hardwareTheme = theme.wireValue) }
     }
 
     suspend fun setActiveScriptId(scriptId: String) {
@@ -304,6 +311,7 @@ class AircheckProfileStore(
 
     private fun AircheckProfileProto.toDomain(): StudioSettings = StudioSettings(
         brandChannel = BrandChannel.fromRaw(brandChannel),
+        hardwareTheme = HardwareTheme.fromRaw(hardwareTheme),
         voiceSource = VoiceSource.fromRaw(voiceSource),
         stage4Mode = Stage4Mode.fromRaw(stage4Mode),
         activeScriptId = activeScriptId,

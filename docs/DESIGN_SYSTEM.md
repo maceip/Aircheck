@@ -6,18 +6,21 @@ Visual reference: `mockups.html` in `openrig-execution/aircheck-screens` (open v
 The app is a light grey device (Teenage Engineering Recorder / Nothing OS). Normal app controls are white, round and raised, and turn red when selected. Anything that edits audio or video is a dark square key set into a black well (Recorder). Media itself — video, waveforms, timelines, meters — is shown on black displays drawn in thin lines (OP-1). One raised red primary key per screen. Every key presses down with a haptic tick.
 
 ## Tokens (`ui/design/AcTokens.kt`)
-| token | value | use |
-|---|---|---|
-| chassis | #D9DAD7 | screen background |
-| chassisHi / chassisLo | #F1F1EF / #A8A9A5 | panel bevel highlight / shade |
-| ui | #F5F5F3 | app key + card surface |
-| ink / ink2 | #141414 / #5C5D5A | text / secondary text |
-| hairline | #C4C5C1 | dividers |
-| red / redHi / redLo | #D71921 / #FF4A3D / #8E0F14 | primary, selected, active media icon, LED on |
-| well | #0B0B0B | media key well |
-| mediaKey / mediaKeyHi / mediaKeyLo | #303033 / #45454A / #1A1A1C | media key body |
-| display | #0A0A0A | OP-1 display background |
-| opBlue / opOrange / opGrey / opRed / opGreen | #4A7FC4 / #D08A3E / #9B9B9B / #EC4A2E / #3FBF7F | thin-line graphics INSIDE displays only |
+Aircheck supports two hardware finishes (`HardwareTheme`: Light aluminum, Stealth dark, or Auto/system), persisted in `AircheckProfileStore`:
+
+| token | Light | Stealth Black | use |
+|---|---|---|---|
+| chassis | #D9DAD7 | #1A1A1C | screen background |
+| chassisHi / chassisLo | #F1F1EF / #A8A9A5 | #2E2E32 / #0F0F11 | panel bevel highlight / shade |
+| ui | #F5F5F3 | #252528 | app key + card surface |
+| ink / ink2 | #141414 / #5C5D5A | #F0F0EE / #9B9C98 | text / secondary text |
+| hairline | #C4C5C1 | #323236 | dividers & engraved seams |
+| displayInk | #F5F5F3 | #F5F5F3 | always-light ink on red keys, media keys, and black displays |
+| red / redHi / redLo | #D71921 / #FF4A3D / #8E0F14 | #D71921 / #FF4A3D / #8E0F14 | primary, selected, active media icon, LED on |
+| well | #0B0B0B | #080809 | media key well |
+| mediaKey / mediaKeyHi / mediaKeyLo | #303033 / #45454A / #1A1A1C | #303033 / #45454A / #141416 | media key body |
+| display | #0A0A0A | #0A0A0A | OP-1 display background |
+| opBlue / opOrange / opGrey / opRed / opGreen | #4A7FC4 / #D08A3E / #9B9B9B / #EC4A2E / #3FBF7F | same | thin-line graphics INSIDE displays only |
 
 No other colors in UI code. Specifically banned: lime / AcidVoltLime / channelAccent, BroadcastCobalt, Cs.Cobalt outlines, HwLed multicolor, Mint, any per-feature accent.
 

@@ -2569,6 +2569,16 @@ class StudioViewModel internal constructor(
         viewModelScope.launch { profileStore.setBrandChannel(channel) }
     }
 
+    fun setHardwareTheme(theme: com.example.data.HardwareTheme) {
+        _uiState.update { st ->
+            st.copy(
+                settings = st.settings.copy(hardwareTheme = theme),
+                toastMessage = "Finish: ${theme.label}"
+            )
+        }
+        viewModelScope.launch { profileStore.setHardwareTheme(theme) }
+    }
+
     fun setRigVoiceBackend(backend: String) {
         val clean = backend.trim().lowercase().ifBlank { "auto" }
         val label = _uiState.value.studioRigOptions?.voiceBackends?.firstOrNull { it.id == clean }?.label ?: clean

@@ -7,6 +7,19 @@ import java.util.UUID
 import kotlin.math.max
 import kotlin.math.roundToInt
 
+enum class HardwareTheme(val wireValue: String, val label: String) {
+    LIGHT("light", "Light"),
+    DARK("dark", "Stealth"),
+    SYSTEM("system", "Auto");
+
+    companion object {
+        fun fromRaw(raw: String?): HardwareTheme =
+            entries.firstOrNull {
+                it.wireValue.equals(raw, ignoreCase = true) || it.name.equals(raw, ignoreCase = true)
+            } ?: LIGHT
+    }
+}
+
 enum class BrandChannel(val label: String, val accentHex: String) {
     VOLT_LIME("Volt Lime", "#B8FF00"),
     BROADCAST_COBALT("Broadcast Cobalt", "#0088FF");

@@ -162,7 +162,7 @@ fun AircheckApp(
         }
     }
 
-    AircheckTheme {
+    AircheckTheme(hardwareTheme = studioState.settings.hardwareTheme) {
         // Never allow system Back to exit Aircheck while inside Settings, Overlays, or Clip Review.
         BackHandler(enabled = showSettingsModal) { showSettingsModal = false }
         BackHandler(enabled = !showSettingsModal && !activeReviewClipId.isNullOrBlank()) {
@@ -179,6 +179,7 @@ fun AircheckApp(
                     SystemDeckSheet(
                         uiState = studioState,
                         onSelectChannel = studioViewModel::setBrandChannel,
+                        onSelectHardwareTheme = studioViewModel::setHardwareTheme,
                         onClearCasCache = studioViewModel::clearCasCache,
                         onSaveTailscaleRigUrl = { url ->
                             studioViewModel.saveTailscaleRigUrl(url)

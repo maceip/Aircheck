@@ -204,7 +204,7 @@ fun ClipReviewScreen(
                                 if (!activeCaptionWord.isNullOrBlank()) {
                                     Text(
                                         text = activeCaptionWord,
-                                        style = AcType.Title.copy(color = AcTokens.Ui),
+                                        style = AcType.Title.copy(color = AcTokens.DisplayInk),
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(6.dp))
                                             .background(AcTokens.Display.copy(alpha = 0.78f))
@@ -219,7 +219,7 @@ fun ClipReviewScreen(
                                             .background(AcTokens.Display.copy(alpha = 0.9f))
                                             .padding(10.dp)
                                     ) {
-                                        Text(clip.chyronHeadline, style = AcType.Label.copy(color = AcTokens.Ui), maxLines = 1)
+                                        Text(clip.chyronHeadline, style = AcType.Label.copy(color = AcTokens.DisplayInk), maxLines = 1)
                                         if (clip.chyronSubline.isNotBlank()) {
                                             Text(clip.chyronSubline, style = AcType.Caption.copy(color = AcTokens.OpGrey), maxLines = 1)
                                         }
@@ -237,7 +237,7 @@ fun ClipReviewScreen(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Text(clip.stageDetail.ifBlank { clip.status.label }, style = AcType.Label.copy(color = AcTokens.Ui))
+                            Text(clip.stageDetail.ifBlank { clip.status.label }, style = AcType.Label.copy(color = AcTokens.DisplayInk))
                             if (clip.status.isActive) {
                                 val fraction = clip.progressFraction.coerceIn(0f, 1f)
                                 Box(

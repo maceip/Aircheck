@@ -352,18 +352,19 @@ private fun GraphicCard(
 }
 
 private val MiniCaption = AcType.Caption.copy(fontSize = 7.sp, letterSpacing = 0.sp)
-private val MiniText = AcType.BodySmall.copy(fontSize = 8.5.sp, lineHeight = 10.sp)
+private val MiniText
+    get() = AcType.BodySmall.copy(fontSize = 8.5.sp, lineHeight = 10.sp)
 
 @Composable
 private fun kickerColors(style: BreakingNewsStyle, accentHex: String): Pair<Color, Color> {
     val accent = parseAccentHex(accentHex)
     val luma = 0.2126f * accent.red + 0.7152f * accent.green + 0.0722f * accent.blue
-    val accentFg = if (luma >= 0.6f) AcTokens.Display else AcTokens.Ui
+    val accentFg = if (luma >= 0.6f) AcTokens.Display else AcTokens.DisplayInk
     return when (style) {
         BreakingNewsStyle.BREAKING, BreakingNewsStyle.ALERT_STAT -> accent to accentFg
         BreakingNewsStyle.DEVELOPING -> AcTokens.OpOrange to AcTokens.Display
-        BreakingNewsStyle.EXCLUSIVE -> AcTokens.Ui to AcTokens.Display
-        BreakingNewsStyle.CLEAN -> Color.Transparent to AcTokens.Ui
+        BreakingNewsStyle.EXCLUSIVE -> AcTokens.DisplayInk to AcTokens.Display
+        BreakingNewsStyle.CLEAN -> Color.Transparent to AcTokens.DisplayInk
     }
 }
 
@@ -379,10 +380,10 @@ private fun BoxScope.ChyronMiniature(style: BreakingNewsStyle, accentHex: String
             style = MiniText.copy(color = AcTokens.Display),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth().background(AcTokens.Ui).padding(horizontal = 3.dp, vertical = 1.dp)
+            modifier = Modifier.fillMaxWidth().background(AcTokens.DisplayInk).padding(horizontal = 3.dp, vertical = 1.dp)
         )
         if (subline.isNotBlank()) {
-            Text(subline, style = MiniCaption.copy(color = AcTokens.Ui), maxLines = 1, modifier = Modifier.fillMaxWidth().background(AcTokens.Display).padding(horizontal = 3.dp))
+            Text(subline, style = MiniCaption.copy(color = AcTokens.DisplayInk), maxLines = 1, modifier = Modifier.fillMaxWidth().background(AcTokens.Display).padding(horizontal = 3.dp))
         }
     }
 }
@@ -395,7 +396,7 @@ private fun BoxScope.BugMiniature(text: String, accentHex: String) {
         horizontalArrangement = Arrangement.spacedBy(3.dp)
     ) {
         Box(Modifier.size(5.dp).clip(CircleShape).background(parseAccentHex(accentHex)))
-        Text(text.ifBlank { "LIVE" }.uppercase(), style = MiniCaption.copy(color = AcTokens.Ui), maxLines = 1)
+        Text(text.ifBlank { "LIVE" }.uppercase(), style = MiniCaption.copy(color = AcTokens.DisplayInk), maxLines = 1)
     }
 }
 
@@ -406,10 +407,10 @@ private fun BoxScope.OverlayMiniature(ovl: SavedNewsroomOverlay, accentHex: Stri
         OverlayObjectKind.LOWER_THIRD -> ChyronMiniature(ovl.breakingStyle, accentHex, ovl.headline, ovl.subline)
         OverlayObjectKind.QUOTE_BRIEF -> Column(Modifier.align(Alignment.TopStart).padding(8.dp)) {
             Text("QUOTE", style = MiniCaption.copy(color = accent), maxLines = 1)
-            Text(ovl.headline, style = MiniText.copy(color = AcTokens.Ui), maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(ovl.headline, style = MiniText.copy(color = AcTokens.DisplayInk), maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
         OverlayObjectKind.STAT_CALLOUT -> Column(Modifier.align(Alignment.CenterStart).padding(8.dp)) {
-            Text(ovl.calloutStat.ifBlank { "—" }, style = AcType.numeral(20.sp).copy(color = AcTokens.Ui), maxLines = 1)
+            Text(ovl.calloutStat.ifBlank { "—" }, style = AcType.numeral(20.sp).copy(color = AcTokens.DisplayInk), maxLines = 1)
             Text(ovl.headline.uppercase(), style = MiniCaption.copy(color = accent), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
@@ -466,7 +467,7 @@ internal fun LookBackdropLayer(look: NewsroomLook, anchorPhotoFile: File?, modif
                 Modifier
                     .fillMaxSize()
                     .padding(6.dp)
-                    .border(1.5.dp, AcTokens.Ui.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
+                    .border(1.5.dp, AcTokens.DisplayInk.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
             )
         }
     }
@@ -549,7 +550,7 @@ private fun NewsroomPreview(
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Box(Modifier.size(6.dp).clip(CircleShape).background(accentColor))
-                    Text(options.cornerBugText.ifBlank { "AIRCHECK" }, style = AcType.Step.copy(color = AcTokens.Ui, fontSize = 9.5.sp), maxLines = 1)
+                    Text(options.cornerBugText.ifBlank { "AIRCHECK" }, style = AcType.Step.copy(color = AcTokens.DisplayInk, fontSize = 9.5.sp), maxLines = 1)
                 }
             }
 
@@ -571,7 +572,7 @@ private fun NewsroomPreview(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Text(cardOverlay.headline, style = AcType.BodySmall.copy(color = AcTokens.Ui, fontSize = 9.5.sp, lineHeight = 12.sp), maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    Text(cardOverlay.headline, style = AcType.BodySmall.copy(color = AcTokens.DisplayInk, fontSize = 9.5.sp, lineHeight = 12.sp), maxLines = 3, overflow = TextOverflow.Ellipsis)
                 }
             }
 
@@ -600,12 +601,12 @@ private fun NewsroomPreview(
                         style = AcType.BodySmall.copy(color = AcTokens.Display, fontSize = if (isVertical) 11.sp else 14.sp, lineHeight = if (isVertical) 14.sp else 18.sp),
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.fillMaxWidth().background(AcTokens.Ui).padding(horizontal = 6.dp, vertical = 3.dp)
+                        modifier = Modifier.fillMaxWidth().background(AcTokens.DisplayInk).padding(horizontal = 6.dp, vertical = 3.dp)
                     )
                     if (displaySubline.isNotBlank()) {
                         Text(
                             displaySubline,
-                            style = AcType.Caption.copy(color = AcTokens.Ui, fontSize = if (isVertical) 7.5.sp else 10.sp, letterSpacing = 0.sp),
+                            style = AcType.Caption.copy(color = AcTokens.DisplayInk, fontSize = if (isVertical) 7.5.sp else 10.sp, letterSpacing = 0.sp),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.fillMaxWidth().background(AcTokens.Display).padding(horizontal = 6.dp, vertical = 2.dp)

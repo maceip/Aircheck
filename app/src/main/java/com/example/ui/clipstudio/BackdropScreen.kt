@@ -228,6 +228,7 @@ fun BackdropScreen(
                     valueText = evLabel,
                     normalizedValue = (((draftLook.brightnessEv + 3.0) / 6.0).toFloat()).coerceIn(0f, 1f),
                     enabled = true,
+                    centerDetent = true,
                     onStep = { delta ->
                         val next = (Math.round((draftLook.brightnessEv + delta * 0.2) * 10.0) / 10.0).coerceIn(-3.0, 3.0)
                         update(draftLook.copy(brightnessEv = next))

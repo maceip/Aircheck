@@ -674,6 +674,24 @@ private fun VideoMonitorPanel(
                     )
                 }
                 if (waveformPeaks.isNotEmpty()) {
+                    // TP-7 radial tape-reel spindle driven strictly by real playback progressFraction.
+                    Canvas(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 14.dp)
+                            .size(56.dp)
+                            .testTag("cs_cut_tp7_spindle")
+                    ) {
+                        val r = size.minDimension / 2f - 2.dp.toPx()
+                        val c = Offset(size.width / 2f, size.height / 2f)
+                        val angleRad = progressFraction * 2f * Math.PI.toFloat() * 4f
+                        val dx = kotlin.math.cos(angleRad) * r * 0.85f
+                        val dy = kotlin.math.sin(angleRad) * r * 0.85f
+                        drawCircle(AcTokens.OpGrey.copy(alpha = 0.45f), radius = r, center = c, style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx()))
+                        drawLine(AcTokens.OpGrey.copy(alpha = 0.75f), Offset(c.x - dx, c.y - dy), Offset(c.x + dx, c.y + dy), 1.dp.toPx())
+                        drawCircle(AcTokens.MediaKeyHi, radius = 6.dp.toPx(), center = c)
+                        drawCircle(if (isPlaying) AcTokens.OpRed else AcTokens.OpGrey, radius = 2.dp.toPx(), center = Offset(c.x + dx * 0.75f, c.y + dy * 0.75f))
+                    }
                     Canvas(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -703,7 +721,7 @@ private fun VideoMonitorPanel(
             if (liveCaption.isNotBlank()) {
                 Text(
                     text = liveCaption,
-                    style = AcType.BodySmall.copy(color = AcTokens.Ui),
+                    style = AcType.BodySmall.copy(color = AcTokens.DisplayInk),
                     textAlign = TextAlign.Center,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -736,15 +754,37 @@ private fun VideoMonitorPanel(
             append(if (isVertical) "9:16" else "16:9")
             if (punchIn) append(" · ZOOM")
         }
-        Text(
-            text = topRightLabel,
-            style = AcType.Caption.copy(color = if (sourceUri != null && !sourceHasVideo) AcTokens.OpGreen else AcTokens.OpGrey),
-            maxLines = 1,
+        // SIGMA-style recessed OLED pill readout in the top-right bezel.
+        Box(
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(end = 12.dp, top = 12.dp)
-                .testTag("cs_cut_monitor_mode")
-        )
+                .padding(end = 10.dp, top = 8.dp)
+                .clip(RoundedCornerShape(50))
+                .background(AcTokens.Well)
+                .border(1.dp, AcTokens.MediaKey, RoundedCornerShape(50))
+                .padding(horizontal = 8.dp, vertical = 3.dp)
+        ) {
+            Text(
+                text = topRightLabel,
+                style = AcType.Caption.copy(color = if (sourceUri != null && !sourceHasVideo) AcTokens.OpGreen else AcTokens.OpGrey),
+                maxLines = 1,
+                modifier = Modifier.testTag("cs_cut_monitor_mode")
+            )
+        }
+
+        // TX-6 style L/R level meter docked vertically in the right bezel, driven strictly by real waveformPeaks.
+        if (waveformPeaks.isNotEmpty()) {
+            StudioLevelMeter(
+                peaks = waveformPeaks,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                isPlaying = isPlaying,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 10.dp, top = 36.dp, bottom = 28.dp)
+                    .fillMaxHeight()
+            )
+        }
 
         if (!isPlaying || !sourceHasVideo) {
             AcVideoOverlayKey(

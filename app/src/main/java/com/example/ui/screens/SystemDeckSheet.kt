@@ -56,15 +56,18 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.example.R
 import com.example.data.BrandChannel
+import com.example.data.HardwareTheme
 import com.example.ui.RigConnectionStatus
 import com.example.ui.StudioUiState
 import com.example.ui.clipstudio.SectionCaption
 import com.example.ui.clipstudio.StudioStatusLine
 import com.example.ui.clipstudio.StudioToast
+import com.example.ui.clipstudio.hairlineBottom
 import com.example.ui.design.AcCard
 import com.example.ui.design.AcField
 import com.example.ui.design.AcKey
 import com.example.ui.design.AcKeySize
+import com.example.ui.design.AcLed
 import com.example.ui.design.AcTokens
 import com.example.ui.design.AcType
 import androidx.compose.foundation.shape.CircleShape
@@ -83,6 +86,7 @@ fun SystemDeckSheet(
     onSaveTailscaleRigUrl: (String) -> Unit,
     onTestRigConnection: (String) -> Unit,
     onOpenNewsroomStudio: () -> Unit = {},
+    onSelectHardwareTheme: ((HardwareTheme) -> Unit)? = null,
     onLoadActivity: (suspend () -> List<String>)? = null,
     onDeviceModels: (@Composable () -> Unit)? = null,
     onLoadStudioOptions: ((refresh: Boolean) -> Unit)? = null,
@@ -186,6 +190,51 @@ fun SystemDeckSheet(
                     }
                 }
 
+                // Hardware finish (Light aluminum vs Stealth Black vs Auto)
+                if (onSelectHardwareTheme != null) {
+                    item(key = "hardware_theme_card") {
+                        SettingsGroupCaption("Appearance")
+                        AcCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("hardware_theme_card"),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .hairlineBottom()
+                                    .padding(bottom = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("CHASSIS FINISH", style = AcType.Caption)
+                                Text(
+                                    uiState.settings.hardwareTheme.label.uppercase(),
+                                    style = AcType.Caption.copy(color = AcTokens.Ink),
+                                    maxLines = 1
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                HardwareTheme.entries.forEach { theme ->
+                                    AcKey(
+                                        label = theme.label,
+                                        onClick = { onSelectHardwareTheme(theme) },
+                                        selected = uiState.settings.hardwareTheme == theme,
+                                        size = AcKeySize.Small,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("hardware_theme_${theme.wireValue}")
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Studio Server Connection
                 item(key = "studio_server_card") {
                     SettingsGroupCaption("Mac Studio")
@@ -195,23 +244,32 @@ fun SystemDeckSheet(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .hairlineBottom()
+                                .padding(bottom = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text("MAC STUDIO SERVER", style = AcType.Caption)
-                            Text(
-                                text = rigStatusLabel,
-                                style = AcType.Caption.copy(color = when (rigHealth.status) {
-                                        RigConnectionStatus.ONLINE -> AcTokens.Red
-                                        RigConnectionStatus.CHECKING -> AcTokens.Red
-                                        RigConnectionStatus.ERROR -> AcTokens.Red
-                                        RigConnectionStatus.IDLE -> AcTokens.Ink2
-                                    }),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.testTag("rig_connection_status_label")
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                AcLed(on = rigHealth.status == RigConnectionStatus.ONLINE, size = 7.dp)
+                                Text(
+                                    text = rigStatusLabel,
+                                    style = AcType.Caption.copy(color = when (rigHealth.status) {
+                                            RigConnectionStatus.ONLINE -> AcTokens.Ink
+                                            RigConnectionStatus.CHECKING -> AcTokens.Ink2
+                                            RigConnectionStatus.ERROR -> AcTokens.Red
+                                            RigConnectionStatus.IDLE -> AcTokens.Ink2
+                                        }),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.testTag("rig_connection_status_label")
+                                )
+                            }
                         }
 
                         Row(

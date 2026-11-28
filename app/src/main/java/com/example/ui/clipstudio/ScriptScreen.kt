@@ -485,7 +485,7 @@ private fun ScriptParagraphRow(
             localSelection?.let { r ->
                 val endExcl = (r.last + 1).coerceAtMost(para.text.length)
                 if (r.first < endExcl) {
-                    addStyle(SpanStyle(background = AcTokens.Red, color = AcTokens.Ui), r.first, endExcl)
+                    addStyle(SpanStyle(background = AcTokens.Red, color = AcTokens.DisplayInk), r.first, endExcl)
                 }
             }
         }

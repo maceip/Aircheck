@@ -295,14 +295,34 @@ private fun RecorderPanel(
     onRequestMic: (() -> Unit) -> Unit
 ) {
     AcPanel(raised = true, contentPadding = PaddingValues(12.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SectionCaption("Recorder", color = AcTokens.Red, modifier = Modifier.weight(1f))
             if (state.isRecordingSeed) {
                 SectionCaption("● rec", color = AcTokens.Red)
+            } else {
+                // Perforated OP-1 Field dot-matrix mic grille texture (pure bezel craft).
+                androidx.compose.foundation.Canvas(
+                    modifier = Modifier
+                        .size(width = 44.dp, height = 14.dp)
+                        .testTag("cs_recorder_grille")
+                ) {
+                    val cols = 9
+                    val rows = 3
+                    val dx = size.width / (cols - 1).coerceAtLeast(1)
+                    val dy = size.height / (rows - 1).coerceAtLeast(1)
+                    val r = 1.15.dp.toPx()
+                    val dotColor = AcTokens.Ink2.copy(alpha = 0.5f)
+                    for (row in 0 until rows) {
+                        for (col in 0 until cols) {
+                            drawCircle(dotColor, radius = r, center = Offset(col * dx, row * dy))
+                        }
+                    }
+                }
             }
         }
         RecorderWaveformDisplay(
             recording = state.isRecordingSeed,
+            playing = state.isPlayingSeedAudio,
             elapsedMs = state.recordingElapsedMs,
             rmsFlow = vm.liveRmsFlow
         )
@@ -329,6 +349,7 @@ private fun RecorderPanel(
                     caption = if (state.isRecordingSeed) "release when done" else "hold to record",
                     semanticsLabel = recordLabel,
                     size = 72.dp,
+                    concave = true,
                     modifier = Modifier
                         .weight(1f)
                         .testTag("cs_seed_hold_record")
@@ -356,12 +377,14 @@ private fun RecorderPanel(
 }
 
 /**
- * Live waveform of the real mic RMS while recording (thin white lines, red playhead), plus the
- * elapsed timecode. Collects the RMS flow only while recording, so idle Spark never recomposes at 50 Hz.
+ * Live waveform of the real mic RMS while recording (thin white lines, red playhead), calibrated
+ * OP-1 tick baseline, plus the elapsed timecode. Collects the RMS flow only while recording, so
+ * idle Spark never recomposes at 50 Hz.
  */
 @Composable
 private fun RecorderWaveformDisplay(
     recording: Boolean,
+    playing: Boolean,
     elapsedMs: Long,
     rmsFlow: StateFlow<Float>
 ) {
@@ -378,28 +401,51 @@ private fun RecorderWaveformDisplay(
     AcDisplay(
         modifier = Modifier
             .fillMaxWidth()
-            .height(96.dp)
+            .height(98.dp)
             .testTag("cs_recorder_waveform")
     ) {
         Box(
             Modifier
                 .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .padding(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 10.dp)
                 .drawBehind {
-                    val mid = size.height / 2f
+                    val mid = (size.height - 10.dp.toPx()) / 2f
                     val pitch = 4.dp.toPx()
                     val stroke = 1.5.dp.toPx()
                     val maxBars = (size.width * 0.7f / pitch).toInt().coerceAtLeast(1)
                     val shown = samples.takeLast(maxBars)
                     shown.forEachIndexed { i, v ->
                         val x = i * pitch
-                        val h = (v.coerceIn(0f, 1f) * size.height * 0.9f).coerceAtLeast(stroke)
-                        drawLine(AcTokens.Ui, Offset(x, mid - h / 2f), Offset(x, mid + h / 2f), stroke)
+                        val h = (v.coerceIn(0f, 1f) * (size.height - 16.dp.toPx()) * 0.9f).coerceAtLeast(stroke)
+                        drawLine(AcTokens.DisplayInk, Offset(x, mid - h / 2f), Offset(x, mid + h / 2f), stroke)
                     }
                     val headX = shown.size * pitch
                     drawLine(AcTokens.MediaKeyHi, Offset(headX, mid), Offset(size.width, mid), 1.dp.toPx())
-                    drawLine(AcTokens.OpRed, Offset(headX, 4.dp.toPx()), Offset(headX, size.height - 4.dp.toPx()), stroke)
-                    drawCircle(AcTokens.OpRed, radius = 3.5.dp.toPx(), center = Offset(headX, 4.dp.toPx()))
+                    drawLine(AcTokens.OpRed, Offset(headX, 2.dp.toPx()), Offset(headX, size.height - 12.dp.toPx()), stroke)
+                    drawCircle(AcTokens.OpRed, radius = 3.5.dp.toPx(), center = Offset(headX, 2.dp.toPx()))
+
+                    // Calibrated OP-1 Field OLED baseline tick scale along the bottom edge.
+                    val baseY = size.height
+                    val ticks = 28
+                    for (i in 0..ticks) {
+                        val x = size.width * (i.toFloat() / ticks)
+                        val major = i % 7 == 0
+                        val h = if (major) 6.dp.toPx() else 3.dp.toPx()
+                        drawLine(
+                            color = if (major) AcTokens.OpGrey.copy(alpha = 0.7f) else AcTokens.MediaKeyHi,
+                            start = Offset(x, baseY - h),
+                            end = Offset(x, baseY),
+                            strokeWidth = 1.dp.toPx()
+                        )
+                    }
+                    // Subtle TP-7 thin-line spindle badge on the right when playing back the recorded take.
+                    if (playing) {
+                        val reelR = 13.dp.toPx()
+                        val reelC = Offset(size.width - reelR - 2.dp.toPx(), mid + 4.dp.toPx())
+                        drawCircle(AcTokens.OpGrey.copy(alpha = 0.65f), radius = reelR, center = reelC, style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx()))
+                        drawCircle(AcTokens.OpRed, radius = 2.5.dp.toPx(), center = reelC)
+                        drawLine(AcTokens.OpGrey.copy(alpha = 0.75f), Offset(reelC.x - reelR * 0.7f, reelC.y), Offset(reelC.x + reelR * 0.7f, reelC.y), 1.dp.toPx())
+                    }
                 }
         )
         Text(
@@ -527,11 +573,11 @@ private fun VideoThumbBox(
             )
         }
         if (showPlayIcon) {
-            Icon(Icons.Sharp.PlayArrow, contentDescription = null, tint = AcTokens.Ui, modifier = Modifier.size(26.dp))
+            Icon(Icons.Sharp.PlayArrow, contentDescription = null, tint = AcTokens.DisplayInk, modifier = Modifier.size(26.dp))
         } else if (durationMs > 0L) {
             Text(
                 text = mmss(durationMs),
-                style = AcType.Caption.copy(color = AcTokens.Ui),
+                style = AcType.Caption.copy(color = AcTokens.DisplayInk),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 4.dp)

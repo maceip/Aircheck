@@ -112,19 +112,35 @@ private fun Modifier.acSink(pressed: Boolean, depth: Dp): Modifier = graphicsLay
     }
 }
 
-/** Soft neumorphic raise used by app keys and cards: light top-left, grey bottom-right. */
+/** Soft neumorphic raise used by app keys and cards: light top-left, grey/black bottom-right. */
 private fun Modifier.acRaised(shape: Shape, red: Boolean = false, soft: Boolean = false): Modifier {
-    val lightAlpha = if (red) 0.8f else if (soft) 0.85f else 0.9f
-    val dark = if (red) AcTokens.RedLo.copy(alpha = 0.45f) else AcTokens.Ink2.copy(alpha = if (soft) 0.28f else 0.35f)
+    val isDark = AcTokens.isDark
+    val lightAlpha = when {
+        isDark -> if (red) 0.25f else if (soft) 0.45f else 0.55f
+        red -> 0.8f
+        soft -> 0.85f
+        else -> 0.9f
+    }
+    val dark = when {
+        red -> AcTokens.RedLo.copy(alpha = if (isDark) 0.6f else 0.45f)
+        isDark -> AcTokens.RaiseShadow.copy(alpha = if (soft) 0.65f else 0.8f)
+        else -> AcTokens.RaiseShadow.copy(alpha = if (soft) 0.28f else 0.35f)
+    }
+    val hi = if (isDark) AcTokens.RaiseHighlight.copy(alpha = lightAlpha) else Color.White.copy(alpha = lightAlpha)
     return this
-        .dropShadow(shape, Shadow(radius = if (soft) 8.dp else 9.dp, color = Color.White.copy(alpha = lightAlpha), offset = DpOffset((-4).dp, (-4).dp)))
+        .dropShadow(shape, Shadow(radius = if (soft) 8.dp else 9.dp, color = hi, offset = DpOffset((-3).dp, (-3).dp)))
         .dropShadow(shape, Shadow(radius = 12.dp, color = dark, offset = DpOffset(if (soft) 4.dp else 5.dp, if (soft) 5.dp else 6.dp)))
 }
 
 /** Inset press shadow used by app keys while held. */
-private fun Modifier.acInset(shape: Shape, red: Boolean = false): Modifier = this
-    .innerShadow(shape, Shadow(radius = 7.dp, color = if (red) AcTokens.RedLo.copy(alpha = 0.75f) else AcTokens.Ink2.copy(alpha = 0.35f), offset = DpOffset(3.dp, 3.dp)))
-    .innerShadow(shape, Shadow(radius = 7.dp, color = if (red) AcTokens.RedHi.copy(alpha = 0.4f) else Color.White.copy(alpha = 0.9f), offset = DpOffset((-3).dp, (-3).dp)))
+private fun Modifier.acInset(shape: Shape, red: Boolean = false): Modifier {
+    val isDark = AcTokens.isDark
+    val darkShadow = if (red) AcTokens.RedLo.copy(alpha = 0.75f) else AcTokens.RaiseShadow.copy(alpha = if (isDark) 0.7f else 0.35f)
+    val hiShadow = if (red) AcTokens.RedHi.copy(alpha = 0.4f) else AcTokens.RaiseHighlight.copy(alpha = if (isDark) 0.45f else 0.9f)
+    return this
+        .innerShadow(shape, Shadow(radius = 7.dp, color = darkShadow, offset = DpOffset(3.dp, 3.dp)))
+        .innerShadow(shape, Shadow(radius = 7.dp, color = hiShadow, offset = DpOffset((-3).dp, (-3).dp)))
+}
 
 // -----------------------------------------------------------------------------
 // 1. AcKey — app control
@@ -160,7 +176,7 @@ fun AcKey(
     }
     val fg = when {
         !enabled -> AcTokens.Ink2
-        selected -> AcTokens.Ui
+        selected -> AcTokens.DisplayInk
         else -> AcTokens.Ink
     }
     // Tag, click and semantics live on the outer 48dp touch target so a key's testTag is the
@@ -317,7 +333,7 @@ fun AcVideoOverlayKey(
             .alpha(if (enabled) 1f else 0.45f),
         contentAlignment = Alignment.Center
     ) {
-        Icon(icon, contentDescription = contentDescription, tint = AcTokens.Ui, modifier = Modifier.size(size * 0.5f))
+        Icon(icon, contentDescription = contentDescription, tint = AcTokens.DisplayInk, modifier = Modifier.size(size * 0.5f))
     }
 }
 
@@ -325,7 +341,8 @@ fun AcVideoOverlayKey(
 // 2. AcPrimaryKey — the one raised red action per screen
 // -----------------------------------------------------------------------------
 
-private val PrimaryLabelStyle = AcType.Title.copy(fontSize = 15.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold)
+private val PrimaryLabelStyle: TextStyle
+    get() = AcType.Title.copy(fontSize = 15.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold)
 
 /**
  * The one main action per screen: red gradient, raised on a red-lo skirt with a drop shadow,
@@ -392,11 +409,11 @@ fun AcPrimaryKey(
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (icon != null) {
-                Icon(icon, contentDescription = null, tint = AcTokens.Ui, modifier = Modifier.size(20.dp))
+                Icon(icon, contentDescription = null, tint = AcTokens.DisplayInk, modifier = Modifier.size(20.dp))
             }
             Text(
                 text = label,
-                style = PrimaryLabelStyle.copy(color = AcTokens.Ui),
+                style = PrimaryLabelStyle.copy(color = AcTokens.DisplayInk),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -430,13 +447,15 @@ fun AcMediaWell(
     )
 }
 
-private val MediaCaptionStyle = AcType.Caption.copy(fontSize = 8.5.sp, letterSpacing = 0.06.sp, color = AcTokens.OpGrey)
+private val MediaCaptionStyle: TextStyle
+    get() = AcType.Caption.copy(fontSize = 8.5.sp, letterSpacing = 0.06.sp, color = AcTokens.OpGrey)
 
 @Composable
 private fun AcMediaKeyFace(
     modifier: Modifier,
     pressed: Boolean,
     size: Dp,
+    concave: Boolean = false,
     content: @Composable BoxScope.() -> Unit
 ) {
     val shape = RoundedCornerShape(12.dp)
@@ -452,6 +471,28 @@ private fun AcMediaKeyFace(
             )
             .clip(shape)
             .background(Brush.verticalGradient(0f to AcTokens.MediaKeyHi, 0.45f to AcTokens.MediaKey, 1f to AcTokens.MediaKey))
+            .then(
+                if (concave) {
+                    Modifier.drawBehind {
+                        // Subtle OP-1 Field circular finger dish on primary hold-to-record keycap.
+                        val dishR = (minOf(this.size.width, this.size.height) * 0.36f).coerceAtLeast(16.dp.toPx())
+                        val center = Offset(this.size.width / 2f, this.size.height * 0.42f)
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                0f to AcTokens.Well.copy(alpha = 0.42f),
+                                0.78f to AcTokens.MediaKeyLo.copy(alpha = 0.25f),
+                                1f to Color.White.copy(alpha = 0.08f),
+                                center = center,
+                                radius = dishR
+                            ),
+                            radius = dishR,
+                            center = center
+                        )
+                    }
+                } else {
+                    Modifier
+                }
+            )
             .then(
                 if (pressed) {
                     Modifier.innerShadow(shape, Shadow(radius = 5.dp, color = AcTokens.Well.copy(alpha = 0.7f), offset = DpOffset(0.dp, 2.dp)))
@@ -479,7 +520,7 @@ private fun BoxScope.AcMediaKeyContent(
     val glyph = when {
         !enabled -> AcTokens.OpGrey
         active -> AcTokens.RedHi
-        else -> AcTokens.Ui
+        else -> AcTokens.DisplayInk
     }
     if (toggle != null) {
         Box(
@@ -571,6 +612,7 @@ fun AcMediaKey(
     caption: String? = null,
     label: String? = null,
     size: Dp = 62.dp,
+    concave: Boolean = false,
     semanticsLabel: String? = null
 ) {
     val press by rememberUpdatedState(onPress)
@@ -596,7 +638,8 @@ fun AcMediaKey(
                 )
             },
         pressed = held && enabled,
-        size = size
+        size = size,
+        concave = concave
     ) {
         AcMediaKeyContent(icon, label, contentDescription, active, enabled, null, caption)
     }
@@ -720,7 +763,7 @@ fun AcTileKey(
     val pressed = rememberAcPressed(interaction, enabled)
     val fg = when {
         !enabled -> AcTokens.Ink2
-        selected -> AcTokens.Ui
+        selected -> AcTokens.DisplayInk
         else -> AcTokens.Ink
     }
     Column(
@@ -765,7 +808,8 @@ fun AcLed(on: Boolean, modifier: Modifier = Modifier, size: Dp = 8.dp) {
 // 6. AcField — recessed text field
 // -----------------------------------------------------------------------------
 
-private val FieldTextStyle = AcType.Body.copy(fontSize = 16.sp, lineHeight = 22.sp)
+private val FieldTextStyle: TextStyle
+    get() = AcType.Body.copy(fontSize = 16.sp, lineHeight = 22.sp)
 
 /** Recessed well text field (inset shadow), Inter 16. Replaces Material OutlinedTextField. */
 @Composable
@@ -807,8 +851,8 @@ fun AcField(
                     .heightIn(min = 48.dp)
                     .clip(shape)
                     .background(AcTokens.Chassis)
-                    .innerShadow(shape, Shadow(radius = 6.dp, color = AcTokens.Ink2.copy(alpha = 0.35f), offset = DpOffset(2.dp, 3.dp)))
-                    .innerShadow(shape, Shadow(radius = 5.dp, color = Color.White.copy(alpha = 0.8f), offset = DpOffset((-2).dp, (-2).dp)))
+                    .innerShadow(shape, Shadow(radius = 6.dp, color = AcTokens.RaiseShadow.copy(alpha = if (AcTokens.isDark) 0.65f else 0.35f), offset = DpOffset(2.dp, 3.dp)))
+                    .innerShadow(shape, Shadow(radius = 5.dp, color = AcTokens.RaiseHighlight.copy(alpha = if (AcTokens.isDark) 0.4f else 0.8f), offset = DpOffset((-2).dp, (-2).dp)))
                     .padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -855,8 +899,8 @@ fun AcField(
                     .heightIn(min = 48.dp)
                     .clip(shape)
                     .background(AcTokens.Chassis)
-                    .innerShadow(shape, Shadow(radius = 6.dp, color = AcTokens.Ink2.copy(alpha = 0.35f), offset = DpOffset(2.dp, 3.dp)))
-                    .innerShadow(shape, Shadow(radius = 5.dp, color = Color.White.copy(alpha = 0.8f), offset = DpOffset((-2).dp, (-2).dp)))
+                    .innerShadow(shape, Shadow(radius = 6.dp, color = AcTokens.RaiseShadow.copy(alpha = if (AcTokens.isDark) 0.65f else 0.35f), offset = DpOffset(2.dp, 3.dp)))
+                    .innerShadow(shape, Shadow(radius = 5.dp, color = AcTokens.RaiseHighlight.copy(alpha = if (AcTokens.isDark) 0.4f else 0.8f), offset = DpOffset((-2).dp, (-2).dp)))
                     .padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -890,14 +934,26 @@ fun AcPanel(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val shape = RoundedCornerShape(22.dp)
+    val seamColor = AcTokens.Hairline
     Column(
         modifier = modifier
             .then(
-                if (raised) Modifier.dropShadow(shape, Shadow(radius = 20.dp, color = AcTokens.Ink2.copy(alpha = 0.3f), offset = DpOffset(0.dp, 10.dp)))
+                if (raised) Modifier.dropShadow(shape, Shadow(radius = 20.dp, color = AcTokens.RaiseShadow.copy(alpha = if (AcTokens.isDark) 0.65f else 0.3f), offset = DpOffset(0.dp, 10.dp)))
                 else Modifier
             )
             .clip(shape)
             .background(AcTokens.Chassis)
+            .drawBehind {
+                val r = 22.dp.toPx()
+                val stroke = 1.dp.toPx()
+                drawRoundRect(
+                    color = seamColor,
+                    topLeft = Offset(stroke / 2f, stroke / 2f),
+                    size = Size(size.width - stroke, size.height - stroke),
+                    cornerRadius = CornerRadius(r, r),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(stroke)
+                )
+            }
             .innerShadow(shape, Shadow(radius = 0.dp, color = AcTokens.ChassisHi, offset = DpOffset(0.dp, 1.dp)))
             .innerShadow(shape, Shadow(radius = 0.dp, color = AcTokens.ChassisLo, offset = DpOffset(0.dp, (-1).dp)))
             .padding(contentPadding),

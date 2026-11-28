@@ -59,8 +59,10 @@ private val LaneLabelWidth = 50.dp
 private val VoiceLaneHeight = 34.dp
 private val BrollLaneHeight = 30.dp
 private val GfxRowHeight = 18.dp
-private val LaneCaption = AcType.Caption.copy(color = AcTokens.OpGrey, fontSize = 8.5.sp)
-private val BlockText = AcType.Label.copy(fontSize = 9.5.sp)
+private val LaneCaption
+    get() = AcType.Caption.copy(color = AcTokens.OpGrey, fontSize = 8.5.sp)
+private val BlockText
+    get() = AcType.Label.copy(fontSize = 9.5.sp)
 
 /** A clause join on the edited timeline where the renderer applies that clause's transition. */
 internal data class CutJoin(val clauseIndex: Int, val timelineMs: Long, val transition: ClipTransitionType)
@@ -141,7 +143,13 @@ internal fun CutTimelinePanel(
                             Text("TIMELINE APPEARS ONCE THE SCRIPT IS VOICED", style = LaneCaption, maxLines = 2)
                         }
                     } else {
-                        Box(Modifier.fillMaxWidth().height(VoiceLaneHeight).testTag("cs_lane_voice")) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(VoiceLaneHeight)
+                                .hairlineBottom(AcTokens.MediaKey.copy(alpha = 0.55f))
+                                .testTag("cs_lane_voice")
+                        ) {
                             var offset = 0L
                             clips.forEach { clip ->
                                 val start = offset
@@ -168,7 +176,13 @@ internal fun CutTimelinePanel(
                                 )
                             }
                         }
-                        Box(Modifier.fillMaxWidth().height(BrollLaneHeight).testTag("cs_lane_broll")) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(BrollLaneHeight)
+                                .hairlineBottom(AcTokens.MediaKey.copy(alpha = 0.55f))
+                                .testTag("cs_lane_broll")
+                        ) {
                             session.brollSegments.forEach { seg ->
                                 val startTl = CutTimeline.sourceToTimeline(clips, seg.startMs) ?: return@forEach
                                 val durTl = seg.durationMs.coerceAtMost(totalMs - startTl).coerceAtLeast(0L)
@@ -234,9 +248,31 @@ private fun LaneLabel(text: String, height: Dp) {
 
 @Composable
 private fun TimeRuler(totalMs: Long) {
-    Row(Modifier.fillMaxWidth().height(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(18.dp)
+            .hairlineBottom(AcTokens.MediaKey.copy(alpha = 0.55f))
+    ) {
         if (totalMs > 0L) {
-            (0..4).forEach { i -> Text(mmss(totalMs * i / 4), style = LaneCaption, maxLines = 1) }
+            Canvas(Modifier.fillMaxSize()) {
+                val ticks = 24
+                val baseY = size.height
+                for (i in 0..ticks) {
+                    val x = size.width * (i.toFloat() / ticks)
+                    val major = i % 6 == 0
+                    val h = if (major) 5.dp.toPx() else 2.5.dp.toPx()
+                    drawLine(
+                        color = if (major) AcTokens.OpGrey.copy(alpha = 0.7f) else AcTokens.MediaKeyHi,
+                        start = Offset(x, baseY - h),
+                        end = Offset(x, baseY),
+                        strokeWidth = 1.dp.toPx()
+                    )
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                (0..4).forEach { i -> Text(mmss(totalMs * i / 4), style = LaneCaption, maxLines = 1) }
+            }
         }
     }
 }

@@ -248,10 +248,10 @@ fun StudioProgressDisplay(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            ThinkingOrbSolving(size = 28.dp, tint = AcTokens.Ui)
+            ThinkingOrbSolving(size = 28.dp, tint = AcTokens.DisplayInk)
             Text(
                 text = label,
-                style = AcType.Label.copy(color = AcTokens.Ui),
+                style = AcType.Label.copy(color = AcTokens.DisplayInk),
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
@@ -423,7 +423,7 @@ fun StudioLevelMeter(
                         val peak = y < redZoneY
                         fun c(lit: Boolean) = when {
                             lit && peak -> AcTokens.OpRed
-                            lit -> AcTokens.Ui
+                            lit -> AcTokens.DisplayInk
                             else -> AcTokens.MediaKey
                         }
                         drawRect(c(i < litL), Offset(0f, y), Size(laneW, barH))
@@ -446,7 +446,8 @@ fun StudioTickRuler(
     enabled: Boolean,
     onStep: (deltaSteps: Int) -> Unit,
     tag: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    centerDetent: Boolean = false
 ) {
     var accumPx by remember { mutableFloatStateOf(0f) }
     val latestStep by rememberUpdatedState(onStep)
@@ -454,7 +455,7 @@ fun StudioTickRuler(
     AcDisplay(
         modifier = modifier
             .fillMaxWidth()
-            .height(62.dp)
+            .height(66.dp)
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 detectHorizontalDragGestures(
@@ -482,25 +483,60 @@ fun StudioTickRuler(
                     val x0 = padX
                     val x1 = (size.width - padX).coerceAtLeast(x0 + 1f)
                     val baseY = size.height - 6.dp.toPx()
+                    val trackY = baseY - 11.dp.toPx()
+                    // Recessed fader slot track (K.O. II / SIGMA style).
+                    drawLine(
+                        color = AcTokens.MediaKey,
+                        start = Offset(x0, trackY),
+                        end = Offset(x1, trackY),
+                        strokeWidth = 2.dp.toPx()
+                    )
                     val ticks = 40
                     for (i in 0..ticks) {
                         val x = x0 + (x1 - x0) * (i.toFloat() / ticks)
+                        val isCenter = centerDetent && i == ticks / 2
                         val major = i % 5 == 0
-                        val h = if (major) 10.dp.toPx() else 5.dp.toPx()
+                        val h = when {
+                            isCenter -> 15.dp.toPx()
+                            major -> 10.dp.toPx()
+                            else -> 5.dp.toPx()
+                        }
+                        val tickColor = when {
+                            !enabled -> AcTokens.MediaKey
+                            isCenter -> AcTokens.DisplayInk
+                            major -> AcTokens.OpGrey
+                            else -> AcTokens.MediaKeyHi
+                        }
                         drawLine(
-                            if (!enabled) AcTokens.MediaKey else if (major) AcTokens.OpGrey else AcTokens.MediaKeyHi,
+                            tickColor,
                             Offset(x, baseY - h),
                             Offset(x, baseY),
-                            1.dp.toPx()
+                            if (isCenter) 1.5.dp.toPx() else 1.dp.toPx()
                         )
                     }
                     val nx = x0 + (x1 - x0) * norm
                     val needle = if (enabled) AcTokens.OpRed else AcTokens.OpGrey
-                    drawLine(needle, Offset(nx, baseY - 20.dp.toPx()), Offset(nx, baseY + 1.dp.toPx()), 1.5.dp.toPx())
+                    // Machined fader thumb cap riding on the slot with a red center notch.
+                    val capW = 10.dp.toPx()
+                    val capH = 18.dp.toPx()
+                    val capTop = trackY - capH / 2f
+                    val capLeft = (nx - capW / 2f).coerceIn(x0 - capW / 2f, x1 - capW / 2f)
+                    drawRoundRect(
+                        color = if (enabled) AcTokens.MediaKeyHi else AcTokens.MediaKey,
+                        topLeft = Offset(capLeft, capTop),
+                        size = Size(capW, capH),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(3.dp.toPx(), 3.dp.toPx())
+                    )
+                    drawLine(
+                        color = needle,
+                        start = Offset(nx, capTop + 2.dp.toPx()),
+                        end = Offset(nx, capTop + capH - 2.dp.toPx()),
+                        strokeWidth = 1.8.dp.toPx()
+                    )
                     val tri = Path().apply {
-                        moveTo(nx, baseY - 18.dp.toPx())
-                        lineTo(nx - 3.5.dp.toPx(), baseY - 23.dp.toPx())
-                        lineTo(nx + 3.5.dp.toPx(), baseY - 23.dp.toPx())
+                        moveTo(nx, capTop - 1.dp.toPx())
+                        lineTo(nx - 3.dp.toPx(), capTop - 5.dp.toPx())
+                        lineTo(nx + 3.dp.toPx(), capTop - 5.dp.toPx())
                         close()
                     }
                     drawPath(tri, needle)
@@ -532,7 +568,7 @@ fun StudioTickRuler(
             Text(label.uppercase(), style = AcType.Caption.copy(color = AcTokens.OpGrey), maxLines = 1)
             Text(
                 valueText,
-                style = AcType.numeral(15.sp).copy(color = if (enabled) AcTokens.Ui else AcTokens.OpGrey),
+                style = AcType.numeral(15.sp).copy(color = if (enabled) AcTokens.DisplayInk else AcTokens.OpGrey),
                 maxLines = 1,
                 modifier = Modifier.testTag("${tag}_value")
             )
