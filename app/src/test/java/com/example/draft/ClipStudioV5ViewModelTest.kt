@@ -800,6 +800,62 @@ class ClipStudioV5ViewModelTest {
     }
 
     @Test
+    fun brollSegmentSheet_editsLinkedSentenceOrSegment_andFramingPinsOthers() = runTest {
+        val srv = newHttpServer()
+        srv.createContext("/health") { ex -> respondJson(ex, 200, """{"status":"ok"}""") }
+        srv.createContext("/v1/renders") { ex -> respondJson(ex, 200, """{"renders":[]}""") }
+        srv.start()
+        server = srv
+        val studioVm = buildStudioVm("http://127.0.0.1:${srv.address.port}")
+        waitFor { studioVm.uiState.value.projects.isNotEmpty() }
+
+        studioVm.openStoryInCorePipeline(
+            plainText = "First hook sentence. Second detail sentence. Third shift sentence.",
+            headline = "Segments",
+            shotPlan = listOf(
+                listOf(ShotSpec(id = "s0", type = ShotType.FACE, prompt = "Direct camera")),
+                listOf(ShotSpec(id = "s1", type = ShotType.BROLL, prompt = "Server racks")),
+                listOf(ShotSpec(id = "s2", type = ShotType.BROLL, prompt = "City at night"))
+            )
+        )
+        waitFor {
+            val cur = studioVm.uiState.value.corePipelineSession
+            cur.clauses.size == 3 && cur.brollSegments.any { it.originClauseId == cur.clauses[1].id }
+        }
+        val start = studioVm.uiState.value.corePipelineSession
+        val linked = start.brollSegments.first { it.originClauseId == start.clauses[1].id }
+
+        // A sentence-linked block edits its sentence; the segment mirrors it.
+        studioVm.updateBrollSegmentPrompt(linked.id, "Empty meeting room")
+        var s = studioVm.uiState.value.corePipelineSession
+        assertEquals("Empty meeting room", s.clauses[1].bRollPrompt)
+        assertEquals("Empty meeting room", s.brollSegments.first { it.id == linked.id }.prompt)
+
+        // Framing: the chosen block changes, the render default follows, other blocks keep the old default.
+        val oldDefault = s.renderOptions.brollFraming
+        studioVm.setBrollSegmentFraming(linked.id, "full")
+        s = studioVm.uiState.value.corePipelineSession
+        assertEquals("full", s.clauses[1].brollFramingOverride)
+        assertEquals("full", s.brollSegments.first { it.id == linked.id }.framingOverride)
+        assertEquals("full", s.renderOptions.brollFraming)
+        assertEquals(oldDefault, s.clauses[2].brollFramingOverride)
+
+        // A free block (not linked to a sentence) is edited directly.
+        val free = s.copy(
+            brollSegments = s.brollSegments + com.example.data.BrollSegment(id = "seg_free", startMs = 0L, durationMs = 500L)
+        )
+        localRepo.saveCorePipelineSession(free)
+        waitFor { studioVm.uiState.value.corePipelineSession.brollSegments.any { it.id == "seg_free" } }
+        studioVm.updateBrollSegmentPrompt("seg_free", "Rain on a window")
+        studioVm.setBrollSegmentFraming("seg_free", "split")
+        val seg = studioVm.uiState.value.corePipelineSession.brollSegments.first { it.id == "seg_free" }
+        assertEquals("Rain on a window", seg.prompt)
+        assertEquals("split", seg.framingOverride)
+        assertNull(seg.originClauseId)
+        assertTrue(studioVm.uiState.value.coreUndoDepth > 0)
+    }
+
+    @Test
     fun openStoryInCorePipeline_sanitizesCardPromptChrome_truncatesAtWordBoundary_andCreatesDistinctCardPerStory() = runTest {
         val studioVm = buildStudioVm("http://127.0.0.1:9")
         waitFor { studioVm.uiState.value.projects.isNotEmpty() }

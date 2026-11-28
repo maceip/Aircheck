@@ -108,6 +108,9 @@ data class StudioUiState(
     val isDetectingSilence: Boolean = false,
     val generatingBrollClauseIndices: Set<Int> = emptySet(),
     val uploadingBrollClauseIndices: Set<Int> = emptySet(),
+    /** Timeline B-roll segments (not linked to a sentence) with a still generating / media uploading. */
+    val generatingBrollSegmentIds: Set<String> = emptySet(),
+    val uploadingBrollSegmentIds: Set<String> = emptySet(),
     val coreUndoDepth: Int = 0,
     val lastUndoLabel: String? = null,
     val errorMessage: String? = null,
@@ -1630,45 +1633,8 @@ class StudioViewModel internal constructor(
                 )
             }
             try {
-                val resolver = getApplication<Application>().contentResolver
-                val mime = resolver.getType(uri).orEmpty().lowercase()
-                val isVideo = mime.startsWith("video/")
-                val (bytes, ext) = if (isVideo) {
-                    val raw = resolver.openInputStream(uri)?.use { it.readBytes() }
-                        ?: throw IllegalStateException("Could not read selected video.")
-                    if (raw.isEmpty()) throw IllegalStateException("Selected video is empty.")
-                    if (raw.size > 38 * 1024 * 1024) {
-                        throw IllegalStateException("B-roll video must be under 38 MB.")
-                    }
-                    raw to (if (mime.contains("quicktime")) "mov" else "mp4")
-                } else {
-                    val source = ImageDecoder.createSource(resolver, uri)
-                    val decoded = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                        val maxDim = maxOf(info.size.width, info.size.height)
-                        if (maxDim > 1600) {
-                            val ratio = 1600f / maxDim.toFloat()
-                            decoder.setTargetSize(
-                                (info.size.width * ratio).toInt().coerceAtLeast(1),
-                                (info.size.height * ratio).toInt().coerceAtLeast(1)
-                            )
-                        }
-                    }
-                    val jpg = ByteArrayOutputStream().use { baos ->
-                        decoded.compress(Bitmap.CompressFormat.JPEG, 90, baos)
-                        decoded.recycle()
-                        baos.toByteArray()
-                    }
-                    if (jpg.isEmpty()) throw IllegalStateException("Selected image could not be encoded.")
-                    jpg to "jpg"
-                }
-                val stored = casStore.putBytes(bytes, ext)
-                val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
-                val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
-                val uploaded = runCatching {
-                    val health = macRigGateway.resolveAndCheckHealth(rigUrl)
-                    macRigGateway.uploadBrollMedia(health.resolvedUrl, bytes, ext)
-                }.getOrNull()
+                val (bytes, ext, isVideo) = readPickedBrollMedia(uri)
+                val (stored, uploaded) = storeAndUploadBrollMedia(bytes, ext)
 
                 val latest = _uiState.value.corePipelineSession
                 if (index in latest.clauses.indices) {
@@ -1703,6 +1669,190 @@ class StudioViewModel internal constructor(
                 _uiState.update {
                     it.copy(
                         uploadingBrollClauseIndices = it.uploadingBrollClauseIndices - index,
+                        errorMessage = "Could not attach B-roll media: ${e.localizedMessage ?: "unsupported file"}."
+                    )
+                }
+            }
+        }
+    }
+
+    /** Reads a picked photo (re-encoded JPEG, max 1600 px) or video (< 38 MB) for B-roll. */
+    private fun readPickedBrollMedia(uri: Uri): Triple<ByteArray, String, Boolean> {
+        val resolver = getApplication<Application>().contentResolver
+        val mime = resolver.getType(uri).orEmpty().lowercase()
+        val isVideo = mime.startsWith("video/")
+        if (isVideo) {
+            val raw = resolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: throw IllegalStateException("Could not read selected video.")
+            if (raw.isEmpty()) throw IllegalStateException("Selected video is empty.")
+            if (raw.size > 38 * 1024 * 1024) {
+                throw IllegalStateException("B-roll video must be under 38 MB.")
+            }
+            return Triple(raw, if (mime.contains("quicktime")) "mov" else "mp4", true)
+        }
+        val source = ImageDecoder.createSource(resolver, uri)
+        val decoded = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            val maxDim = maxOf(info.size.width, info.size.height)
+            if (maxDim > 1600) {
+                val ratio = 1600f / maxDim.toFloat()
+                decoder.setTargetSize(
+                    (info.size.width * ratio).toInt().coerceAtLeast(1),
+                    (info.size.height * ratio).toInt().coerceAtLeast(1)
+                )
+            }
+        }
+        val jpg = ByteArrayOutputStream().use { baos ->
+            decoded.compress(Bitmap.CompressFormat.JPEG, 90, baos)
+            decoded.recycle()
+            baos.toByteArray()
+        }
+        if (jpg.isEmpty()) throw IllegalStateException("Selected image could not be encoded.")
+        return Triple(jpg, "jpg", false)
+    }
+
+    /** Stores picked B-roll bytes in CAS and uploads them to the rig (null media when the rig is unreachable). */
+    private suspend fun storeAndUploadBrollMedia(bytes: ByteArray, ext: String): Pair<com.example.data.local.CasStoredAsset, com.example.data.gateway.BrollMediaResult?> {
+        val stored = casStore.putBytes(bytes, ext)
+        val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+        val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+        val uploaded = runCatching {
+            val health = macRigGateway.resolveAndCheckHealth(rigUrl)
+            macRigGateway.uploadBrollMedia(health.resolvedUrl, bytes, ext)
+        }.getOrNull()
+        return stored to uploaded
+    }
+
+    // ----------------------------------------------------------------- B-roll segment sources
+    // The Cut B-roll sheet edits a timeline segment. A segment linked to a sentence mirrors that
+    // sentence's B-roll fields (CutTimeline.normalize), so those edits go through the clause actions.
+
+    private fun linkedClauseIndex(segmentId: String): Int? {
+        val session = _uiState.value.corePipelineSession
+        val origin = session.brollSegments.firstOrNull { it.id == segmentId }?.originClauseId ?: return null
+        return session.clauses.indexOfFirst { it.id == origin }.takeIf { it >= 0 }
+    }
+
+    private fun editSegment(segmentId: String, label: String, change: (com.example.data.BrollSegment) -> com.example.data.BrollSegment) {
+        val current = _uiState.value.corePipelineSession
+        if (current.brollSegments.none { it.id == segmentId }) return
+        val next = current.brollSegments.map { if (it.id == segmentId) change(it) else it }
+        if (next == current.brollSegments) return
+        commitCoreEdit(current.copy(brollSegments = next), label = label)
+    }
+
+    /** Sets the visual prompt of B-roll segment [segmentId] (clears a generated still made from an older prompt). */
+    fun updateBrollSegmentPrompt(segmentId: String, prompt: String) {
+        linkedClauseIndex(segmentId)?.let { return updateClauseBrollPrompt(it, prompt) }
+        val clean = prompt.trim().take(240)
+        editSegment(segmentId, "B-roll prompt") { seg ->
+            if (seg.prompt == clean && seg.caption == clean) {
+                seg
+            } else {
+                seg.copy(prompt = clean, caption = clean, mediaId = if (seg.customExt.isBlank()) null else seg.mediaId)
+            }
+        }
+    }
+
+    /**
+     * Sets the framing of B-roll segment [segmentId] (`pip`, `full`, `split`). The choice also becomes
+     * the render default, so the next block you add copies it; blocks that were following the old
+     * default are pinned to it first so they don't change.
+     */
+    fun setBrollSegmentFraming(segmentId: String, framing: String) {
+        val valid = framing.trim().lowercase().takeIf {
+            it in setOf(CoreRenderOptions.BROLL_FRAMING_PIP, CoreRenderOptions.BROLL_FRAMING_FULL, CoreRenderOptions.BROLL_FRAMING_SPLIT)
+        } ?: return
+        val current = _uiState.value.corePipelineSession
+        val target = current.brollSegments.firstOrNull { it.id == segmentId } ?: return
+        val oldDefault = current.renderOptions.brollFraming
+        val clauses = current.clauses.map { c ->
+            when {
+                c.id == target.originClauseId -> c.copy(brollFramingOverride = valid)
+                c.segmentMode == BrollSegmentMode.BROLL_CUTAWAY && c.brollFramingOverride.isBlank() -> c.copy(brollFramingOverride = oldDefault)
+                else -> c
+            }
+        }
+        val segments = current.brollSegments.map { seg ->
+            when {
+                seg.id == segmentId -> seg.copy(framingOverride = valid)
+                seg.originClauseId == null && seg.framingOverride.isBlank() -> seg.copy(framingOverride = oldDefault)
+                else -> seg
+            }
+        }
+        commitCoreEdit(
+            current.copy(
+                clauses = clauses,
+                brollSegments = segments,
+                renderOptions = current.renderOptions.copy(brollFraming = valid)
+            ),
+            label = "B-roll framing"
+        )
+    }
+
+    /** Generates a B-roll still on the Mac rig for segment [segmentId] from [prompt] (or its saved prompt). */
+    fun generateBrollForSegment(segmentId: String, prompt: String? = null) {
+        linkedClauseIndex(segmentId)?.let { return generateBrollForClause(it, prompt) }
+        val seg = _uiState.value.corePipelineSession.brollSegments.firstOrNull { it.id == segmentId } ?: return
+        if (segmentId in _uiState.value.generatingBrollSegmentIds) return
+        val cleanPrompt = prompt?.trim()?.takeIf { it.isNotEmpty() } ?: seg.prompt.trim().ifBlank { seg.caption.trim() }
+        if (cleanPrompt.isEmpty()) {
+            _uiState.update { it.copy(errorMessage = "Describe the B-roll visual before generating.") }
+            return
+        }
+        val aspect = _uiState.value.corePipelineSession.renderOptions.aspect
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(generatingBrollSegmentIds = it.generatingBrollSegmentIds + segmentId, errorMessage = null) }
+            val persisted = runCatching { profileStore.current() }.getOrDefault(_uiState.value.settings)
+            val rigUrl = persisted.tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
+            val result = runCatching {
+                val health = macRigGateway.resolveAndCheckHealth(rigUrl)
+                macRigGateway.generateBrollPreview(health.resolvedUrl, cleanPrompt, aspect)
+            }
+            result.onSuccess { media ->
+                editSegment(segmentId, "Generate B-roll") {
+                    it.copy(prompt = cleanPrompt, caption = cleanPrompt, mediaId = media.mediaId, previewUrl = media.url, sha = null, customExt = "")
+                }
+                _uiState.update {
+                    it.copy(generatingBrollSegmentIds = it.generatingBrollSegmentIds - segmentId, toastMessage = "B-roll generated")
+                }
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                _uiState.update {
+                    it.copy(
+                        generatingBrollSegmentIds = it.generatingBrollSegmentIds - segmentId,
+                        errorMessage = "B-roll generation failed: ${err.localizedMessage ?: "rig unreachable"}."
+                    )
+                }
+            }
+        }
+    }
+
+    /** Attaches a photo or video picked from phone storage to B-roll segment [segmentId]. */
+    fun importCustomBrollMediaForSegment(segmentId: String, uri: Uri) {
+        linkedClauseIndex(segmentId)?.let { return importCustomBrollMediaForClause(it, uri) }
+        if (_uiState.value.corePipelineSession.brollSegments.none { it.id == segmentId }) return
+        if (segmentId in _uiState.value.uploadingBrollSegmentIds) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(uploadingBrollSegmentIds = it.uploadingBrollSegmentIds + segmentId, errorMessage = null) }
+            try {
+                val (bytes, ext, isVideo) = readPickedBrollMedia(uri)
+                val (stored, uploaded) = storeAndUploadBrollMedia(bytes, ext)
+                editSegment(segmentId, "Attach custom B-roll") {
+                    it.copy(sha = stored.sha256, customExt = ext, mediaId = uploaded?.mediaId, previewUrl = stored.file.absolutePath)
+                }
+                _uiState.update {
+                    it.copy(
+                        uploadingBrollSegmentIds = it.uploadingBrollSegmentIds - segmentId,
+                        toastMessage = if (isVideo) "Video attached to B-roll" else "Photo attached to B-roll"
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        uploadingBrollSegmentIds = it.uploadingBrollSegmentIds - segmentId,
                         errorMessage = "Could not attach B-roll media: ${e.localizedMessage ?: "unsupported file"}."
                     )
                 }
