@@ -85,40 +85,6 @@ data class PipelineLedState(
     val cut: LedState = LedState.IDLE,
 )
 
-private fun pipelineColor(state: LedState) = when (state) {
-    LedState.READY -> AcTokens.OpGreen
-    LedState.WORKING -> AcTokens.OpOrange
-    LedState.ERROR -> AcTokens.OpRed
-    LedState.IDLE -> AcTokens.MediaKeyHi
-}
-
-/** RIG · VOX · HEAD · CUT pipeline status, drawn as a tiny display (op colors live in displays only). */
-@Composable
-fun PipelineStatusDisplay(state: PipelineLedState, modifier: Modifier = Modifier) {
-    AcDisplay(modifier = modifier.testTag("cs_pipeline_leds"), radius = 8.dp) {
-        Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            listOf("RIG" to state.rig, "VOX" to state.voice, "HEAD" to state.head, "CUT" to state.cut).forEach { (label, s) ->
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    Box(
-                        Modifier
-                            .size(5.dp)
-                            .clip(CircleShape)
-                            .background(pipelineColor(s))
-                    )
-                    Text(label, style = AcType.Caption.copy(letterSpacing = 0.sp, color = AcTokens.OpGrey), maxLines = 1, softWrap = false)
-                }
-            }
-        }
-    }
-}
-
 /**
  * Top bar for the 2-stage flow: Doto step header ("01 SPARK" with the active word in red, the other
  * step number muted and tappable) plus trailing app keys.
@@ -128,7 +94,6 @@ fun StudioTopBar(
     activeStage: Int,
     onNavigate: (Int) -> Unit,
     modifier: Modifier = Modifier,
-    leds: PipelineLedState? = null,
     trailing: @Composable RowScope.() -> Unit = {}
 ) {
     val normalizedActive = if (activeStage >= 2) 2 else 1
@@ -172,9 +137,6 @@ fun StudioTopBar(
                     )
                 }
             }
-        }
-        if (leds != null) {
-            PipelineStatusDisplay(state = leds, modifier = Modifier.padding(start = 4.dp))
         }
         Row(
             modifier = Modifier.weight(1f),

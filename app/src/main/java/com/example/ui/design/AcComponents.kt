@@ -237,7 +237,10 @@ fun AcKey(
     }
 }
 
-/** Circular icon key. */
+/**
+ * Circular icon key. [badgeColor] draws a small status dot at the top-right of the key (e.g. the
+ * rig connection on the Cut settings key: ink = online, red = offline); null = no dot.
+ */
 @Composable
 fun AcKey(
     icon: ImageVector,
@@ -246,17 +249,75 @@ fun AcKey(
     modifier: Modifier = Modifier,
     selected: Boolean = false,
     enabled: Boolean = true,
-    size: AcKeySize = AcKeySize.Regular
+    size: AcKeySize = AcKeySize.Regular,
+    badgeColor: Color? = null
 ) {
-    AcKey(
-        onClick = onClick,
-        modifier = modifier,
-        selected = selected,
-        enabled = enabled,
-        size = size,
-        circle = true
-    ) { fg ->
-        Icon(icon, contentDescription = contentDescription, tint = fg, modifier = Modifier.size(size.glyph + 2.dp))
+    Box(contentAlignment = Alignment.Center) {
+        AcKey(
+            onClick = onClick,
+            modifier = modifier,
+            selected = selected,
+            enabled = enabled,
+            size = size,
+            circle = true
+        ) { fg ->
+            Icon(icon, contentDescription = contentDescription, tint = fg, modifier = Modifier.size(size.glyph + 2.dp))
+        }
+        if (badgeColor != null) {
+            val ring = if (selected) AcTokens.Red else AcTokens.Ui
+            Box(
+                Modifier
+                    .align(Alignment.Center)
+                    .padding(start = size.iconKey * 0.62f, bottom = size.iconKey * 0.62f)
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(ring)
+                    .padding(2.dp)
+                    .clip(CircleShape)
+                    .background(badgeColor)
+            )
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 1b. AcVideoOverlayKey — controls overlaid on video are FLAT
+// -----------------------------------------------------------------------------
+
+/**
+ * A control drawn over video (e.g. play on the Cut player). Flat: translucent dark disc, white
+ * glyph, no elevation, raise or skirt. The one exception to raised keys (approved by Ryan
+ * 2026-11-28). Use only on top of video; everywhere else use [AcKey] / [AcMediaKey].
+ */
+@Composable
+fun AcVideoOverlayKey(
+    icon: ImageVector,
+    contentDescription: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    size: Dp = 52.dp
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed = rememberAcPressed(interaction, enabled)
+    Box(
+        modifier = modifier
+            .minimumInteractiveComponentSize()
+            .size(size)
+            .graphicsLayer { if (pressed) { scaleX = 0.96f; scaleY = 0.96f } }
+            .clip(CircleShape)
+            .background(AcTokens.Display.copy(alpha = if (pressed) 0.62f else 0.42f))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick
+            )
+            .alpha(if (enabled) 1f else 0.45f),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, contentDescription = contentDescription, tint = AcTokens.Ui, modifier = Modifier.size(size * 0.5f))
     }
 }
 

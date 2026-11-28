@@ -112,6 +112,7 @@ import com.example.ui.design.AcMediaKey
 import com.example.ui.design.AcMediaWell
 import com.example.ui.design.AcTokens
 import com.example.ui.design.AcType
+import com.example.ui.design.AcVideoOverlayKey
 
 /**
  * 03 CUT:
@@ -219,10 +220,14 @@ fun CutScreen(
             .testTag("cs_cut_root")
     ) {
         Column(Modifier.fillMaxSize()) {
+            // Real signature check including overlay content, B-roll media, and transitions
+            val signature = session.cutSignature(defaultLook, state.savedOverlays)
+            val cutCurrent = session.hasFinalVideo && session.lastCutSignature == signature
+            val leds = com.example.ui.pipelineLedStateFor(state)
+
             StudioTopBar(
                 activeStage = 2,
-                onNavigate = onNavigate,
-                leds = com.example.ui.pipelineLedStateFor(state)
+                onNavigate = onNavigate
             ) {
                 if (unsynced.isNotEmpty()) {
                     val badgeText = if (unsynced.size == 1) "1 LINE NEEDS RE-VOICE" else "${unsynced.size} LINES NEED RE-VOICE"
@@ -252,33 +257,43 @@ fun CutScreen(
                     size = AcKeySize.Small,
                     modifier = Modifier.testTag("cs_cut_undo")
                 )
+                // Rig connection lives as a dot on the settings key: ink = online, red = offline.
+                val rigDot = when (state.rigHealth.status) {
+                    com.example.ui.RigConnectionStatus.ONLINE -> AcTokens.Ink
+                    com.example.ui.RigConnectionStatus.ERROR -> AcTokens.Red
+                    else -> null
+                }
+                val rigWord = when (state.rigHealth.status) {
+                    com.example.ui.RigConnectionStatus.ONLINE -> "rig online"
+                    com.example.ui.RigConnectionStatus.ERROR -> "rig offline"
+                    com.example.ui.RigConnectionStatus.CHECKING -> "checking rig"
+                    com.example.ui.RigConnectionStatus.IDLE -> "rig not tested"
+                }
                 AcKey(
                     icon = Icons.Sharp.Settings,
-                    contentDescription = "Settings",
+                    contentDescription = "Settings, $rigWord",
                     onClick = onOpenSettings,
                     size = AcKeySize.Small,
+                    badgeColor = rigDot,
                     modifier = Modifier.testTag("cs_cut_settings")
                 )
             }
+
+            CutPipelineStatusLine(
+                hasTtsAudio = session.hasTtsAudio,
+                hasTalkingHead = session.hasTalkingHead,
+                hasFinalVideo = session.hasFinalVideo,
+                cutCurrent = cutCurrent,
+                unsyncedCount = unsynced.size,
+                exported = state.exportState == ExportState.EXPORTED && cutCurrent,
+                leds = leds
+            )
 
             StudioStatusLine(
                 error = state.errorMessage,
                 notice = state.statusNotice,
                 onDismissError = vm::dismissError,
                 onDismissNotice = vm::dismissNotice
-            )
-
-            // Real signature check including overlay content, B-roll media, and transitions
-            val signature = session.cutSignature(defaultLook, state.savedOverlays)
-            val cutCurrent = session.hasFinalVideo && session.lastCutSignature == signature
-
-            CutPipelineProgressStrip(
-                hasTtsAudio = session.hasTtsAudio,
-                hasTalkingHead = session.hasTalkingHead,
-                hasFinalVideo = session.hasFinalVideo,
-                cutCurrent = cutCurrent,
-                unsyncedCount = unsynced.size,
-                exported = state.exportState == ExportState.EXPORTED && cutCurrent
             )
 
             val dirtyReason: String? = when {
@@ -572,56 +587,44 @@ private fun resolveCutPrimarySpec(
     }
 }
 
-/** 1.Voice · 2.Head · 3.Cut · 4.Export progress, drawn on a display (op colors). */
+/**
+ * Option C (approved 2026-11-28): one Caption line under the step header instead of the old black
+ * RIG/VOX/HEAD/CUT lights and 1.Voice-4.Export strip. Same state: each step is done (ink ✓),
+ * working (red, while that stage runs), needs redo after an edit (red), or not yet (muted).
+ */
 @Composable
-private fun CutPipelineProgressStrip(
+private fun CutPipelineStatusLine(
     hasTtsAudio: Boolean,
     hasTalkingHead: Boolean,
     hasFinalVideo: Boolean,
     cutCurrent: Boolean,
     unsyncedCount: Int,
-    exported: Boolean
+    exported: Boolean,
+    leds: PipelineLedState
 ) {
+    data class Step(val label: String, val done: Boolean, val stale: Boolean, val working: Boolean)
     val steps = listOf(
-        Triple("1.Voice", hasTtsAudio && unsyncedCount == 0, unsyncedCount > 0),
-        Triple("2.Head", hasTalkingHead && unsyncedCount == 0, hasTalkingHead && unsyncedCount > 0),
-        Triple("3.Cut", cutCurrent, hasFinalVideo && !cutCurrent),
-        Triple("4.Export", exported, false)
+        Step("voice", hasTtsAudio && unsyncedCount == 0, unsyncedCount > 0, leds.voice == LedState.WORKING),
+        Step("head", hasTalkingHead && unsyncedCount == 0, hasTalkingHead && unsyncedCount > 0, leds.head == LedState.WORKING),
+        Step("cut", cutCurrent, hasFinalVideo && !cutCurrent, leds.cut == LedState.WORKING),
+        Step("export", exported, false, false)
     )
-    AcDisplay(
-        radius = 10.dp,
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 14.dp, end = 14.dp, bottom = 6.dp)
-            .testTag("cs_cut_pipeline_strip")
+            .padding(start = 16.dp, end = 16.dp, bottom = 6.dp)
+            .testTag("cs_cut_pipeline_strip"),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 7.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            steps.forEach { (label, done, stale) ->
-                val tint = when {
-                    stale -> AcTokens.OpOrange
-                    done -> AcTokens.OpGreen
-                    else -> AcTokens.OpGrey
-                }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Icon(
-                        imageVector = when {
-                            stale -> Icons.Sharp.SyncProblem
-                            done -> Icons.Sharp.CheckCircle
-                            else -> Icons.Sharp.ChevronRight
-                        },
-                        contentDescription = null,
-                        tint = tint,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Text(label, style = AcType.Caption.copy(color = tint, letterSpacing = 0.sp), maxLines = 1, softWrap = false)
-                }
+        steps.forEach { step ->
+            val (text, color) = when {
+                step.working -> "${step.label}…" to AcTokens.Red
+                step.stale -> "${step.label} · redo" to AcTokens.Red
+                step.done -> "✓ ${step.label}" to AcTokens.Ink
+                else -> "· ${step.label}" to AcTokens.Ink2
             }
+            Text(text.uppercase(), style = AcType.Caption.copy(color = color), maxLines = 1, softWrap = false)
         }
     }
 }
@@ -651,7 +654,7 @@ private fun VideoMonitorPanel(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp)
-            .height(206.dp)
+            .height(256.dp)
             .clickable(enabled = sourceUri != null, role = Role.Button, onClick = onTogglePlay)
             .testTag("cs_cut_monitor")
     ) {
@@ -785,17 +788,13 @@ private fun VideoMonitorPanel(
         )
 
         if (!isPlaying || !sourceHasVideo) {
-            AcMediaWell(padding = 5.dp) {
-                AcMediaKey(
-                    icon = if (isPlaying) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
-                    contentDescription = if (isPlaying) "Pause" else "Play",
-                    onClick = onTogglePlay,
-                    active = isPlaying,
-                    enabled = sourceUri != null,
-                    size = 52.dp,
-                    modifier = Modifier.testTag("cs_cut_play")
-                )
-            }
+            AcVideoOverlayKey(
+                icon = if (isPlaying) Icons.Sharp.Pause else Icons.Sharp.PlayArrow,
+                contentDescription = if (isPlaying) "Pause" else "Play",
+                onClick = onTogglePlay,
+                enabled = sourceUri != null,
+                modifier = Modifier.testTag("cs_cut_play")
+            )
         }
 
         Box(
