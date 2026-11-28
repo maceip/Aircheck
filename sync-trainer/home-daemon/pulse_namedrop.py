@@ -10,6 +10,7 @@ The paid X API is not used.
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as _dt
 import http.client
 import ipaddress
@@ -33,6 +34,8 @@ HTTP_TIMEOUT_SEC = 8.0
 CACHE_TTL_SEC = 15 * 60
 MAX_TEXT_CHARS = 2000
 KEY_AUTHOR_LOOKUPS = 5
+FIRST_LOOK_WORKERS = 6
+FIRST_LOOK_DEADLINE_SEC = 60.0
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 HN_SEARCH_URL = "https://hn.algolia.com/api/v1/search_by_date"
@@ -172,7 +175,7 @@ def _source_result(name: str, *, ok: bool, count_24h: float | None = None, avg_7
 
 def heat_gdelt(query: str, fetch: Fetcher, now: _dt.datetime) -> dict[str, Any]:
     url = GDELT_DOC_URL + "?" + urllib.parse.urlencode(
-        {"query": query, "mode": "timelinevolraw", "timespan": "7d", "format": "json"}
+        {"query": query, "mode": "timelinevolraw", "timespan": "8d", "format": "json"}
     )
     try:
         data = fetch(url)
@@ -181,20 +184,27 @@ def heat_gdelt(query: str, fetch: Fetcher, now: _dt.datetime) -> dict[str, Any]:
         return _source_result("news", ok=False, detail=f"GDELT {exc}")
     except (KeyError, IndexError, TypeError):
         return _source_result("news", ok=False, detail="GDELT returned no timeline")
+    if not isinstance(series, list):
+        return _source_result("news", ok=False, detail="GDELT returned no timeline")
     cutoff = now - _dt.timedelta(hours=24)
-    last, prior = 0.0, 0.0
+    start = now - _dt.timedelta(days=8)
+    last, prior, points = 0.0, 0.0, 0
     for point in series:
         try:
             ts = _dt.datetime.strptime(str(point["date"]), "%Y%m%dT%H%M%SZ").replace(tzinfo=_dt.timezone.utc)
             value = float(point["value"])
         except (KeyError, ValueError, TypeError):
             continue
+        points += 1
         if ts > cutoff:
             last += value
-        else:
+        elif ts > start:
             prior += value
-    return _source_result("news", ok=True, count_24h=last, avg_7d=round(prior / 6.0, 2),
-                          detail="GDELT articles, last 24h vs daily average of the 6 days before")
+    if not points:
+        # A reply with no readable points is an upstream error, not "no coverage".
+        return _source_result("news", ok=False, detail="GDELT returned no readable timeline points")
+    return _source_result("news", ok=True, count_24h=last, avg_7d=round(prior / 7.0, 2),
+                          detail="GDELT articles, last 24h vs daily average of the 7 days before")
 
 
 def heat_hn(query: str, fetch: Fetcher, now: _dt.datetime) -> dict[str, Any]:
@@ -209,12 +219,12 @@ def heat_hn(query: str, fetch: Fetcher, now: _dt.datetime) -> dict[str, Any]:
 
     try:
         last = count_since(86400)
-        prior = count_since(7 * 86400, until=86400)
+        prior = count_since(8 * 86400, until=86400)
     except FetchError as exc:
         return _source_result("hn", ok=False, detail=f"Hacker News {exc}")
     except (KeyError, TypeError, ValueError):
         return _source_result("hn", ok=False, detail="Hacker News returned no count")
-    return _source_result("hn", ok=True, count_24h=last, avg_7d=round(prior / 6.0, 2),
+    return _source_result("hn", ok=True, count_24h=last, avg_7d=round(prior / 7.0, 2),
                           detail="Hacker News stories + comments")
 
 
@@ -250,9 +260,12 @@ def heat_bsky(query: str, fetch: Fetcher, now: _dt.datetime, session: "BskySessi
         token = session.token(fetch)
         url = session.pds(fetch) + "/app.bsky.feed.searchPosts?" + urllib.parse.urlencode(
             {"q": query, "since": _iso(now - _dt.timedelta(hours=24)), "limit": 100, "sort": "latest"})
-        posts = fetch(url, headers={"Authorization": f"Bearer {token}"}).get("posts", [])
+        data = fetch(url, headers={"Authorization": f"Bearer {token}"})
     except FetchError as exc:
         return _source_result("bsky", ok=False, detail=f"Bluesky {exc}")
+    posts = data.get("posts") if isinstance(data, dict) else None
+    if not isinstance(posts, list):
+        return _source_result("bsky", ok=False, detail="Bluesky returned no post list")
     count = len(posts)
     # One page only: a full page means "at least 100", reported as capped rather than invented.
     return _source_result("bsky", ok=True, count_24h=float(count), avg_7d=None, capped=count >= 100,
@@ -295,7 +308,7 @@ class BskySession:
         with self._lock:
             if self._pds:
                 return self._pds
-        base = BSKY_PDS_URL
+        found: str | None = None
         try:
             did = str(fetch(BSKY_PUBLIC_URL + "/com.atproto.identity.resolveHandle?" +
                             urllib.parse.urlencode({"handle": self.handle.lstrip("@")}))["did"])
@@ -308,13 +321,15 @@ class BskySession:
             for svc in (doc.get("service") or []) if isinstance(doc, dict) else []:
                 endpoint = str(svc.get("serviceEndpoint") or "") if isinstance(svc, dict) else ""
                 if str(svc.get("id") or "").endswith("#atproto_pds") and endpoint.startswith("https://"):
-                    base = endpoint.rstrip("/") + "/xrpc"
+                    found = endpoint.rstrip("/") + "/xrpc"
                     break
-        except (FetchError, KeyError, TypeError):
+        except (FetchError, KeyError, TypeError, AttributeError):
             pass
+        if found is None:
+            return BSKY_PDS_URL  # not cached, so the next call tries discovery again
         with self._lock:
-            self._pds = base
-        return base
+            self._pds = found
+        return found
 
     def token(self, fetch: Fetcher) -> str:
         pds = self.pds(fetch)
@@ -458,10 +473,14 @@ def fetch_public_page(url: str, *, max_bytes: int = 512 * 1024,
         conn.close()
 
 
-def _link_mentions(url: str, about: str, fetch: Callable[[str], str]) -> bool:
-    """True only if the cited page loads and names the person/org the claim is about."""
+def _link_mentions(url: str, about: str, fetch: Callable[[str], str], claim: str = "") -> bool:
+    """True only if the cited page loads, names who the claim is about, and also uses the claim's
+    own words (at least half of them, matched on their first 5 letters so "cheated" covers
+    "cheating"). A bio or homepage that only names the person doesn't count."""
     words = [w for w in re.findall(r"[^\W\d_][\w'\-]+", about) if len(w) > 2]
-    if not words:
+    claim_words = [w.lower()[:5] for w in re.findall(r"[^\W\d_][\w'\-]+", claim)
+                   if len(w) > 3 and w.lower() not in _STOPWORDS]
+    if not words or not claim_words:
         return False
     try:
         page = fetch(url)
@@ -470,7 +489,10 @@ def _link_mentions(url: str, about: str, fetch: Callable[[str], str]) -> bool:
     if not isinstance(page, str):
         return False
     lowered = page.lower()
-    return words[-1].lower() in lowered
+    if words[-1].lower() not in lowered:
+        return False
+    hits = sum(1 for w in dict.fromkeys(claim_words) if w in lowered)
+    return hits * 2 >= len(dict.fromkeys(claim_words))
 
 
 def check_claim(claim: dict[str, Any], fetch: Fetcher) -> dict[str, Any]:
@@ -580,12 +602,13 @@ class PulseService:
             if c.get("kind") not in ("allegation", "fact"):
                 continue
             supporting = [link for link in cited
-                          if _link_mentions(link["url"], str(c.get("about") or ""), self.fetch_citation)]
+                          if _link_mentions(link["url"], str(c.get("about") or ""), self.fetch_citation,
+                                        str(c.get("text") or ""))]
             if supporting:
                 claims.append({"text": str(c.get("text") or ""), "about": str(c.get("about") or ""),
                                "kind": str(c.get("kind") or ""), "query": "", "status": "cited",
                                "sources": supporting[:3],
-                               "detail": f"your link mentions {c.get('about') or 'them'}; check it backs the claim"})
+                               "detail": f"your link names {c.get('about') or 'them'} and uses the claim's words; check it backs the claim"})
             else:
                 # A link that doesn't even name the person can't stand in for a source.
                 claims.append(check_claim(c, fetch))
@@ -922,14 +945,18 @@ class NameDropService:
         if not post_url and not text:
             raise ValueError("post_url or text is required")
         message = (text + ("\n" + post_url if post_url else "")).strip()
-        results = []
-        for person in self.get_first_look()["people"]:
-            if not person.get("on"):
-                continue
+        results: list[dict[str, Any]] = []
+        people = [p for p in self.get_first_look()["people"] if p.get("on")]
+        bsky_jobs: list[tuple[int, Any]] = []
+        # Bluesky DMs go out in parallel with a deadline, so the reply reaches the phone before its
+        # 120 s read timeout; a DM not started by then is reported as not sent, never retried here.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=FIRST_LOOK_WORKERS)
+        for person in people:
             platform, address = person["platform"], person["address"]
             base = {"id": person["id"], "name": person.get("name", ""), "platform": platform, "address": address}
             if platform == "bsky":
-                results.append({**base, **self._send_bsky_dm(address, message)})
+                results.append(base)
+                bsky_jobs.append((len(results) - 1, pool.submit(self._send_bsky_dm, address, message)))
             elif platform == "x":
                 handle = address.lstrip("@")
                 # X DM links need a numeric user id we don't have (no X API), so open this person's
@@ -943,6 +970,17 @@ class NameDropService:
                                 "open_url": "mailto:" + urllib.parse.quote(address) + "?" +
                                 urllib.parse.urlencode({"subject": "New post", "body": message},
                                                        quote_via=urllib.parse.quote)})
+        if bsky_jobs:
+            concurrent.futures.wait([f for _, f in bsky_jobs], timeout=FIRST_LOOK_DEADLINE_SEC)
+        # Cancel everything not yet started in one pass, before waiting on the ones in flight.
+        cancelled = {i for i, fut in bsky_jobs if fut.cancel()}
+        for i, fut in bsky_jobs:
+            if i in cancelled:
+                outcome = {"status": "failed", "detail": "not sent: ran out of time; send again for this person"}
+            else:
+                outcome = fut.result()  # already running: bounded by its own HTTP timeouts
+            results[i] = {**results[i], **outcome}
+        pool.shutdown(wait=False)
         summary = {"at": _iso(self.clock()), "sent": sum(r["status"] == "sent" for r in results),
                    "needs_you": sum(r["status"] == "needs_you" for r in results),
                    "failed": sum(r["status"] == "failed" for r in results)}

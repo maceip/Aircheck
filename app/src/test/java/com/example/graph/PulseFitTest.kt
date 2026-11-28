@@ -81,6 +81,12 @@ class PulseFitTest {
         assertEquals(NameDropHandle("@ada_l", "in_archive", "same name in your X archive (3 replies between you)"), merged.people[0].handles["x"])
         assertEquals("@real_alan", merged.people[1].handles["x"]!!.handle)
         assertNull(merged.people[2].handles["x"])
+
+        val emojiOnly = NameDropArchiveMatcher.merge(
+            NameDropResult(people = listOf(NameDropPerson(name = "🔥🔥", handles = emptyMap()))),
+            listOf(GraphContactRecord("rando", "✨", "", 1, 0, 0L))
+        )
+        assertNull(emojiOnly.people[0].handles["x"])
     }
 
     @Test

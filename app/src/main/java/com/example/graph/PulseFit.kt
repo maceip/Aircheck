@@ -84,10 +84,11 @@ object NameDropArchiveMatcher {
      */
     fun merge(result: NameDropResult, contacts: List<GraphContactRecord>): NameDropResult {
         if (contacts.isEmpty()) return result
-        val byName = contacts.filter { it.displayName.isNotBlank() }.groupBy { norm(it.displayName) }
+        // A name with no letters (emoji, punctuation) normalizes to "" and must never match.
+        val byName = contacts.groupBy { norm(it.displayName) }.filterKeys { it.isNotEmpty() }
         val people = result.people.map { person ->
             val x = person.handles["x"]
-            if (person.name.isBlank() || (x != null && x.status != "unknown")) return@map person
+            if (norm(person.name).isEmpty() || (x != null && x.status != "unknown")) return@map person
             val match = byName[norm(person.name)]?.singleOrNull() ?: return@map person
             person.copy(
                 handles = person.handles + ("x" to NameDropHandle(

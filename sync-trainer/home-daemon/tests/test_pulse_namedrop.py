@@ -47,7 +47,7 @@ def _gdelt_timeline(url: str, _kw: Any) -> Any:
     if "artlist" in url:
         return {}
     points = []
-    for h in range(7 * 24):
+    for h in range(8 * 24):
         ts = NOW - dt.timedelta(hours=h)
         points.append({"date": ts.strftime("%Y%m%dT%H%M%SZ"), "value": 2 if h < 24 else 1})
     return {"timeline": [{"data": points}]}
@@ -201,7 +201,7 @@ def test_no_llm_and_no_network_reports_everything_unknown(tmp_path: Path) -> Non
 def test_hn_and_wiki_counts(tmp_path: Path) -> None:
     def hn(url: str, _kw: Any) -> Any:
         filt = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["numericFilters"][0]
-        return {"nbHits": 30 if "<=" in filt else 10}
+        return {"nbHits": 35 if "<=" in filt else 10}
 
     fetch = FakeFetch({
         "hn.algolia": hn,
@@ -353,7 +353,7 @@ def test_http_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cited_link_in_text_releases_boosts_without_news_lookup(tmp_path: Path) -> None:
     fetch = FakeFetch({"timelinevolraw": _gdelt_timeline})
-    pages = {"https://news.example/story-1": "<p>Reports about Jensen Huang this week</p>"}
+    pages = {"https://news.example/story-1": "<p>Reports say Jensen Huang was caught cheating this week</p>"}
     llm = FakeLlm(ANALYSIS, json.dumps({"boosts": [{"kind": "hook", "text": "L", "why": "w"}]}))
     svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW,
                           fetch_citation=lambda u: pages[u])
@@ -362,6 +362,43 @@ def test_cited_link_in_text_releases_boosts_without_news_lookup(tmp_path: Path) 
     assert out["claims"][0]["sources"][0]["url"] == "https://news.example/story-1"
     assert out["boosts_held"] is False and out["boosts"][0]["kind"] == "hook"
     assert not any("artlist" in url for url, _ in fetch.calls)
+
+
+def test_page_that_only_names_the_person_does_not_release_an_allegation(tmp_path: Path) -> None:
+    fetch = FakeFetch({"timelinevolraw": _gdelt_timeline, "artlist": {"articles": []}})
+    llm = FakeLlm(ANALYSIS, json.dumps({"boosts": [{"kind": "hook", "text": "L", "why": "w"}]}))
+    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW,
+                          fetch_citation=lambda u: "<p>Jensen Huang is the CEO of NVIDIA.</p>")
+    out = svc.score({"text": "jensen story https://bio.example/jensen"})
+    assert out["claims"][0]["status"] != "cited"
+    assert out["boosts_held"] is True
+
+
+def test_malformed_upstream_replies_are_unmeasured() -> None:
+    bad_gdelt = FakeFetch({"timelinevolraw": {"timeline": [{"data": {"oops": 1}}]}})
+    assert pn.heat_gdelt("q", bad_gdelt, NOW)["ok"] is False
+    junk = FakeFetch({"timelinevolraw": {"timeline": [{"data": [{"x": 1}]}]}})
+    assert pn.heat_gdelt("q", junk, NOW)["ok"] is False
+    session = pn.BskySession("me.bsky.social", "app-pw")
+    for reply in ({}, {"posts": None}, [1, 2]):
+        f = FakeFetch({"createSession": {"accessJwt": "jwt", "did": "did:plc:me"}, "searchPosts": reply})
+        assert pn.heat_bsky("q", f, NOW, session)["ok"] is False
+
+
+def test_pds_fallback_is_not_cached() -> None:
+    state = {"up": False}
+
+    def fetch(url: str, **kw: Any) -> Any:
+        if not state["up"]:
+            raise pn.FetchError("HTTP 503")
+        if "resolveHandle" in url:
+            return {"did": "did:plc:abc"}
+        return {"service": [{"id": "#atproto_pds", "serviceEndpoint": "https://pds.example.net"}]}
+
+    session = pn.BskySession("me.example.net", "pw")
+    assert session.pds(fetch) == pn.BSKY_PDS_URL
+    state["up"] = True
+    assert session.pds(fetch) == "https://pds.example.net/xrpc"
 
 
 def test_unrelated_link_does_not_release_an_allegation(tmp_path: Path) -> None:
@@ -494,3 +531,26 @@ def test_orcid_in_bio_alone_is_only_likely(tmp_path: Path) -> None:
     person = svc._person("Ada Lovelace", 0, 1, "0000-0001", [])
     assert person["handles"]["bsky"]["handle"] == "ada.bsky.social"
     assert person["handles"]["bsky"]["status"] == "likely"
+
+
+def test_first_look_send_stops_starting_dms_at_the_deadline(tmp_path: Path, monkeypatch: Any) -> None:
+    import threading as _th
+    gate = _th.Event()
+    started: list[str] = []
+    monkeypatch.setattr(pn, "FIRST_LOOK_WORKERS", 1)
+    monkeypatch.setattr(pn, "FIRST_LOOK_DEADLINE_SEC", 0.05)
+    svc = pn.NameDropService(tmp_path, fetch=lambda url, **kw: {}, clock=lambda: NOW)
+
+    def slow_dm(handle: str, message: str) -> dict[str, str]:
+        started.append(handle)
+        gate.wait(1)
+        return {"status": "sent", "detail": "ok"}
+
+    monkeypatch.setattr(svc, "_send_bsky_dm", slow_dm)
+    svc.put_first_look({"people": [{"platform": "bsky", "address": "a.bsky.social"},
+                                   {"platform": "bsky", "address": "b.bsky.social"}]})
+    out = svc.send_first_look({"text": "hi"})
+    gate.set()
+    statuses = [r["status"] for r in out["results"]]
+    assert statuses == ["sent", "failed"] and started == ["a.bsky.social"]
+    assert "ran out of time" in out["results"][1]["detail"]

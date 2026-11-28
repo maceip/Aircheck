@@ -208,12 +208,17 @@ private fun PulseSheet(
                         if (score.boostsHeld) {
                             AcCard(modifier = Modifier.fillMaxWidth().testTag("pulse_claim_held")) {
                                 SectionCaption("Claim about a real person", color = AcTokens.Red)
-                                val failed = score.claims.filter { it.kind == "allegation" && it.status == "unknown" }
+                                val allegations = score.claims.filter { it.kind == "allegation" && it.status != "cited" }
+                                val failed = allegations.filter { it.status == "unknown" }
                                 Text(
-                                    if (failed.isEmpty()) {
-                                        "${score.heldReason}. No news source found. Boosts stay off until you add a source or use a reframe."
-                                    } else {
-                                        "${score.heldReason}. The news check didn't run (${failed.first().detail}), so it's unknown whether a source exists. Boosts stay off until you add a source or use a reframe."
+                                    when {
+                                        failed.isNotEmpty() ->
+                                            "${score.heldReason}. The news check didn't run (${failed.first().detail}), so it's unknown whether a source exists. Boosts stay off until you add a source or use a reframe."
+                                        allegations.any { it.status == "sourced" } ->
+                                            "${score.heldReason}. News matched the search, but a match isn't proof. Read the articles below; boosts stay off until you cite one that backs the claim, or use a reframe."
+                                        allegations.isNotEmpty() ->
+                                            "${score.heldReason}. No news source found. Boosts stay off until you add a source or use a reframe."
+                                        else -> "${score.heldReason}. Boosts stay off; use a reframe or shorten the text."
                                     },
                                     style = AcType.Body
                                 )
@@ -397,6 +402,7 @@ private fun NameDropSheet(draftText: String, onWeave: (String) -> Unit, onClose:
     var input by rememberSaveable { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<NameDropResult?>(null) }
+    var resultFor by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var picked by remember { mutableStateOf(setOf<Int>()) }
     var firstLookNote by remember { mutableStateOf<String?>(null) }
@@ -418,7 +424,14 @@ private fun NameDropSheet(draftText: String, onWeave: (String) -> Unit, onClose:
             ) {
                 AcField(
                     value = input,
-                    onValueChange = { input = it },
+                    onValueChange = {
+                        input = it
+                        // A result belongs to the text it was found for; editing drops it.
+                        if (it != resultFor) {
+                            result = null
+                            picked = emptySet()
+                        }
+                    },
                     placeholder = "Paste a paper, thread or post link",
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("namedrop_input"),
@@ -434,14 +447,18 @@ private fun NameDropSheet(draftText: String, onWeave: (String) -> Unit, onClose:
                                 result = null
                                 firstLookNote = null
                                 picked = emptySet()
+                                val submitted = input
                                 scope.launch {
-                                    val res = container.pulseClient.resolve(input)
+                                    val res = container.pulseClient.resolve(submitted)
                                     res.onSuccess { r ->
                                         val contacts = withContext(Dispatchers.IO) {
                                             runCatching { container.localGraphDatabase.getAllContacts().map { it.record } }.getOrDefault(emptyList())
                                         }
-                                        result = NameDropArchiveMatcher.merge(r, contacts)
-                                    }.onFailure { error = it.message ?: "rig offline" }
+                                        if (input == submitted) {
+                                            result = NameDropArchiveMatcher.merge(r, contacts)
+                                            resultFor = submitted
+                                        }
+                                    }.onFailure { if (input == submitted) error = it.message ?: "rig offline" }
                                     busy = false
                                 }
                             },
