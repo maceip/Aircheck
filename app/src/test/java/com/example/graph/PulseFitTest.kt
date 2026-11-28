@@ -14,6 +14,8 @@ class PulseFitTest {
         assertNull(PulseFitScorer.fit("nvidia earnings beat", emptyList()))
         assertNull(PulseFitScorer.fit("  ", listOf("AI chips")))
         assertNull(PulseFitScorer.fit("nvidia earnings", listOf(" ", "")))
+        assertNull(PulseFitScorer.fit("😀 🔥", listOf("AI chips")))
+        assertNull(PulseFitScorer.fit("nvidia earnings", listOf("🔥")))
     }
 
     @Test

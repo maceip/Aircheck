@@ -17,16 +17,21 @@ object PulseFitScorer {
         val cleanAreas = areas.map { it.trim() }.filter { it.isNotEmpty() }
         if (idea.isBlank() || cleanAreas.isEmpty()) return null
         val ideaVec = LocalVectorEmbedder.embed(idea)
-        var best = cleanAreas.first()
+        // No usable words (only a link, emoji, or a script the embedder doesn't read): unknown, not 0.
+        if (ideaVec.none { it != 0f }) return null
+        var best: String? = null
         var bestSim = Double.NEGATIVE_INFINITY
         for (area in cleanAreas) {
-            val sim = LocalVectorEmbedder.cosineSimilarity(ideaVec, LocalVectorEmbedder.embed(area))
+            val areaVec = LocalVectorEmbedder.embed(area)
+            if (areaVec.none { it != 0f }) continue
+            val sim = LocalVectorEmbedder.cosineSimilarity(ideaVec, areaVec)
             if (sim > bestSim) {
                 bestSim = sim
                 best = area
             }
         }
-        return PulseFit((bestSim.coerceIn(0.0, 1.0) * 100).roundToInt(), best)
+        val area = best ?: return null
+        return PulseFit((bestSim.coerceIn(0.0, 1.0) * 100).roundToInt(), area)
     }
 
     /** Rank among [otherIdeas] (excluding exact duplicates of [idea]); null when fewer than 2 ideas or no areas. */

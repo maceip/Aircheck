@@ -263,10 +263,11 @@ def test_http_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_cited_link_in_text_releases_boosts_without_news_lookup(tmp_path: Path) -> None:
-    fetch = FakeFetch({"timelinevolraw": _gdelt_timeline,
-                       "news.example/story-1": "<p>Reports about Jensen Huang this week</p>"})
+    fetch = FakeFetch({"timelinevolraw": _gdelt_timeline})
+    pages = {"https://news.example/story-1": "<p>Reports about Jensen Huang this week</p>"}
     llm = FakeLlm(ANALYSIS, json.dumps({"boosts": [{"kind": "hook", "text": "L", "why": "w"}]}))
-    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW)
+    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW,
+                          fetch_citation=lambda u: pages[u])
     out = svc.score({"text": "jensen story https://news.example/story-1"})
     assert out["claims"][0]["status"] == "cited"
     assert out["claims"][0]["sources"][0]["url"] == "https://news.example/story-1"
@@ -275,10 +276,10 @@ def test_cited_link_in_text_releases_boosts_without_news_lookup(tmp_path: Path) 
 
 
 def test_unrelated_link_does_not_release_an_allegation(tmp_path: Path) -> None:
-    fetch = FakeFetch({"timelinevolraw": _gdelt_timeline, "artlist": {"articles": []},
-                       "me.example": "<p>my homepage about baking</p>"})
+    fetch = FakeFetch({"timelinevolraw": _gdelt_timeline, "artlist": {"articles": []}})
     llm = FakeLlm(ANALYSIS, json.dumps({"boosts": [{"kind": "hook", "text": "He CHEATED", "why": "w"}]}))
-    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW)
+    svc = pn.PulseService(tmp_path, llm_router=llm, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW,
+                          fetch_citation=lambda u: "<p>my homepage about baking</p>")
     out = svc.score({"text": "jensen cheated lol https://me.example/"})
     assert out["claims"][0]["status"] == "unsourced"
     assert out["boosts_held"] is True and out["boosts"] == []
@@ -314,3 +315,50 @@ def test_x_first_look_opens_that_persons_profile(tmp_path: Path) -> None:
     out = svc.send_first_look({"text": "hi"})
     assert [r["open_url"] for r in out["results"]] == ["https://x.com/pal_one", "https://x.com/pal2"]
     assert out["results"][0]["copy_text"] == "hi"
+
+
+
+def test_citation_fetch_only_reaches_public_hosts() -> None:
+    public = lambda host: ["93.184.216.34"]
+    assert pn.is_public_http_url("https://news.example/a", resolve=public)
+    for addr in ("127.0.0.1", "10.0.0.5", "192.168.1.2", "169.254.169.254", "::1", "fd00::1"):
+        assert not pn.is_public_http_url("http://h.example/", resolve=lambda host, a=addr: [a])
+    assert not pn.is_public_http_url("file:///etc/passwd", resolve=public)
+    assert not pn.is_public_http_url("http://h.example/", resolve=lambda h: ["93.184.216.34", "127.0.0.1"])
+    with pytest.raises(pn.FetchError):
+        pn.fetch_public_page("http://127.0.0.1:8443/v1/namedrop/first-look")
+
+
+def test_boosts_skipped_when_claim_analysis_fails(tmp_path: Path) -> None:
+    class Flaky:
+        calls = 0
+
+        def complete(self, *a: Any, **k: Any) -> Any:
+            Flaky.calls += 1
+            if Flaky.calls == 1:
+                raise RuntimeError("provider down")
+            return SimpleNamespace(text=json.dumps({"boosts": [{"kind": "hook", "text": "John cheated", "why": "w"}]}),
+                                   provider="p", model="m")
+
+    svc = pn.PulseService(tmp_path, llm_router=Flaky(), fetch=FakeFetch({}), bsky=pn.BskySession("", ""),
+                          clock=lambda: NOW)
+    out = svc.score({"text": "John Doe cheated investors"})
+    assert out["boosts"] == [] and out["boosts_via"].startswith("skipped")
+    assert Flaky.calls == 1
+
+
+def test_doi_link_decorations_and_non_latin_names(tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    def work(url: str, _kw: Any) -> Any:
+        seen.append(url)
+        return {"title": "T", "authorships": [{"author": {"display_name": "张伟"}}, {"author": {"display_name": "王芳"}}]}
+
+    fetch = FakeFetch({"api.openalex.org/works/doi:": work,
+                       "searchActors": {"actors": [{"displayName": "李娜", "handle": "li.bsky.social"}]}})
+    svc = pn.NameDropService(tmp_path, fetch=fetch, clock=lambda: NOW)
+    out = svc.resolve({"url": "https://doi.org/10.1000/xyz123?utm_source=foo#top"})
+    assert seen[0].endswith("doi:10.1000/xyz123")
+    assert [p["name"] for p in out["people"]] == ["张伟", "王芳"]
+    assert all(p["handles"]["bsky"]["status"] == "unknown" for p in out["people"])
+    assert pn._norm_name("张伟") != pn._norm_name("王芳")

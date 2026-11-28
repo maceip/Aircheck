@@ -11,9 +11,11 @@ The paid X API is not used.
 from __future__ import annotations
 
 import datetime as _dt
+import ipaddress
 import json
 import os
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -344,13 +346,58 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-def _link_mentions(url: str, about: str, fetch: Fetcher) -> bool:
+def is_public_http_url(url: str, resolve: Callable[[str], list[str]] | None = None) -> bool:
+    """http(s) URL whose host resolves only to public addresses (no loopback, LAN, link-local)."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    resolver = resolve or (lambda host: [ai[4][0] for ai in socket.getaddrinfo(host, None)])
+    try:
+        addrs = resolver(parts.hostname)
+    except (OSError, UnicodeError):
+        return False
+    if not addrs:
+        return False
+    for addr in addrs:
+        try:
+            if not ipaddress.ip_address(addr.split("%", 1)[0]).is_global:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+        return None
+
+
+def fetch_public_page(url: str, *, max_bytes: int = 512 * 1024) -> str:
+    """Fetch a user-cited page for the claim check. Public hosts only, redirects not followed,
+    so a request to the rig can't be bounced to loopback/LAN services."""
+    if not is_public_http_url(url):
+        raise FetchError("not a public web address")
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,*/*"})
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=HTTP_TIMEOUT_SEC) as resp:
+            return resp.read(max_bytes).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raise FetchError(f"HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise FetchError(f"unreachable ({exc.__class__.__name__})") from exc
+
+
+def _link_mentions(url: str, about: str, fetch: Callable[[str], str]) -> bool:
     """True only if the cited page loads and names the person/org the claim is about."""
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z'\-]+", about) if len(w) > 2]
+    words = [w for w in re.findall(r"[^\W\d_][\w'\-]+", about) if len(w) > 2]
     if not words:
         return False
     try:
-        page = fetch(url, want="text")
+        page = fetch(url)
     except FetchError:
         return False
     if not isinstance(page, str):
@@ -387,8 +434,10 @@ def check_claim(claim: dict[str, Any], fetch: Fetcher) -> dict[str, Any]:
 
 class PulseService:
     def __init__(self, state_dir: Path, *, llm_router: Any = None, fetch: Fetcher = http_fetch,
-                 bsky: BskySession | None = None, clock: Callable[[], _dt.datetime] = _utc_now) -> None:
+                 bsky: BskySession | None = None, clock: Callable[[], _dt.datetime] = _utc_now,
+                 fetch_citation: Callable[[str], str] = fetch_public_page) -> None:
         self.areas_path = Path(state_dir) / "pulse_areas.json"
+        self.fetch_citation = fetch_citation
         self.llm_router = llm_router
         self.fetch = fetch
         self.bsky = bsky or BskySession()
@@ -449,7 +498,8 @@ class PulseService:
         for c in raw_claims:
             if c.get("kind") not in ("allegation", "fact"):
                 continue
-            supporting = [link for link in cited if _link_mentions(link["url"], str(c.get("about") or ""), fetch)]
+            supporting = [link for link in cited
+                          if _link_mentions(link["url"], str(c.get("about") or ""), self.fetch_citation)]
             if supporting:
                 claims.append({"text": str(c.get("text") or ""), "about": str(c.get("about") or ""),
                                "kind": str(c.get("kind") or ""), "query": "", "status": "cited",
@@ -477,9 +527,13 @@ class PulseService:
             for s in sources)
         boosts: list[dict[str, str]] = []
         boosts_via = ""
-        boost_json, boosts_via = _llm_json(self.llm_router, BOOST_SYSTEM, BOOST_USER.format(
-            text=text, field=field, areas=", ".join(areas) or "unknown", heat=heat_summary,
-            held=HELD_NOTE if held else "", n=2 if held else 3))
+        if analysis is None:
+            # Fail closed: without a claim check we can't know the idea is safe to amplify.
+            boost_json, boosts_via = None, f"skipped: claim check didn't run ({analysis_via})"
+        else:
+            boost_json, boosts_via = _llm_json(self.llm_router, BOOST_SYSTEM, BOOST_USER.format(
+                text=text, field=field, areas=", ".join(areas) or "unknown", heat=heat_summary,
+                held=HELD_NOTE if held else "", n=2 if held else 3))
         if boost_json:
             for b in _as_list(boost_json.get("boosts")):
                 if not isinstance(b, dict) or not str(b.get("text") or "").strip():
@@ -525,7 +579,8 @@ def _handle(handle: str, status: str, evidence: str) -> dict[str, str]:
 
 
 def _norm_name(s: str) -> str:
-    return re.sub(r"[^a-z]", "", s.lower())
+    """Unicode-aware: keeps letters in any script, so 张伟 and 王芳 stay distinct (never both "")."""
+    return "".join(ch for ch in s.casefold() if ch.isalpha())
 
 
 class NameDropService:
@@ -568,7 +623,8 @@ class NameDropService:
         elif _DOI_RE.search(src):
             dm = _DOI_RE.search(src)
             assert dm is not None
-            people, title = self._from_openalex_doi(dm.group(1).rstrip(".,)"), notes)
+            doi = re.split(r"[?#&\s]", dm.group(1), maxsplit=1)[0].rstrip(".,);]")
+            people, title = self._from_openalex_doi(doi, notes)
             kind = "paper"
         else:
             people = [{"name": "", "role": "mentioned in text",
@@ -630,7 +686,7 @@ class NameDropService:
             author = a.get("author") or {}
             orcid = str(author.get("orcid") or "").rsplit("/", 1)[-1] or None
             raw_name = str(a.get("raw_author_name") or author.get("display_name") or "")
-            if raw_name:
+            if raw_name and _norm_name(raw_name):
                 out[_norm_name(raw_name)] = (raw_name, orcid)
         return out
 
@@ -662,6 +718,8 @@ class NameDropService:
             notes.append(f"Bluesky search for {name} failed: {exc}")
             return _handle("", "unknown", "")
         target = _norm_name(name)
+        if not target:
+            return _handle("", "unknown", "")
         for actor in data.get("actors") or []:
             if _norm_name(str(actor.get("displayName") or "")) != target:
                 continue

@@ -732,6 +732,8 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
                         if (sending) return@AcPrimaryKey
                         // One send at a time: a double tap must not DM everyone twice.
                         sending = true
+                        sendResult = null
+                        listNote = null
                         scope.launch {
                             container.pulseClient.sendFirstLook(postLink.trim(), "")
                                 .onSuccess { sendResult = it }
