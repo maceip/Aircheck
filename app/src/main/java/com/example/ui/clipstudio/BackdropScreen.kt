@@ -78,6 +78,8 @@ fun BackdropScreen(
             vm.setDefaultNewsroomLook(id)
         } else {
             vm.updateNewsroomLook(updated)
+            // The look being edited is the one Newsroom and the next render use.
+            if (!look.isDefault) vm.setDefaultNewsroomLook(look.id)
         }
     }
     val anchorPhotoFile = remember(state.activeProject.stageConfig.photoSha, state.settings.persona.defaultPhotoSha) {

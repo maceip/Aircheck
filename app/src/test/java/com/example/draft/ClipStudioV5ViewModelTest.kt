@@ -848,6 +848,12 @@ class ClipStudioV5ViewModelTest {
         assertEquals("split", seg.framingOverride)
         assertNull(seg.originClauseId)
         assertTrue(studioVm.uiState.value.coreUndoDepth > 0)
+        // Let the VM's background saves land before tearDown closes the database. (Each edit is saved
+        // on its own IO launch, so the two saves can finish in either order; both carry the prompt.)
+        waitFor(timeoutMs = 20_000L) {
+            runBlocking { localRepo.getLatestCorePipelineSession() }
+                ?.brollSegments?.any { it.id == "seg_free" && it.prompt == "Rain on a window" } == true
+        }
     }
 
     @Test

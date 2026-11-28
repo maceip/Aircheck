@@ -13,6 +13,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -425,12 +426,14 @@ class ClipStudioV5ComposeTest {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             onAllNodesWithTag("cs_backdrop_root").fetchSemanticsNodes().isNotEmpty()
         }
+        // Other tests in this process may have left a default look behind: compare against its blur.
+        val blurBefore = studioVm.uiState.value.newsroomLooks.firstOrNull { it.isDefault }?.blurPercent ?: 0
         onNodeWithTag("cs_accent_amber").performScrollTo().performClick()
         onNodeWithTag("cs_scrub_blur_inc").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             val def = studioVm.uiState.value.newsroomLooks.firstOrNull { it.isDefault }
-            def != null && def.accentHex.equals(com.example.data.NewsroomLook.ACCENT_AMBER, ignoreCase = true) && def.blurPercent == 5
+            def != null && def.accentHex.equals(com.example.data.NewsroomLook.ACCENT_AMBER, ignoreCase = true) && def.blurPercent == (blurBefore + 5).coerceAtMost(100)
         }
         onNodeWithTag("cs_backdrop_back").performClick()
         waitUntil(timeoutMillis = 5_000) {
@@ -441,8 +444,9 @@ class ClipStudioV5ComposeTest {
         onNodeWithTag("cs_use_look").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
+            // An earlier toast (overlay edit) may still be up; wait for the done toast itself.
             onAllNodesWithTag("cs_cut_root").fetchSemanticsNodes().isNotEmpty() &&
-                onAllNodesWithTag("cs_toast").fetchSemanticsNodes().isNotEmpty()
+                onAllNodesWithText("Overlays saved · will apply when rendered").fetchSemanticsNodes().isNotEmpty()
         }
         onNodeWithText("Overlays saved · will apply when rendered").assertIsDisplayed()
         onNodeWithTag("cs_toast_ok").performClick()
