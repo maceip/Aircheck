@@ -7,10 +7,10 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.Log
 import android.view.WindowManager
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.SemanticsMatcher
-import androidx.compose.ui.test.click
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -272,11 +272,16 @@ class AircheckFullClipE2ETest {
             composeRule.onNodeWithTag("cs_cut_add_broll").scrollIntoView().performClick()
             waitFor("segment added", 5_000L) { persisted().brollSegments.any { it.id !in before } }
             val segId = persisted().brollSegments.first { it.id !in before }.id
-            // A new block can sit under an existing line-linked block (run 3: the centre tap opened the
-            // overlapping segment's sheet). Tap its leading edge, where it starts before any overlap.
+            // The new block sits under the playhead and partly under a line-linked block, so a touch on it
+            // lands on another target (run 3 opened the other segment's sheet; run 4's edge tap left the
+            // sheet open for under a second). Invoke the block's own click action instead.
             composeRule.onNodeWithTag("cs_broll_block_$segId").scrollIntoView()
-                .performTouchInput { click(Offset(width * 0.08f, centerY)) }
+                .performSemanticsAction(SemanticsActions.OnClick)
             waitForTag("cs_broll_sheet")
+            composeRule.waitForIdle()
+            Thread.sleep(1_000L)
+            screenshot("cut_broll_sheet_open")
+            assertTrue("b-roll sheet must stay open", composeRule.onAllNodesWithTag("cs_broll_sheet").fetchSemanticsNodes().isNotEmpty())
             composeRule.onNodeWithTag("cs_broll_sheet_prompt").performTextReplacement(BROLL_PROMPT)
             Espresso.closeSoftKeyboard()
             composeRule.onNodeWithTag("cs_broll_sheet_generate").performClick()
