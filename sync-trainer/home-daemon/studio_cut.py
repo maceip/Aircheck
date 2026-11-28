@@ -18,15 +18,23 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
+
+from bailian_quota import (
+    active_bailian_quota_block,
+    clear_bailian_quota_state,
+    record_bailian_quota_exhausted,
+)
 
 SILENCE_NOISE_DB = -32.0
 SILENCE_MIN_GAP_SEC = 0.25
@@ -554,6 +562,25 @@ def broll_media_path(plates_dir: Path, filename: str) -> Path | None:
     return candidate
 
 
+def resolve_broll_media_ref(plates_dir: Path, raw_ref: str) -> Path | None:
+    """Resolves a B-roll filename or URL (e.g. ``/v1/broll-media/broll_...png`` or ``/v1/renders/...``)."""
+    raw = str(raw_ref or "").strip()
+    if not raw:
+        return None
+    path_part = urllib.parse.urlsplit(raw).path
+    clean = Path(path_part).name.strip()
+    if not _BROLL_MEDIA_FILENAME_RE.match(clean):
+        return None
+    in_broll = broll_media_path(plates_dir, clean)
+    if in_broll is not None:
+        return in_broll
+    renders_root = plates_dir.parent.resolve()
+    in_renders = (renders_root / clean).resolve()
+    if in_renders.parent == renders_root and in_renders.is_file():
+        return in_renders
+    return None
+
+
 def save_broll_media_bytes(plates_dir: Path, raw_bytes: bytes, ext: str) -> dict[str, Any]:
     clean_ext = str(ext or "").strip().lower().lstrip(".")
     if clean_ext == "jpeg":
@@ -626,47 +653,61 @@ def _generate_image_into(
     bl_bin: Path,
     runner: Any = None,
     openai_base_url: str | None = None,
+    quota_state_path: Path | None = None,
 ) -> None:
-    """Generates one image for ``full_prompt`` into ``work`` (Bailian `bl`, then OpenAI if `bl` fails)."""
+    """Generates one image for ``full_prompt`` into ``work`` (Bailian `bl`, short-circuiting to OpenAI on active 429 cooldown)."""
     if runner is not None:
         runner(full_prompt, aspect, work)
     else:
         bl_error: str | None = None
-        resolved = bl_bin if bl_bin.is_file() else Path(shutil.which("bl") or "")
-        if resolved.is_file():
-            proc = subprocess.run(
-                [
-                    str(resolved),
-                    "image",
-                    "generate",
-                    "--prompt",
-                    full_prompt,
-                    "--size",
-                    aspect,
-                    "--n",
-                    "1",
-                    "--watermark",
-                    "false",
-                    "--out-dir",
-                    str(work),
-                    "--out-prefix",
-                    "plate",
-                    "--output",
-                    "json",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=240,
+        has_openai = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+        quota_block = active_bailian_quota_block(state_path=quota_state_path)
+        if quota_block is not None and has_openai:
+            bl_error = str(quota_block.get("detail") or "Bailian quota exhausted (HTTP 429)")
+            logging.getLogger("studio_cut").info(
+                "Bailian image quota exhausted (%s); short-circuiting straight to OpenAI.",
+                bl_error,
             )
-            if proc.returncode != 0:
-                tail = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()[-3:]
-                bl_error = "bl image generate failed: " + " | ".join(tail)
         else:
-            bl_error = "Bailian CLI `bl` is not available on this Mac rig."
+            resolved = bl_bin if bl_bin.is_file() else Path(shutil.which("bl") or "")
+            if resolved.is_file():
+                proc = subprocess.run(
+                    [
+                        str(resolved),
+                        "image",
+                        "generate",
+                        "--prompt",
+                        full_prompt,
+                        "--size",
+                        aspect,
+                        "--n",
+                        "1",
+                        "--watermark",
+                        "false",
+                        "--out-dir",
+                        str(work),
+                        "--out-prefix",
+                        "plate",
+                        "--output",
+                        "json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=240,
+                )
+                if proc.returncode != 0:
+                    raw_err = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()
+                    record_bailian_quota_exhausted(raw_err, state_path=quota_state_path)
+                    tail = raw_err.splitlines()[-3:]
+                    bl_error = "bl image generate failed: " + " | ".join(tail)
+                else:
+                    clear_bailian_quota_state(state_path=quota_state_path)
+            else:
+                bl_error = "Bailian CLI `bl` is not available on this Mac rig."
 
         if bl_error is not None:
-            if os.environ.get("OPENAI_API_KEY", "").strip():
+            if has_openai:
                 try:
                     _generate_backdrop_via_openai(
                         full_prompt,
@@ -777,22 +818,72 @@ def _breaking_palette(style: str) -> tuple[str, tuple[int, int, int, int] | None
     return ("BREAKING NEWS", (215, 25, 33, 255), (255, 255, 255, 255), (215, 25, 33, 255))
 
 
-def _fonts(size_scale: float) -> tuple[Any, Any, Any]:
+def _load_ttf_font(candidates: Sequence[Path], size_px: int, *, weight: int | None = None) -> Any:
     from PIL import ImageFont
 
-    repo_root = Path(__file__).resolve().parents[2]
-    font_path = repo_root / "app" / "src" / "main" / "res" / "font" / "space_grotesk.ttf"
-    mono_path = repo_root / "app" / "src" / "main" / "res" / "font" / "jetbrains_mono.ttf"
+    size = max(12, int(size_px))
+    for cand in candidates:
+        if not cand.is_file():
+            continue
+        try:
+            font = ImageFont.truetype(str(cand), size)
+            if weight is not None and hasattr(font, "get_variation_axes") and hasattr(font, "set_variation_by_axes"):
+                try:
+                    axes = font.get_variation_axes() or []
+                    if axes:
+                        axis_vals: list[float] = []
+                        has_weight = False
+                        for ax in axes:
+                            name = ax.get("name", b"")
+                            name_s = name.decode("utf-8", errors="ignore") if isinstance(name, bytes) else str(name)
+                            if name_s.lower() == "weight":
+                                lo = float(ax.get("minimum", 100))
+                                hi = float(ax.get("maximum", 900))
+                                axis_vals.append(max(lo, min(hi, float(weight))))
+                                has_weight = True
+                            else:
+                                axis_vals.append(float(ax.get("default", ax.get("minimum", 0))))
+                        if has_weight:
+                            font.set_variation_by_axes(axis_vals)
+                except Exception:
+                    pass
+            return font
+        except Exception:
+            continue
     try:
-        mono = mono_path if mono_path.is_file() else font_path
-        return (
-            ImageFont.truetype(str(font_path), int(36 * size_scale)),
-            ImageFont.truetype(str(font_path), int(25 * size_scale)),
-            ImageFont.truetype(str(mono), int(20 * size_scale)),
-        )
-    except Exception:
-        d = ImageFont.load_default()
-        return d, d, d
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _fonts(size_scale: float) -> tuple[Any, Any, Any]:
+    repo_root = Path(__file__).resolve().parents[2]
+    font_dir = repo_root / "app" / "src" / "main" / "res" / "font"
+    sans_candidates = (
+        font_dir / "jost.ttf",
+        font_dir / "inter.ttf",
+        font_dir / "space_grotesk.ttf",
+        Path("/System/Library/Fonts/HelveticaNeue.ttc"),
+        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+    )
+    body_candidates = (
+        font_dir / "inter.ttf",
+        font_dir / "jost.ttf",
+        font_dir / "space_grotesk.ttf",
+        Path("/System/Library/Fonts/HelveticaNeue.ttc"),
+        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+    )
+    mono_candidates = (
+        font_dir / "jetbrains_mono_var.ttf",
+        font_dir / "jetbrains_mono.ttf",
+        Path("/System/Library/Fonts/SFNSMono.ttf"),
+        *body_candidates,
+    )
+    return (
+        _load_ttf_font(sans_candidates, int(36 * size_scale), weight=650),
+        _load_ttf_font(body_candidates, int(25 * size_scale), weight=500),
+        _load_ttf_font(mono_candidates, int(20 * size_scale), weight=600),
+    )
 
 
 def _between(windows: Sequence[tuple[float, float]]) -> str:
@@ -928,6 +1019,7 @@ def compose_studio_cut(
     image_runner: Any = None,
     edit_ranges: Sequence[tuple[int, int]] | None = None,
     broll_segments: list[dict[str, Any]] | None = None,
+    words: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Composes the studio cut.
 
@@ -937,6 +1029,7 @@ def compose_studio_cut(
     """
     from PIL import Image, ImageDraw, ImageOps
 
+    work_dir.mkdir(parents=True, exist_ok=True)
     src_w, src_h = _probe_video_dims(src_mp4)
     size_map = ASPECT_SIZES_1080P if (max(src_w, src_h) >= 1920 or min(src_w, src_h) >= 1080) else ASPECT_SIZES
     width, height = size_map[options.aspect]
@@ -1016,7 +1109,20 @@ def compose_studio_cut(
 
     # (path, start_s, end_s, is_video, transition, transition_sec)
     broll_layers: list[tuple[Path, float, float, bool, str, float]] = []
-    timed_pngs: list[tuple[Path, float, float]] = []
+    # (path, start_s, end_s, x, y) — cropped RGBA overlay PNGs decoded once with eof_action=repeat.
+    timed_pngs: list[tuple[Path, float, float, int, int]] = []
+
+    def _save_cropped_overlay(img_obj: Any, png_out: Path) -> tuple[Path, int, int]:
+        bbox = img_obj.getbbox()
+        if bbox is None:
+            img_obj.save(png_out)
+            return png_out, 0, 0
+        x0 = max(0, bbox[0] - 2)
+        y0 = max(0, bbox[1] - 2)
+        x1 = min(img_obj.width, bbox[2] + 2)
+        y1 = min(img_obj.height, bbox[3] + 2)
+        img_obj.crop((x0, y0, x1, y1)).save(png_out)
+        return png_out, x0, y0
     pip_windows: list[tuple[float, float]] = []
     split_windows: list[tuple[float, float]] = []
     black_dip_windows: list[tuple[float, float]] = []
@@ -1061,6 +1167,7 @@ def compose_studio_cut(
         raw_b64 = str(it.get("broll_media_base64") or "").strip()
         raw_ext = str(it.get("broll_media_ext") or "").strip().lower().lstrip(".")
         raw_mid = str(it.get("broll_media_id") or "").strip()
+        raw_url = str(it.get("broll_url") or it.get("bRollUrl") or "").strip()
         if raw_b64:
             ext_use = raw_ext if raw_ext in ALLOWED_BROLL_MEDIA_EXTS else "jpg"
             decoded = base64.b64decode(raw_b64)
@@ -1069,6 +1176,11 @@ def compose_studio_cut(
             custom_media_by_idx[idx] = (custom_file, ext_use in ALLOWED_BROLL_VIDEO_EXTS)
         elif raw_mid:
             resolved = broll_media_path(plates_dir, raw_mid)
+            if resolved is not None:
+                is_vid = resolved.suffix.lower().lstrip(".") in ALLOWED_BROLL_VIDEO_EXTS
+                custom_media_by_idx[idx] = (resolved, is_vid)
+        elif raw_url:
+            resolved = resolve_broll_media_ref(plates_dir, raw_url)
             if resolved is not None:
                 is_vid = resolved.suffix.lower().lstrip(".") in ALLOWED_BROLL_VIDEO_EXTS
                 custom_media_by_idx[idx] = (resolved, is_vid)
@@ -1087,6 +1199,80 @@ def compose_studio_cut(
             broll_prompts, options.aspect, plates_dir / "broll_cache",
             bl_bin=bl_bin or Path("bl"), runner=image_runner,
         )
+
+    def _render_caption_png(lines_in: list[str], png_out: Path) -> tuple[Path, int, int]:
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        line_h = int(36 * scale)
+        band_h = line_h * len(lines_in) + int(24 * scale)
+        bottom_pad = int(height * (0.225 if has_lower_third else 0.06))
+        top = height - band_h - bottom_pad
+        left = int(width * 0.045)
+        draw.rounded_rectangle(
+            [(left, top), (width - left, top + band_h)],
+            radius=int(8 * scale),
+            fill=(8, 9, 12, 224),
+            outline=(60, 62, 72, 240),
+            width=2,
+        )
+        draw.rectangle([(left, top), (left + int(5 * scale), top + band_h)], fill=active_accent)
+        for li, line in enumerate(lines_in):
+            draw.text((left + int(20 * scale), top + int(12 * scale) + li * line_h), line, font=f_body, fill=(235, 235, 239, 255))
+        return _save_cropped_overlay(img, png_out)
+
+    norm_caption_words: list[tuple[str, float, float]] = []
+    if options.captions and words:
+        for w in words:
+            if not isinstance(w, Mapping):
+                continue
+            w_txt = str(w.get("word") or "").strip()
+            if not w_txt:
+                continue
+            raw_s = w.get("startMs") if w.get("startMs") is not None else w.get("start_ms")
+            raw_e = w.get("endMs") if w.get("endMs") is not None else w.get("end_ms")
+            if raw_s is None:
+                continue
+            s_ms = remap_ms(max(0, int(raw_s)), gaps)
+            e_ms = min(total_ms, remap_ms(max(int(raw_s), int(raw_e if raw_e is not None else raw_s)), gaps))
+            if e_ms <= s_ms:
+                e_ms = min(total_ms, s_ms + 120)
+            if e_ms > s_ms:
+                norm_caption_words.append((w_txt, s_ms / 1000.0, e_ms / 1000.0))
+
+    caption_chars = max(16, int(34 * width / max(1.0, 720.0 * scale)))
+    if options.captions and norm_caption_words:
+        # Word-aligned broadcast caption phrases across the entire timeline (including B-roll cutaways).
+        phrases: list[tuple[list[str], float, float]] = []
+        cur_words: list[str] = []
+        p_start = 0.0
+        p_end = 0.0
+        for w_txt, ws, we in norm_caption_words:
+            gap_break = bool(cur_words) and (ws - p_end) >= 0.45
+            cand_text = " ".join(cur_words + [w_txt])
+            too_long = bool(cur_words) and (len(cur_words) >= 6 or len(cand_text) > caption_chars * 2)
+            if gap_break or too_long:
+                phrases.append((_wrap(" ".join(cur_words), caption_chars), p_start, max(p_start + 0.12, p_end)))
+                cur_words = []
+            if not cur_words:
+                p_start = ws
+            cur_words.append(w_txt)
+            p_end = max(p_end, we)
+            if w_txt[-1:] in ".!?;:" and len(cur_words) >= 3:
+                phrases.append((_wrap(" ".join(cur_words), caption_chars), p_start, max(p_start + 0.12, p_end)))
+                cur_words = []
+        if cur_words:
+            phrases.append((_wrap(" ".join(cur_words), caption_chars), p_start, max(p_start + 0.12, p_end)))
+        for pi, (p_lines, ps, pe) in enumerate(phrases):
+            if not p_lines:
+                continue
+            next_ps = phrases[pi + 1][1] if pi + 1 < len(phrases) else total_s
+            eff_end = min(total_s, max(pe, min(next_ps, pe + 0.25)))
+            if eff_end <= ps:
+                continue
+            png = work_dir / f"caption_w_{pi}.png"
+            saved_png, ox, oy = _render_caption_png(p_lines, png)
+            timed_pngs.append((saved_png, ps, eff_end, ox, oy))
+            caption_count += 1
 
     for idx, item in enumerate(clause_dicts):
         window = remapped_window(item)
@@ -1153,32 +1339,23 @@ def compose_studio_cut(
                 punch_windows.append((start_s, end_s))
             talking_head_seen += 1
 
-        if options.captions and mode != "BROLL_CUTAWAY":
+        if options.captions and not norm_caption_words and mode != "BROLL_CUTAWAY":
             spoken = str(item.get("spoken_text") or "").strip()
             if spoken:
-                png = work_dir / f"caption_{idx}.png"
-                img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-                draw = ImageDraw.Draw(img)
-                chars = max(16, int(34 * width / max(1.0, 720.0 * scale)))
-                lines = _wrap(spoken, chars)[-3:]
-                line_h = int(36 * scale)
-                band_h = line_h * len(lines) + int(24 * scale)
-                bottom_pad = int(height * (0.215 if has_lower_third else 0.06))
-                top = height - band_h - bottom_pad
-                left = int(width * 0.045)
-                draw.rounded_rectangle(
-                    [(left, top), (width - left, top + band_h)],
-                    radius=int(8 * scale),
-                    fill=(8, 9, 12, 224),
-                    outline=(60, 62, 72, 240),
-                    width=2,
-                )
-                draw.rectangle([(left, top), (left + int(5 * scale), top + band_h)], fill=active_accent)
-                for li, line in enumerate(lines):
-                    draw.text((left + int(20 * scale), top + int(12 * scale) + li * line_h), line, font=f_body, fill=(235, 235, 239, 255))
-                img.save(png)
-                timed_pngs.append((png, start_s, end_s))
-                caption_count += 1
+                all_lines = _wrap(spoken, caption_chars)
+                # Paginate into <=2-line cards across [start_s, end_s] so zero opening words are ever dropped.
+                pages = [all_lines[i : i + 2] for i in range(0, len(all_lines), 2)]
+                word_counts = [max(1, sum(len(ln.split()) for ln in pg)) for pg in pages]
+                total_wc = sum(word_counts)
+                cursor_s = start_s
+                span_s = max(0.05, end_s - start_s)
+                for pi, (pg, wc) in enumerate(zip(pages, word_counts)):
+                    pg_end = end_s if pi == len(pages) - 1 else cursor_s + span_s * (wc / total_wc)
+                    png = work_dir / f"caption_{idx}_{pi}.png"
+                    saved_png, ox, oy = _render_caption_png(pg, png)
+                    timed_pngs.append((saved_png, cursor_s, max(cursor_s + 0.05, pg_end), ox, oy))
+                    cursor_s = pg_end
+                    caption_count += 1
 
     # Top-left LIVE / News Logo Bug
     should_draw_bug = (
@@ -1214,8 +1391,8 @@ def compose_studio_cut(
             width=1,
         )
         draw.text((desk_x + int(14 * scale), bug_y + int(8 * scale)), desk_label, font=f_tag, fill=(235, 235, 239, 255))
-        img.save(live_png)
-        timed_pngs.append((live_png, 0.0, total_s))
+        saved_live, ox, oy = _save_cropped_overlay(img, live_png)
+        timed_pngs.append((saved_live, 0.0, total_s, ox, oy))
 
     # Upper-left QUOTE_BRIEF cards (non-overlapping with LIVE bug, top-right PiP, and lower-third)
     for idx, ovl in enumerate(quote_overlays):
@@ -1264,15 +1441,15 @@ def compose_studio_cut(
                 font=f_tag,
                 fill=(176, 180, 192, 255),
             )
-        img.save(png)
-        timed_pngs.append((png, start_s, max(start_s + 0.25, end_s)))
+        saved_q, ox, oy = _save_cropped_overlay(img, png)
+        timed_pngs.append((saved_q, start_s, max(start_s + 0.25, end_s), ox, oy))
         overlay_count += 1
 
     # Lower-third LOWER_THIRD / STAT_CALLOUT chyrons with Breaking News Style Kicker Chips
     for idx, ovl in enumerate(lower_overlays):
-        headline = _truncate_words(str(ovl.get("headline") or ""), 36).upper()
-        subline = _truncate_words(str(ovl.get("subline") or ""), 44)
-        stat = _truncate_words(str(ovl.get("callout_stat") or ""), 20)
+        headline = _truncate_words(str(ovl.get("headline") or ""), 44).upper()
+        subline = _truncate_words(str(ovl.get("subline") or ""), 76)
+        stat = _truncate_words(str(ovl.get("callout_stat") or ""), 24)
         dur_sec = max(2, min(30, int(ovl.get("duration_sec") or 5)))
         ovl_style = str(ovl.get("breaking_style") or options.breaking_style or "breaking")
         kicker_lbl, kicker_bg, kicker_fg, ovl_accent = _breaking_palette(ovl_style)
@@ -1317,7 +1494,10 @@ def compose_studio_cut(
             h_lines = _fit_headline_lines(headline, h_font)[:2]
         h_line_h = int((42 if h_font is f_title else 32) * scale)
         sub_text = subline or (stat.upper() if stat and kicker_bg is None else "")
-        deck_h = max(int(118 * scale), int(28 * scale) + len(h_lines) * h_line_h + (int(42 * scale) if sub_text else int(14 * scale)))
+        sub_lines = _fit_headline_lines(sub_text, f_tag)[:2] if sub_text else []
+        sub_line_h = int(26 * scale)
+        sub_block_h = (len(sub_lines) * sub_line_h + int(16 * scale)) if sub_lines else int(14 * scale)
+        deck_h = max(int(118 * scale), int(28 * scale) + len(h_lines) * h_line_h + sub_block_h)
         deck_bottom = height - int(height * 0.042)
         deck_top = deck_bottom - deck_h
         if kicker_bg is not None and kicker_lbl:
@@ -1341,11 +1521,13 @@ def compose_studio_cut(
         draw.rectangle([(left, deck_top), (left + int(7 * scale), deck_bottom)], fill=ovl_accent)
         for li, h_line in enumerate(h_lines):
             draw.text((left + int(22 * scale), deck_top + int(16 * scale) + li * h_line_h), h_line, font=h_font, fill=(255, 255, 255, 255))
-        if sub_text:
+        if sub_lines:
             sub_y = deck_top + int(20 * scale) + max(1, len(h_lines)) * h_line_h
-            draw.text((left + int(22 * scale), sub_y), sub_text, font=f_tag, fill=ovl_accent if ovl_style != "clean" else (188, 192, 204, 255))
-        img.save(png)
-        timed_pngs.append((png, start_s, max(start_s + 0.25, end_s)))
+            sub_fill = ovl_accent if ovl_style != "clean" else (188, 192, 204, 255)
+            for si, s_line in enumerate(sub_lines):
+                draw.text((left + int(22 * scale), sub_y + si * sub_line_h), s_line, font=f_tag, fill=sub_fill)
+        saved_q, ox, oy = _save_cropped_overlay(img, png)
+        timed_pngs.append((saved_q, start_s, max(start_s + 0.25, end_s), ox, oy))
         overlay_count += 1
 
     look = options.look
@@ -1369,8 +1551,8 @@ def compose_studio_cut(
         broll_inputs.append(next_input)
         next_input += 1
     png_inputs: list[int] = []
-    for png, _, _ in timed_pngs:
-        cmd.extend(["-loop", "1", "-i", str(png)])
+    for png, _, _, _, _ in timed_pngs:
+        cmd.extend(["-i", str(png)])
         png_inputs.append(next_input)
         next_input += 1
 
@@ -1483,10 +1665,10 @@ def compose_studio_cut(
         )
         cur_v = "v_dip"
 
-    for i, ((_, s_sec, e_sec), in_idx) in enumerate(zip(timed_pngs, png_inputs)):
+    for i, ((_, s_sec, e_sec, ox, oy), in_idx) in enumerate(zip(timed_pngs, png_inputs)):
         next_v = f"vo_{i}"
         parts.append(
-            f"[{cur_v}][{in_idx}:v]overlay=0:0:shortest=1:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[{next_v}]"
+            f"[{cur_v}][{in_idx}:v]overlay={ox}:{oy}:eof_action=repeat:enable='between(t,{s_sec:.3f},{e_sec:.3f})'[{next_v}]"
         )
         cur_v = next_v
     graded = cur_v

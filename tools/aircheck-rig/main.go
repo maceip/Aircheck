@@ -33,6 +33,7 @@ const (
 	defaultVideoPort    = 8451
 	defaultVoicePort    = 8452
 	defaultMlxPort      = 8080
+	managedMlxPort      = 8082
 	defaultLambdaTarget = "ubuntu@68.209.107.223"
 	androidAppId        = "com.aistudio.aircheck.vqxkrm"
 	androidMainActivity = "com.aistudio.aircheck.vqxkrm/com.example.MainActivity"
@@ -117,8 +118,11 @@ type Config struct {
 	SecretFile   string
 	PythonBin    string
 	NodeBin      string
+	UvBin        string
 	Cloudflared  string
 	AdbBin       string
+	MlxModelPath string
+	MlxPort      int
 	LambdaTarget string
 	LambdaKey    string
 	BundlesDir   string
@@ -140,12 +144,13 @@ func main() {
 
 	fs := flag.NewFlagSet("aircheck-rig", flag.ExitOnError)
 	noTunnel := fs.Bool("no-tunnel", false, "Disable outbound 5G HTTPS cloudflared tunnel")
-	noLambda := fs.Bool("no-lambda", false, "Disable Lambda GPU SSH tunnel (:8451/:8452)")
+	enableLambda := fs.Bool("lambda-tunnel", false, "Enable optional Lambda GPU SSH tunnel (:8451/:8452)")
+	noLambda := fs.Bool("no-lambda", false, "Disable Lambda GPU SSH tunnel (default)")
 	noPhoneSync := fs.Bool("no-phone-sync", false, "Skip automatic ADB phone URL sync")
 	lambdaHost := fs.String("lambda", envOr("AIRCHECK_LAMBDA_HOST", defaultLambdaTarget), "Lambda SSH user@host")
 	_ = fs.Parse(args)
 
-	cfg, err := buildConfig(!*noTunnel, !*noLambda, !*noPhoneSync, *lambdaHost)
+	cfg, err := buildConfig(!*noTunnel, *enableLambda && !*noLambda, !*noPhoneSync, *lambdaHost)
 	if err != nil {
 		fatalf("config error: %v", err)
 	}
@@ -214,6 +219,7 @@ func buildConfig(enableTunnel, enableLambda, syncPhone bool, lambdaTarget string
 	home, _ := os.UserHomeDir()
 	loadDotEnvFile(filepath.Join(home, ".zshenv"))
 	loadDotEnvFile(filepath.Join(root, ".env"))
+	loadDotEnvFile(filepath.Join(root, ".aircheck-rig", "env"))
 
 	stateDir := filepath.Join(root, ".aircheck-rig")
 	if err := os.MkdirAll(filepath.Join(stateDir, "logs"), 0o755); err != nil {
@@ -227,6 +233,7 @@ func buildConfig(enableTunnel, enableLambda, syncPhone bool, lambdaTarget string
 		"python3",
 	)
 	nodeBin := firstExecutable("/opt/homebrew/bin/node", "/usr/local/bin/node", "node")
+	uvBin := firstExecutable(filepath.Join(home, ".local/bin/uv"), "/opt/homebrew/bin/uv", "uv")
 	cfBin := firstExecutable("/opt/homebrew/bin/cloudflared", "/usr/local/bin/cloudflared", "cloudflared")
 	adbBin := firstExecutable(
 		"/opt/homebrew/share/android-commandlinetools/platform-tools/adb",
@@ -234,6 +241,16 @@ func buildConfig(enableTunnel, enableLambda, syncPhone bool, lambdaTarget string
 		"/opt/homebrew/bin/adb",
 		"adb",
 	)
+	mlxModelPath := strings.TrimSpace(os.Getenv("AIRCHECK_MLX_MODEL"))
+	mlxPort := defaultMlxPort
+	if mlxModelPath != "" {
+		mlxPort = managedMlxPort
+	}
+	if rawPort := strings.TrimSpace(os.Getenv("AIRCHECK_MLX_PORT")); rawPort != "" {
+		if parsed, convErr := strconv.Atoi(rawPort); convErr == nil && parsed > 0 {
+			mlxPort = parsed
+		}
+	}
 
 	modelsBase := filepath.Join(home, "Downloads/voicestudio-models")
 	bundlesDir := envOr("AIRCHECK_BUNDLES_DIR", filepath.Join(modelsBase, "bundles"))
@@ -252,8 +269,11 @@ func buildConfig(enableTunnel, enableLambda, syncPhone bool, lambdaTarget string
 		SecretFile:   filepath.Join(stateDir, "tunnel_secret"),
 		PythonBin:    pythonBin,
 		NodeBin:      nodeBin,
+		UvBin:        uvBin,
 		Cloudflared:  cfBin,
 		AdbBin:       adbBin,
+		MlxModelPath: mlxModelPath,
+		MlxPort:      mlxPort,
 		LambdaTarget: lambdaTarget,
 		LambdaKey:    envOr("AIRCHECK_LAMBDA_SSH_KEY", filepath.Join(home, ".ssh/nimbus_lambda")),
 		BundlesDir:   bundlesDir,
@@ -580,6 +600,22 @@ func runSupervisor(cfg *Config) error {
 		return c
 	}, nil)
 
+	// 2b. Optional Aircheck-managed MLX LLM server (`AIRCHECK_MLX_MODEL` on :8082 by default).
+	if cfg.MlxModelPath != "" && cfg.UvBin != "" {
+		wg.Add(1)
+		go superviseProcess(&wg, stopCh, "mlx-llm", func() *exec.Cmd {
+			return exec.Command(
+				cfg.UvBin, "run", "--python", "3.12", "--with", "mlx-lm",
+				"mlx_lm.server",
+				"--model", cfg.MlxModelPath,
+				"--host", "127.0.0.1",
+				"--port", strconv.Itoa(cfg.MlxPort),
+				"--temp", "0.2",
+				"--max-tokens", "4096",
+			)
+		}, nil)
+	}
+
 	// 3. Lambda GPU SSH tunnel (:8451 video + :8452 voice).
 	if cfg.EnableLambda {
 		if _, err := os.Stat(cfg.LambdaKey); err == nil {
@@ -611,6 +647,7 @@ func runSupervisor(cfg *Config) error {
 		c.Dir = cfg.RepoRoot
 		c.Env = append(append(os.Environ(), rigEnvFile(cfg.RepoRoot)...),
 			fmt.Sprintf("REMOTION_WORKER_URL=http://127.0.0.1:%d", defaultRemotionPort),
+			fmt.Sprintf("AIRCHECK_MLX_URL=http://127.0.0.1:%d", cfg.MlxPort),
 			fmt.Sprintf("AIRCHECK_VIDEO_ENDPOINT=http://127.0.0.1:%d", defaultVideoPort),
 			fmt.Sprintf("AIRCHECK_VOICE_ENDPOINT=http://127.0.0.1:%d", defaultVoicePort),
 		)
@@ -661,7 +698,7 @@ func runSupervisor(cfg *Config) error {
 		for {
 			otaOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/health", defaultOtaPort))
 			remOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/healthz", defaultRemotionPort))
-			mlxOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/v1/models", defaultMlxPort))
+			mlxOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/v1/models", cfg.MlxPort))
 			vidOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/health", defaultVideoPort))
 			vocOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/health", defaultVoicePort))
 
@@ -829,6 +866,7 @@ func cleanupPortListeners() {
 	patterns := []string{
 		"sync-trainer/home-daemon/ota_server.py",
 		"remotion-worker.*dist/server.js",
+		"mlx_lm.server.*--port 8082",
 		"127.0.0.1:8451:127.0.0.1:8451",
 		"cloudflared tunnel.*127.0.0.1:8445",
 	}
@@ -939,7 +977,7 @@ func printStatus(cfg *Config) int {
 	st, _ := readState(cfg.StateFile)
 	otaOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/health", defaultOtaPort))
 	remOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/healthz", defaultRemotionPort))
-	mlxOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/v1/models", defaultMlxPort))
+	mlxOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/v1/models", cfg.MlxPort))
 	vidOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/health", defaultVideoPort))
 	vocOK := checkHTTP(fmt.Sprintf("http://127.0.0.1:%d/health", defaultVoicePort))
 
@@ -961,7 +999,7 @@ func printStatus(cfg *Config) int {
 	fmt.Printf("Supervisor:     %s\n", supState)
 	fmt.Printf("OTA Server:     %s (%s)\n", okLabel(otaOK), lanURL)
 	fmt.Printf("Remotion:       %s (http://127.0.0.1:%d)\n", okLabel(remOK), defaultRemotionPort)
-	fmt.Printf("Local MLX:      %s (http://127.0.0.1:%d)\n", okLabel(mlxOK), defaultMlxPort)
+	fmt.Printf("Local MLX:      %s (http://127.0.0.1:%d)\n", okLabel(mlxOK), cfg.MlxPort)
 	fmt.Printf("Lambda Video:   %s (http://127.0.0.1:%d)\n", okLabel(vidOK), defaultVideoPort)
 	fmt.Printf("Lambda Voice:   %s (http://127.0.0.1:%d)\n", okLabel(vocOK), defaultVoicePort)
 	if alive && pubURL != "" {

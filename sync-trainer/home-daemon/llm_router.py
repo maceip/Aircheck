@@ -38,6 +38,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from bailian_quota import (
+    active_bailian_quota_block,
+    clear_bailian_quota_state,
+    default_quota_state_path,
+    record_bailian_quota_exhausted,
+)
+
 DEFAULT_BL_BIN = Path("/Users/mac/.local/bin/bl")
 DEFAULT_BAILIAN_CONFIG_PATH = Path.home() / ".bailian" / "config.json"
 
@@ -475,6 +482,7 @@ class LlmRouter:
         *,
         bl_bin: Path | str = DEFAULT_BL_BIN,
         bailian_config_path: Path | str = DEFAULT_BAILIAN_CONFIG_PATH,
+        bailian_quota_state_path: Path | str | None = None,
         default_draft_model: str | None = None,
         timeout_sec: float = 45.0,
         probe_timeout_sec: float = 0.5,
@@ -487,6 +495,12 @@ class LlmRouter:
         self._config_path: Path | None = Path(resolved_cfg) if resolved_cfg is not None else None
         self._bl_bin = Path(bl_bin)
         self._bailian_config_path = Path(bailian_config_path)
+        if bailian_quota_state_path is not None:
+            self._bailian_quota_state_path = Path(bailian_quota_state_path)
+        elif self._bailian_config_path != DEFAULT_BAILIAN_CONFIG_PATH:
+            self._bailian_quota_state_path = self._bailian_config_path.parent / "aircheck_quota_state.json"
+        else:
+            self._bailian_quota_state_path = default_quota_state_path()
         self._default_draft_model = default_draft_model
         self._timeout_sec = float(timeout_sec)
         self._probe_timeout_sec = float(probe_timeout_sec)
@@ -780,6 +794,13 @@ class LlmRouter:
                 return {
                     "available": False,
                     "detail": "missing ~/.bailian/config.json and DASHSCOPE_API_KEY/BAILIAN_API_KEY",
+                    "models": [],
+                }
+            quota_block = active_bailian_quota_block(state_path=self._bailian_quota_state_path)
+            if quota_block is not None:
+                return {
+                    "available": False,
+                    "detail": str(quota_block.get("detail") or "Bailian quota exhausted (HTTP 429)"),
                     "models": [],
                 }
             return {"available": True, "detail": "ok", "models": [DEFAULT_DRAFT_MODEL, DEFAULT_AI_ASSIST_MODEL]}
@@ -1128,13 +1149,19 @@ class LlmRouter:
                 ) from exc
 
             if proc.returncode != 0:
+                err_summary = _summarize_subprocess_error("bl text chat", proc)
+                record_bailian_quota_exhausted(
+                    err_summary,
+                    state_path=self._bailian_quota_state_path,
+                )
                 raise LlmProviderError(
-                    _summarize_subprocess_error("bl text chat", proc),
+                    err_summary,
                     provider=provider,
                     stage=stage,
                     model=model,
                     status_code=502,
                 )
+            clear_bailian_quota_state(state_path=self._bailian_quota_state_path)
             try:
                 text = _strip_think_prefix(parse_bl_chat_content(proc.stdout))
             except RuntimeError as exc:

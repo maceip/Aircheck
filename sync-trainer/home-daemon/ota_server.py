@@ -2760,6 +2760,17 @@ class RenderJobManager:
             applied_overlays = int(studio_stats["applied_overlay_count"])
         elif "render_options" in payload:
             options = StudioRenderOptions.from_payload(payload.get("render_options"))
+            raw_words = payload.get("words")
+            ffmpeg_words: list[Any] | None = raw_words if isinstance(raw_words, list) and raw_words else None
+            if ffmpeg_words is None and source_job_id:
+                align_file = self.renders_dir / f"align_{source_job_id}.json"
+                if align_file.is_file():
+                    try:
+                        loaded_align = json.loads(align_file.read_text(encoding="utf-8"))
+                        if isinstance(loaded_align, dict) and isinstance(loaded_align.get("words"), list):
+                            ffmpeg_words = loaded_align["words"]
+                    except Exception:
+                        pass
             studio_stats = compose_studio_cut(
                 src_mp4=src_mp4,
                 out_mp4=staged_out,
@@ -2773,6 +2784,7 @@ class RenderJobManager:
                 image_runner=self._plate_runner,
                 edit_ranges=edit_ranges,
                 broll_segments=broll_segments,
+                words=ffmpeg_words,
             )
             studio_stats["remotion_used"] = False
             studio_stats["renderer"] = "ffmpeg"

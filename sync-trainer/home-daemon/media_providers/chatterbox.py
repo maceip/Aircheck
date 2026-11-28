@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import inspect
 import json
 import os
 import subprocess
@@ -78,11 +79,17 @@ def generate_local(config: dict[str, Any], text: str, count: int, output_dir: Pa
     except (ImportError, AttributeError) as exc:
         raise RuntimeError(f"Installed Chatterbox does not support {variant}; use the reviewed upstream revision") from exc
     device = select_device(torch, config.get("device", "auto"))
+    params = inspect.signature(model_class.from_local).parameters
+    accepts_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
     kwargs: dict[str, Any] = {"device": device}
     if variant in ("turbo", "nano"):
-        kwargs["nano"] = variant == "nano"
+        if "nano" in params or accepts_var_kw:
+            kwargs["nano"] = variant == "nano"
+        elif variant == "nano":
+            raise RuntimeError("Installed ChatterboxTurboTTS.from_local does not support nano variant")
     elif variant == "multilingual_v3":
-        kwargs["t3_model"] = "v3"
+        if "t3_model" in params or accepts_var_kw:
+            kwargs["t3_model"] = "v3"
     model = model_class.from_local(root, **kwargs)
     model.prepare_conditionals(str(reference))
     output_dir.mkdir(parents=True, exist_ok=True)
