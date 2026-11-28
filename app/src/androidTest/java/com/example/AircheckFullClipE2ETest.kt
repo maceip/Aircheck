@@ -9,6 +9,7 @@ import android.util.Log
 import android.view.WindowManager
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -150,7 +151,7 @@ class AircheckFullClipE2ETest {
         }
 
         stage("spark_idea") {
-            composeRule.onNodeWithTag("cs_tone_explainer").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_tone_explainer").scrollIntoView().performClick()
             waitFor("tone explainer", 5_000L) { draftVm.uiState.value.tone == DraftTone.EXPLAINER }
             composeRule.onNodeWithTag("cs_type_instead").performClick()
             waitForTag("cs_typed_note_sheet")
@@ -173,21 +174,21 @@ class AircheckFullClipE2ETest {
             var detail = "no offered anchors"
             if (angles.isNotEmpty()) {
                 val first = angles.first()
-                composeRule.onNodeWithTag("cs_keep_${first.id}").performScrollTo().performClick()
+                composeRule.onNodeWithTag("cs_keep_${first.id}").scrollIntoView().performClick()
                 waitFor("anchor toggled", 5_000L) {
                     draftVm.uiState.value.document.extractedAngles.firstOrNull { it.id == first.id }?.selected != first.selected
                 }
                 detail = "toggled ${first.id}"
             }
-            composeRule.onNodeWithTag("cs_anchor_custom_input").performScrollTo().performTextReplacement(CUSTOM_ANCHOR)
+            composeRule.onNodeWithTag("cs_anchor_custom_input").scrollIntoView().performTextReplacement(CUSTOM_ANCHOR)
             Espresso.closeSoftKeyboard()
-            composeRule.onNodeWithTag("cs_anchor_custom_add").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_anchor_custom_add").scrollIntoView().performClick()
             waitFor("custom anchor", 5_000L) {
                 val d = draftVm.uiState.value.document
                 (d.extractedAngles + d.blindspotAngles).any { it.label.contains("one-time", ignoreCase = true) && it.selected }
             }
             screenshot("spark_anchors")
-            composeRule.onNodeWithTag("cs_anchors_done").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_anchors_done").scrollIntoView().performClick()
             waitFor("beats after anchors", 180_000L) {
                 val st = draftVm.uiState.value
                 composeRule.onAllNodesWithTag("cs_anchors_sheet").fetchSemanticsNodes().isEmpty() &&
@@ -197,14 +198,14 @@ class AircheckFullClipE2ETest {
         }
 
         stage("spark_beats") {
-            composeRule.onNodeWithTag("cs_beat_edit_0").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_beat_edit_0").scrollIntoView().performClick()
             waitForTag("cs_beat_editor_0")
             composeRule.onNodeWithTag("cs_beat_editor_0").performTextReplacement(EDITED_HOOK)
             Espresso.closeSoftKeyboard()
             composeRule.onNodeWithTag("cs_beat_save_0").performClick()
             waitFor("beat 0 saved", 5_000L) { draftVm.uiState.value.document.arcBeats.firstOrNull()?.text == EDITED_HOOK }
             val beat2Before = draftVm.uiState.value.document.arcBeats[2].text
-            composeRule.onNodeWithTag("cs_reroll_beat_2").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_reroll_beat_2").scrollIntoView().performClick()
             waitFor("beat 2 rewritten", 120_000L) {
                 val st = draftVm.uiState.value
                 st.rerollingBeatIndices.isEmpty() && !st.isBusy && st.document.arcBeats[2].text != beat2Before
@@ -252,12 +253,12 @@ class AircheckFullClipE2ETest {
             trimIn.performTouchInput { swipeRight(startX = centerX, endX = centerX + 24f * density) }
             waitFor("trimmed in", 5_000L) { CutTimeline.effectiveClips(persisted()).first().sourceStartMs > 0L }
             // Move the playhead with real playback, then split there.
-            composeRule.onNodeWithTag("cs_cut_well_play").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_cut_well_play").scrollIntoView().performClick()
             Thread.sleep(2_500L)
             composeRule.onNodeWithTag("cs_cut_well_play").performClick()
             composeRule.waitForIdle()
             val clipsBefore = CutTimeline.effectiveClips(persisted()).size
-            composeRule.onNodeWithTag("cs_cut_split").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_cut_split").scrollIntoView().performClick()
             waitFor("split", 5_000L) { CutTimeline.effectiveClips(persisted()).size == clipsBefore + 1 }
             screenshot("cut_trim_split")
             val clips = CutTimeline.effectiveClips(persisted())
@@ -266,10 +267,10 @@ class AircheckFullClipE2ETest {
 
         stage("cut_broll") {
             val before = persisted().brollSegments.map { it.id }.toSet()
-            composeRule.onNodeWithTag("cs_cut_add_broll").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_cut_add_broll").scrollIntoView().performClick()
             waitFor("segment added", 5_000L) { persisted().brollSegments.any { it.id !in before } }
             val segId = persisted().brollSegments.first { it.id !in before }.id
-            composeRule.onNodeWithTag("cs_broll_block_$segId").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_broll_block_$segId").scrollIntoView().performClick()
             waitForTag("cs_broll_sheet")
             composeRule.onNodeWithTag("cs_broll_sheet_prompt").performTextReplacement(BROLL_PROMPT)
             Espresso.closeSoftKeyboard()
@@ -280,12 +281,12 @@ class AircheckFullClipE2ETest {
                 seg != null && (!seg.sha.isNullOrBlank() || !seg.mediaId.isNullOrBlank()) &&
                     segId !in studioVm.uiState.value.generatingBrollSegmentIds
             }
-            composeRule.onNodeWithTag("cs_broll_framing_${CoreRenderOptions.BROLL_FRAMING_FULL}").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_broll_framing_${CoreRenderOptions.BROLL_FRAMING_FULL}").scrollIntoView().performClick()
             waitFor("framing full", 5_000L) {
                 persisted().brollSegments.first { it.id == segId }.framingOverride == CoreRenderOptions.BROLL_FRAMING_FULL
             }
             screenshot("cut_broll_sheet")
-            composeRule.onNodeWithTag("cs_broll_sheet_done").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_broll_sheet_done").scrollIntoView().performClick()
             waitFor("b-roll sheet closed", 5_000L) { composeRule.onAllNodesWithTag("cs_broll_sheet").fetchSemanticsNodes().isEmpty() }
             val seg = persisted().brollSegments.first { it.id == segId }
             "segment ${seg.durationMs} ms, media=${seg.mediaId ?: seg.sha}"
@@ -294,13 +295,13 @@ class AircheckFullClipE2ETest {
         stage("cut_transitions") {
             composeRule.onNodeWithTag("cs_cut_transitions").performClick()
             waitForTag("cs_transition_sheet")
-            composeRule.onNodeWithTag("cs_transition_tile_${ClipTransitionType.DISSOLVE.wire}").performScrollTo().performClick()
-            composeRule.onNodeWithTag("cs_transition_speed_350").performScrollTo().performClick()
-            composeRule.onNodeWithTag("cs_transition_apply_all").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_transition_tile_${ClipTransitionType.DISSOLVE.wire}").scrollIntoView().performClick()
+            composeRule.onNodeWithTag("cs_transition_speed_350").scrollIntoView().performClick()
+            composeRule.onNodeWithTag("cs_transition_apply_all").scrollIntoView().performClick()
             waitFor("dissolve on every join", 5_000L) {
                 persisted().clauses.drop(1).all { it.transitionType == ClipTransitionType.DISSOLVE.wire }
             }
-            composeRule.onNodeWithTag("cs_transition_done").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_transition_done").scrollIntoView().performClick()
             waitFor("sheet closed", 5_000L) { composeRule.onAllNodesWithTag("cs_transition_sheet").fetchSemanticsNodes().isEmpty() }
             // One join gets its own transition from its diamond.
             val join = composeRule.onAllNodes(tagPrefix("cs_cut_join_")).fetchSemanticsNodes().firstOrNull()
@@ -308,11 +309,11 @@ class AircheckFullClipE2ETest {
             if (join != null) {
                 val tag = join.config[SemanticsProperties.TestTag]
                 val idx = tag.removePrefix("cs_cut_join_").toInt()
-                composeRule.onNodeWithTag(tag).performScrollTo().performClick()
+                composeRule.onNodeWithTag(tag).scrollIntoView().performClick()
                 waitForTag("cs_transition_sheet")
-                composeRule.onNodeWithTag("cs_transition_tile_${ClipTransitionType.FADE_BLACK.wire}").performScrollTo().performClick()
+                composeRule.onNodeWithTag("cs_transition_tile_${ClipTransitionType.FADE_BLACK.wire}").scrollIntoView().performClick()
                 waitFor("join $idx dip black", 5_000L) { persisted().clauses[idx].transitionType == ClipTransitionType.FADE_BLACK.wire }
-                composeRule.onNodeWithTag("cs_transition_done").performScrollTo().performClick()
+                composeRule.onNodeWithTag("cs_transition_done").scrollIntoView().performClick()
                 detail = "dissolve on every join, dip black on join $idx"
             }
             screenshot("cut_transitions")
@@ -320,7 +321,7 @@ class AircheckFullClipE2ETest {
         }
 
         stage("cut_captions") {
-            if (!persisted().renderOptions.captions) composeRule.onNodeWithTag("cs_cut_captions").performScrollTo().performClick()
+            if (!persisted().renderOptions.captions) composeRule.onNodeWithTag("cs_cut_captions").scrollIntoView().performClick()
             waitFor("captions on", 5_000L) { persisted().renderOptions.captions }
             "captions on"
         }
@@ -348,8 +349,8 @@ class AircheckFullClipE2ETest {
             composeRule.onNodeWithTag("cs_title_input").performTextReplacement(CHYRON)
             composeRule.onNodeWithTag("cs_subline_input").performTextReplacement(SUBLINE)
             Espresso.closeSoftKeyboard()
-            composeRule.onNodeWithTag("cs_tag_${BreakingNewsStyle.DEVELOPING.wire}").performScrollTo().performClick()
-            composeRule.onNodeWithTag("cs_graphic_save").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_tag_${BreakingNewsStyle.DEVELOPING.wire}").scrollIntoView().performClick()
+            composeRule.onNodeWithTag("cs_graphic_save").scrollIntoView().performClick()
             waitFor("chyron saved", 5_000L) {
                 val o = persisted().renderOptions
                 o.chyronHeadline == CHYRON && o.chyronSubline == SUBLINE && o.breakingStyle == BreakingNewsStyle.DEVELOPING
@@ -360,7 +361,7 @@ class AircheckFullClipE2ETest {
         stage("newsroom_bug") {
             if (!persisted().renderOptions.showBrandBug) composeRule.onNodeWithTag("cs_graphic_led_bug").performClick()
             waitFor("bug on", 5_000L) { persisted().renderOptions.showBrandBug }
-            composeRule.onNodeWithTag("cs_graphic_card_bug").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_graphic_card_bug").scrollIntoView().performClick()
             waitForTag("cs_graphic_sheet_bug")
             composeRule.onNodeWithTag("cs_bug_input").performTextReplacement(BUG)
             Espresso.closeSoftKeyboard()
@@ -378,7 +379,7 @@ class AircheckFullClipE2ETest {
             composeRule.onNodeWithTag("cs_overlay_number").performTextReplacement(STAT_NUMBER)
             Espresso.closeSoftKeyboard()
             composeRule.onNodeWithTag("cs_overlay_secs_5").performClick()
-            composeRule.onNodeWithTag("cs_graphic_save").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_graphic_save").scrollIntoView().performClick()
             waitFor("stat graphic attached", 10_000L) {
                 val added = studioVm.uiState.value.savedOverlays.firstOrNull { it.id !in before }
                 added != null && added.kind == OverlayObjectKind.STAT_CALLOUT && added.id in persisted().selectedOverlayIds
@@ -390,17 +391,17 @@ class AircheckFullClipE2ETest {
         stage("backdrop") {
             composeRule.onNodeWithTag("cs_newsroom_backdrop").performClick()
             waitForTag("cs_backdrop_root")
-            composeRule.onNodeWithTag("cs_accent_cobalt").performScrollTo().performClick()
-            composeRule.onNodeWithTag("cs_light_warm").performScrollTo().performClick()
-            composeRule.onNodeWithTag("cs_look_grain").performScrollTo().performClick()
-            composeRule.onNodeWithTag("cs_look_border").performScrollTo().performClick()
+            composeRule.onNodeWithTag("cs_accent_cobalt").scrollIntoView().performClick()
+            composeRule.onNodeWithTag("cs_light_warm").scrollIntoView().performClick()
+            composeRule.onNodeWithTag("cs_look_grain").scrollIntoView().performClick()
+            composeRule.onNodeWithTag("cs_look_border").scrollIntoView().performClick()
             fun look(): NewsroomLook? = runBlocking { app.container.localRepo.getDefaultNewsroomLook() }
             waitFor("look saved", 10_000L) {
                 val l = look()
                 l != null && l.accentHex.equals(NewsroomLook.ACCENT_COBALT, ignoreCase = true) && l.light == NewsroomLook.LIGHT_WARM
             }
             val priorPlate = look()?.plateId
-            composeRule.onNodeWithTag("cs_backdrop_prompt").performScrollTo().performTextReplacement(BACKDROP_PROMPT)
+            composeRule.onNodeWithTag("cs_backdrop_prompt").scrollIntoView().performTextReplacement(BACKDROP_PROMPT)
             Espresso.closeSoftKeyboard()
             composeRule.onNodeWithTag("cs_backdrop_generate").performClick()
             waitFor("backdrop generated", 15 * 60_000L) {
@@ -510,6 +511,16 @@ class AircheckFullClipE2ETest {
 
     private fun waitForTag(tag: String, timeoutMs: Long = 10_000L) =
         waitFor(tag, timeoutMs) { composeRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
+
+    /** Scrolls the node into view when it sits in a scrollable parent; sheets that fit need no scroll. */
+    private fun SemanticsNodeInteraction.scrollIntoView(): SemanticsNodeInteraction {
+        try {
+            performScrollTo()
+        } catch (e: AssertionError) {
+            if (e.message?.contains("no parent layout with a Scroll") != true) throw e
+        }
+        return this
+    }
 
     private fun tagPrefix(prefix: String) = SemanticsMatcher("testTag starts with $prefix") {
         it.config.getOrElseNullable(SemanticsProperties.TestTag) { null }?.startsWith(prefix) == true
