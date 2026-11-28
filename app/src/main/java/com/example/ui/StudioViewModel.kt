@@ -1843,6 +1843,14 @@ class StudioViewModel internal constructor(
         }
     }
 
+    /** Cut's aspect key: `9:16` portrait or `16:9` landscape for the next render, with undo. */
+    fun setCoreAspect(aspect: String) {
+        require(aspect == CoreRenderOptions.ASPECT_VERTICAL || aspect == CoreRenderOptions.ASPECT_HORIZONTAL) {
+            "Unsupported aspect $aspect"
+        }
+        updateRenderOptions("Aspect $aspect") { it.copy(aspect = aspect) }
+    }
+
     private fun updateRenderOptions(
         label: String = "Render setting",
         transform: (CoreRenderOptions) -> CoreRenderOptions

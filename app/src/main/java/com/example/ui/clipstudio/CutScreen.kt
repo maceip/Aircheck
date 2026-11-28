@@ -30,6 +30,8 @@ import androidx.compose.material.icons.automirrored.sharp.Undo
 import androidx.compose.material.icons.sharp.Add
 import androidx.compose.material.icons.sharp.ClosedCaption
 import androidx.compose.material.icons.sharp.ContentCut
+import androidx.compose.material.icons.sharp.CropLandscape
+import androidx.compose.material.icons.sharp.CropPortrait
 import androidx.compose.material.icons.sharp.Layers
 import androidx.compose.material.icons.sharp.Movie
 import androidx.compose.material.icons.sharp.Pause
@@ -105,7 +107,7 @@ import kotlinx.coroutines.delay
  * - AcDisplay player (drag grip resizes it 220–470dp), flat play key over the video.
  * - AcDisplay timeline: VOICE clips with trim brackets and ◆ transition joins, B-ROLL blocks you
  *   drag / resize / tap, read-only GFX lane showing when each graphic is on screen.
- * - Media well: play, split at the playhead, add b-roll at the playhead, captions.
+ * - Media well: play, split at the playhead, add b-roll at the playhead, aspect (9:16 / 16:9), captions.
  * - Bottom: overlays key (Newsroom), blue-icon transitions key (all joins), the one primary key.
  *   Renders start only here.
  */
@@ -379,6 +381,20 @@ fun CutScreen(
                         modifier = Modifier
                             .weight(1f)
                             .testTag("cs_cut_add_broll")
+                    )
+                    val isVertical = opts.aspect == CoreRenderOptions.ASPECT_VERTICAL
+                    // Two-state choice, not on/off: no LED; the caption names the current aspect.
+                    AcMediaKey(
+                        icon = if (isVertical) Icons.Sharp.CropPortrait else Icons.Sharp.CropLandscape,
+                        contentDescription = if (isVertical) "Aspect 9:16, switch to 16:9" else "Aspect 16:9, switch to 9:16",
+                        caption = if (isVertical) "9:16" else "16:9",
+                        onClick = {
+                            vm.setCoreAspect(if (isVertical) CoreRenderOptions.ASPECT_HORIZONTAL else CoreRenderOptions.ASPECT_VERTICAL)
+                        },
+                        size = 56.dp,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cs_cut_aspect")
                     )
                     AcMediaKey(
                         icon = Icons.Sharp.ClosedCaption,

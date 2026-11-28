@@ -10,6 +10,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -594,9 +596,27 @@ class StudioOverhaulE2ETest {
         onNodeWithTag("cs_cut_pipeline_strip").assertIsDisplayed()
         onNodeWithTag("cs_cut_frame_vertical", useUnmergedTree = true).assertIsDisplayed()
         onNodeWithTag("cs_gfx_chyron", useUnmergedTree = true).assertExists()
-        // Removed by the approved Cut mockup: words/b-roll tabs, zoom, trim-pauses and aspect keys, B-roll studio.
-        listOf("cs_cut_mode_transcript", "cs_cut_mode_timeline", "cs_cut_punch_in", "cs_cut_strip_silence", "cs_cut_aspect", "cs_cut_broll_studio")
+        // Removed by the approved Cut mockup: words/b-roll tabs, zoom, trim-pauses keys, B-roll studio.
+        listOf("cs_cut_mode_transcript", "cs_cut_mode_timeline", "cs_cut_punch_in", "cs_cut_strip_silence", "cs_cut_broll_studio")
             .forEach { onAllNodesWithTag(it).assertCountEquals(0) }
+
+        // Aspect media key: caption names the current aspect; tapping persists 16:9 and reshapes the player frame, and back.
+        onNode(hasTestTag("cs_cut_aspect") and hasText("9:16")).assertExists()
+        onNodeWithTag("cs_cut_aspect").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.renderOptions.aspect == CoreRenderOptions.ASPECT_HORIZONTAL &&
+                onAllNodesWithTag("cs_cut_frame_horizontal", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() &&
+                runBlocking { app.container.localRepo.getLatestCorePipelineSession() }?.renderOptions?.aspect == CoreRenderOptions.ASPECT_HORIZONTAL
+        }
+        onAllNodesWithTag("cs_cut_frame_vertical", useUnmergedTree = true).assertCountEquals(0)
+        onNode(hasTestTag("cs_cut_aspect") and hasText("16:9")).assertExists()
+        onNodeWithTag("cs_cut_aspect").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.corePipelineSession.renderOptions.aspect == CoreRenderOptions.ASPECT_VERTICAL &&
+                onAllNodesWithTag("cs_cut_frame_vertical", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+        }
 
         // The overlays key opens Newsroom; Back returns to Cut.
         onNodeWithTag("cs_cut_look").performClick()
