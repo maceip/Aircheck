@@ -459,15 +459,18 @@ class AircheckFullClipE2ETest {
         stage("backdrop") {
             composeRule.onNodeWithTag("cs_newsroom_backdrop").performClick()
             waitForTag("cs_backdrop_root")
+            fun look(): NewsroomLook? = runBlocking { app.container.localRepo.getDefaultNewsroomLook() }
             composeRule.onNodeWithTag("cs_accent_cobalt").scrollIntoView().performClick()
             composeRule.onNodeWithTag("cs_light_warm").scrollIntoView().performClick()
-            composeRule.onNodeWithTag("cs_look_grain").scrollIntoView().performClick()
-            composeRule.onNodeWithTag("cs_look_border").scrollIntoView().performClick()
-            fun look(): NewsroomLook? = runBlocking { app.container.localRepo.getDefaultNewsroomLook() }
-            waitFor("look saved", 10_000L) {
+            waitFor("accent + light saved", 10_000L) {
                 val l = look()
                 l != null && l.accentHex.equals(NewsroomLook.ACCENT_COBALT, ignoreCase = true) && l.light == NewsroomLook.LIGHT_WARM
             }
+            // Grain and border are toggles: turn each on only if it is off, then require it saved on.
+            if (look()?.grain != true) composeRule.onNodeWithTag("cs_look_grain").scrollIntoView().performClick()
+            waitFor("grain on", 10_000L) { look()?.grain == true }
+            if (look()?.border != true) composeRule.onNodeWithTag("cs_look_border").scrollIntoView().performClick()
+            waitFor("border on", 10_000L) { look()?.border == true }
             val priorPlate = look()?.plateId
             composeRule.onNodeWithTag("cs_backdrop_prompt").scrollIntoView().performTextReplacement(BACKDROP_PROMPT)
             Espresso.closeSoftKeyboard()
@@ -479,11 +482,15 @@ class AircheckFullClipE2ETest {
             }
             screenshot("backdrop")
             val l = look()!!
+            assertTrue("accent cobalt kept", l.accentHex.equals(NewsroomLook.ACCENT_COBALT, ignoreCase = true))
+            assertTrue("warm light kept", l.light == NewsroomLook.LIGHT_WARM)
+            assertTrue("grain kept on", l.grain)
+            assertTrue("border kept on", l.border)
             composeRule.onNodeWithTag("cs_backdrop_back").performClick()
             waitForTag("cs_newsroom_root")
             composeRule.onNodeWithTag("cs_use_look").performClick()
             waitForTag("cs_cut_root")
-            "plate ${l.plateId}, grain=${l.grain}, border=${l.border}"
+            "plate ${l.plateId}, accent=${l.accentHex}, light=${l.light}, grain=${l.grain}, border=${l.border}"
         }
 
         stage("render") {
