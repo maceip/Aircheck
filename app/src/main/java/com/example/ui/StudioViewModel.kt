@@ -205,6 +205,12 @@ class StudioViewModel internal constructor(
     private val _uiState = MutableStateFlow(StudioUiState())
     val uiState: StateFlow<StudioUiState> = _uiState.asStateFlow()
 
+    /**
+     * Serializes every Studio write to Room (session and looks). Callers join this FIFO mutex
+     * before their first suspension, so writes run in call order.
+     */
+    private val studioSaveMutex = Mutex()
+
     val a2uiController: AircheckA2uiController = AircheckA2uiController(
         context = application,
         scope = viewModelScope,
@@ -712,12 +718,15 @@ class StudioViewModel internal constructor(
             localRepo.deleteNewsroomOverlay(overlayId)
             val current = _uiState.value.corePipelineSession
             if (overlayId in current.selectedOverlayIds) {
-                val updated = current.copy(
-                    selectedOverlayIds = current.selectedOverlayIds - overlayId,
-                    updatedAtMillis = System.currentTimeMillis()
-                )
-                localRepo.saveCorePipelineSession(updated)
-                _uiState.update { it.copy(corePipelineSession = updated) }
+                _uiState.update {
+                    it.copy(
+                        corePipelineSession = it.corePipelineSession.copy(
+                            selectedOverlayIds = it.corePipelineSession.selectedOverlayIds - overlayId,
+                            updatedAtMillis = System.currentTimeMillis()
+                        )
+                    )
+                }
+                persistLatestSession()
             }
         }
     }
@@ -887,9 +896,7 @@ class StudioViewModel internal constructor(
             updatedAtMillis = System.currentTimeMillis()
         )
         _uiState.update { it.copy(corePipelineSession = optimistic) }
-        viewModelScope.launch(Dispatchers.IO) {
-            localRepo.saveCorePipelineSession(optimistic)
-        }
+        persistLatestSession()
     }
 
     fun updateCoreClauseText(index: Int, updatedText: String) {
@@ -1185,7 +1192,7 @@ class StudioViewModel internal constructor(
         // Flush any in-flight Room writes (clauses, renderOptions, overlays, default look)
         // before enqueuing WorkManager so CoreStageWorker never reads stale state.
         viewModelScope.launch {
-            lookSaveMutex.withLock {
+            studioSaveMutex.withLock {
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
                     localRepo.saveCorePipelineSession(snapshotSession)
                     if (op == CoreStageWorker.OP_CUT && snapshotDefaultLook != null) {
@@ -1307,7 +1314,7 @@ class StudioViewModel internal constructor(
                 lastUndoLabel = label
             )
         }
-        viewModelScope.launch(Dispatchers.IO) { localRepo.saveCorePipelineSession(stamped) }
+        persistLatestSession()
     }
 
     // ----------------------------------------------------------------- Cut editor edits
@@ -1406,8 +1413,7 @@ class StudioViewModel internal constructor(
                 toastMessage = "Undid: ${entry.label}"
             )
         }
-        viewModelScope.launch(Dispatchers.IO) {
-            localRepo.saveCorePipelineSession(stamped)
+        persistLatestSession {
             entry.looks.forEach { look -> localRepo.saveNewsroomLook(look) }
             entry.looks.firstOrNull { it.isDefault }?.let { def -> localRepo.setDefaultNewsroomLook(def.id) }
         }
@@ -1861,7 +1867,21 @@ class StudioViewModel internal constructor(
     // Clip Studio v4: 04 NEWSROOM looks
     // =========================================================================
 
-    private val lookSaveMutex = Mutex()
+
+    /**
+     * Persists the session as it is when the save runs, not as it was when the edit was made, so
+     * two quick edits can never land out of order and the latest state always wins.
+     */
+    private fun persistLatestSession(alsoSave: suspend () -> Unit = {}) {
+        // UNDISPATCHED: the save joins the mutex queue on the caller's thread, in call order, then
+        // writes on IO without waiting for the main thread.
+        viewModelScope.launch(Dispatchers.IO, start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            studioSaveMutex.withLock {
+                localRepo.saveCorePipelineSession(_uiState.value.corePipelineSession)
+                alsoSave()
+            }
+        }
+    }
 
     fun createNewsroomLook(name: String): String {
         val look = NewsroomLook(
@@ -1870,7 +1890,7 @@ class StudioViewModel internal constructor(
         )
         _uiState.update { it.copy(newsroomLooks = listOf(look) + it.newsroomLooks) }
         viewModelScope.launch {
-            lookSaveMutex.withLock {
+            studioSaveMutex.withLock {
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
                     localRepo.saveNewsroomLook(look)
                 }
@@ -1889,7 +1909,7 @@ class StudioViewModel internal constructor(
         )
         _uiState.update { st -> st.copy(newsroomLooks = st.newsroomLooks.map { if (it.id == clamped.id) clamped else it }) }
         viewModelScope.launch {
-            lookSaveMutex.withLock {
+            studioSaveMutex.withLock {
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
                     localRepo.saveNewsroomLook(clamped)
                 }
@@ -1907,7 +1927,7 @@ class StudioViewModel internal constructor(
         )
         _uiState.update { it.copy(newsroomLooks = listOf(copy) + it.newsroomLooks) }
         viewModelScope.launch {
-            lookSaveMutex.withLock {
+            studioSaveMutex.withLock {
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
                     localRepo.saveNewsroomLook(copy)
                 }
@@ -1919,7 +1939,7 @@ class StudioViewModel internal constructor(
     fun setDefaultNewsroomLook(id: String) {
         _uiState.update { st -> st.copy(newsroomLooks = st.newsroomLooks.map { it.copy(isDefault = it.id == id) }) }
         viewModelScope.launch {
-            lookSaveMutex.withLock {
+            studioSaveMutex.withLock {
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
                     localRepo.setDefaultNewsroomLook(id)
                 }
@@ -1980,7 +2000,7 @@ class StudioViewModel internal constructor(
             )
         }
         viewModelScope.launch {
-            lookSaveMutex.withLock {
+            studioSaveMutex.withLock {
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
                     localRepo.saveNewsroomLook(clamped)
                     localRepo.setDefaultNewsroomLook(clamped.id)

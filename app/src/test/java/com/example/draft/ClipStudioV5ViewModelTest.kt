@@ -857,6 +857,38 @@ class ClipStudioV5ViewModelTest {
     }
 
     @Test
+    fun backToBackStudioEdits_persistInOrder_latestStateWins() = runTest {
+        val srv = newHttpServer()
+        srv.createContext("/health") { ex -> respondJson(ex, 200, """{"status":"ok"}""") }
+        srv.createContext("/v1/renders") { ex -> respondJson(ex, 200, """{"renders":[]}""") }
+        srv.start()
+        server = srv
+        val studioVm = buildStudioVm("http://127.0.0.1:${srv.address.port}")
+        waitFor { studioVm.uiState.value.projects.isNotEmpty() }
+        studioVm.openStoryInCorePipeline(plainText = "One line. Two line.", headline = "Order")
+        waitFor { studioVm.uiState.value.corePipelineSession.clauses.size == 2 }
+        val sessionId = studioVm.uiState.value.corePipelineSession.id
+
+        // Fire edits back to back without waiting: the saved session must end on the last one.
+        repeat(25) { i ->
+            studioVm.updateChyronSubline("subline $i")
+            studioVm.setCoreCaptions(i % 2 == 0)
+        }
+        assertEquals("subline 24", studioVm.uiState.value.corePipelineSession.renderOptions.chyronSubline)
+        waitFor(timeoutMs = 20_000L) {
+            val saved = runBlocking { localRepo.getLatestCorePipelineSession() }
+            saved?.id == sessionId && saved.renderOptions.chyronSubline == "subline 24" && saved.renderOptions.captions
+        }
+        // No earlier save may land afterwards and roll it back.
+        Thread.sleep(500)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        val final = runBlocking { localRepo.getLatestCorePipelineSession() }!!
+        assertEquals("subline 24", final.renderOptions.chyronSubline)
+        assertTrue(final.renderOptions.captions)
+        assertEquals("subline 24", studioVm.uiState.value.corePipelineSession.renderOptions.chyronSubline)
+    }
+
+    @Test
     fun openStoryInCorePipeline_sanitizesCardPromptChrome_truncatesAtWordBoundary_andCreatesDistinctCardPerStory() = runTest {
         val studioVm = buildStudioVm("http://127.0.0.1:9")
         waitFor { studioVm.uiState.value.projects.isNotEmpty() }
