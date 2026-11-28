@@ -34,10 +34,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -121,8 +123,9 @@ fun PulseLine(
             state = PulseUiState.Idle
             return@LaunchedEffect
         }
-        delay(PULSE_DEBOUNCE_MS)
+        // Drop the old score right away so a stale boost can't be applied to new text.
         state = PulseUiState.Checking
+        delay(PULSE_DEBOUNCE_MS)
         state = runPulse(container, text.trim(), field)
     }
 
@@ -423,6 +426,8 @@ private fun NameDropSheet(draftText: String, onWeave: (String) -> Unit, onClose:
                             onClick = {
                                 busy = true
                                 error = null
+                                result = null
+                                firstLookNote = null
                                 picked = emptySet()
                                 scope.launch {
                                     val res = container.pulseClient.resolve(input)
@@ -541,6 +546,7 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val uri = LocalUriHandler.current
+    val clipboard = LocalClipboardManager.current
     var areasText by rememberSaveable { mutableStateOf("") }
     var areasNote by remember { mutableStateOf<String?>(null) }
     var list by remember { mutableStateOf<FirstLookList?>(null) }
@@ -580,11 +586,19 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
         }
     }
 
+    var saving by remember { mutableStateOf(false) }
+    // One save at a time: each edit builds on the list the rig last confirmed, and keys stay
+    // disabled until that save lands, so two quick edits can't overwrite each other.
     fun saveList(people: List<FirstLookPerson>) {
+        if (saving) return
+        saving = true
+        val before = list
+        list = before?.copy(people = people)
         scope.launch {
             container.pulseClient.saveFirstLook(people)
                 .onSuccess { list = it; listNote = null }
-                .onFailure { listNote = "Couldn't save: ${it.message}" }
+                .onFailure { list = before; listNote = "Couldn't save: ${it.message}" }
+            saving = false
         }
     }
 
@@ -659,12 +673,14 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
                             }
                             AcKey(
                                 label = if (p.on) "on" else "off",
+                                enabled = !saving,
                                 size = AcKeySize.Small,
                                 selected = p.on,
                                 onClick = { saveList(current.people.map { if (it.id == p.id) it.copy(on = !it.on) else it }) }
                             )
                             AcKey(
                                 label = "remove",
+                                enabled = !saving,
                                 size = AcKeySize.Small,
                                 onClick = { saveList(current.people.filterNot { it.id == p.id }) }
                             )
@@ -685,7 +701,7 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
                     AcKey(
                         label = "add person",
                         size = AcKeySize.Small,
-                        enabled = current != null && newAddress.isNotBlank(),
+                        enabled = current != null && newAddress.isNotBlank() && !saving,
                         onClick = {
                             val people = current?.people.orEmpty() + FirstLookPerson(platform = newPlatform, address = newAddress.trim())
                             newAddress = ""
@@ -729,7 +745,10 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
                                 }
                                 val link = res.openUrl
                                 if (res.status == "needs_you" && link != null) {
-                                    AcKey(label = "open", size = AcKeySize.Small, onClick = { runCatching { uri.openUri(link) } })
+                                    AcKey(label = "open", size = AcKeySize.Small, onClick = {
+                                        res.copyText?.let { clipboard.setText(AnnotatedString(it)) }
+                                        runCatching { uri.openUri(link) }
+                                    })
                                 }
                             }
                         }
@@ -743,5 +762,5 @@ private fun PulseSettingsSheet(onClose: () -> Unit) {
 private fun deliveryLabel(p: FirstLookPerson, bskyReady: Boolean): String = when (p.platform) {
     "bsky" -> if (bskyReady) "Bluesky · sends DM automatically" else "Bluesky · needs app password on the rig"
     "email" -> "Email · opens your mail app"
-    else -> "X · opens DM, you tap send"
+    else -> "X · opens their profile, you send"
 }

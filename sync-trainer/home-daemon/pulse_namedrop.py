@@ -259,7 +259,9 @@ def heat_ratio(sources: list[dict[str, Any]]) -> float | None:
     if not ratios:
         return None
     ratios.sort()
-    return round(ratios[len(ratios) // 2], 3)
+    mid = len(ratios) // 2
+    median = ratios[mid] if len(ratios) % 2 else (ratios[mid - 1] + ratios[mid]) / 2.0
+    return round(median, 3)
 
 
 class BskySession:
@@ -436,8 +438,13 @@ class PulseService:
         held = [c for c in claims if c["kind"] == "allegation" and c["status"] not in ("sourced", "cited")]
 
         wiki_term = next((e["corrected_name"] or e["name"] for e in entities if e["kind"] in ("person", "org")), query)
-        sources = [heat_gdelt(query, fetch, now), heat_hn(query, fetch, now),
-                   heat_wiki(wiki_term, fetch, now), heat_bsky(query, fetch, now, self.bsky)]
+        if query:
+            sources = [heat_gdelt(query, fetch, now), heat_hn(query, fetch, now),
+                       heat_wiki(wiki_term, fetch, now), heat_bsky(query, fetch, now, self.bsky)]
+        else:
+            # Searching an empty query would count site-wide activity as this idea's heat.
+            sources = [_source_result(n, ok=False, detail="no topic words to search for")
+                       for n in ("news", "hn", "wiki", "bsky")]
         ratio = heat_ratio(sources)
 
         areas = self.get_areas()["areas"]
@@ -725,8 +732,13 @@ class NameDropService:
             if platform == "bsky":
                 results.append({**base, **self._send_bsky_dm(address, message)})
             elif platform == "x":
-                results.append({**base, "status": "needs_you", "detail": "X DMs are sent by you (paid API not used)",
-                                "open_url": "https://x.com/messages/compose?" + urllib.parse.urlencode({"text": message})})
+                handle = address.lstrip("@")
+                # X DM links need a numeric user id we don't have (no X API), so open this person's
+                # profile and hand over the message to paste.
+                results.append({**base, "status": "needs_you",
+                                "detail": f"opens @{handle} on X; tap Message and paste (message copied)",
+                                "open_url": "https://x.com/" + urllib.parse.quote(handle, safe=""),
+                                "copy_text": message})
             else:
                 results.append({**base, "status": "needs_you", "detail": "send from your mail app",
                                 "open_url": "mailto:" + urllib.parse.quote(address) + "?" +

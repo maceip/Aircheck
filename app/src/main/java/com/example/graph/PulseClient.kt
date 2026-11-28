@@ -119,7 +119,8 @@ data class FirstLookSendResult(
     val address: String = "",
     val status: String = "",
     val detail: String = "",
-    @SerialName("open_url") val openUrl: String? = null
+    @SerialName("open_url") val openUrl: String? = null,
+    @SerialName("copy_text") val copyText: String? = null
 )
 
 @Serializable
@@ -176,15 +177,13 @@ class PulseClient(
                 val rigUrl = profileStore.current().tailscaleRigUrl.trim().ifBlank { DEFAULT_MAC_RIG_LAN_URL }
                 val client = draftApiClientProvider(rigUrl)
                 val base = client.resolveActiveBaseUrl(forceRefresh = false)
-                val reqBody = body?.toRequestBody(JSON_MEDIA_TYPE)
-                val req = Request.Builder().url(base + path).method(method, reqBody).build()
-                okHttpClient.newCall(req).execute().use { resp ->
-                    val raw = resp.body?.string().orEmpty()
-                    if (!resp.isSuccessful) {
-                        val detail = DraftApiClient.parseServerErrorInfoStatic(json, raw).detail
-                        return@withContext Result.failure(IOException("$method $path: HTTP ${resp.code}${if (detail.isNotBlank()) ": $detail" else ""}"))
-                    }
-                    Result.success(json.decodeFromString(serializer, raw))
+                try {
+                    execute(base, method, path, body, serializer)
+                } catch (e: IOException) {
+                    // The cached rig URL may be stale (e.g. USB unplugged); probe again once.
+                    val refreshed = client.resolveActiveBaseUrl(forceRefresh = true)
+                    if (refreshed == base) throw e
+                    execute(refreshed, method, path, body, serializer)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -192,6 +191,21 @@ class PulseClient(
                 Result.failure(e)
             }
         }
+
+    private fun <T> execute(base: String, method: String, path: String, body: String?, serializer: KSerializer<T>): Result<T> {
+        val req = Request.Builder().url(base + path).method(method, body?.toRequestBody(JSON_MEDIA_TYPE)).build()
+        okHttpClient.newCall(req).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val detail = DraftApiClient.parseServerErrorInfoStatic(json, raw).detail
+                return Result.failure(HttpFailure("$method $path: HTTP ${resp.code}${if (detail.isNotBlank()) ": $detail" else ""}"))
+            }
+            return Result.success(json.decodeFromString(serializer, raw))
+        }
+    }
+
+    /** A rig HTTP error (not a transport failure), so it is not retried on another URL. */
+    class HttpFailure(message: String) : Exception(message)
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()

@@ -271,3 +271,22 @@ def test_cited_link_in_text_releases_boosts_without_news_lookup(tmp_path: Path) 
     assert out["claims"][0]["sources"][0]["url"] == "https://news.example/story-1"
     assert out["boosts_held"] is False and out["boosts"][0]["kind"] == "hook"
     assert not any("artlist" in url for url, _ in fetch.calls)
+
+
+def test_heat_ratio_averages_two_middle_values_and_empty_query_is_unmeasured(tmp_path: Path) -> None:
+    ok = lambda c, a: {"ok": True, "count_24h": c, "avg_7d": a}
+    assert pn.heat_ratio([ok(1, 2), ok(4, 2)]) == 1.25
+    assert pn.heat_ratio([ok(1, 2), ok(4, 2), ok(3, 1)]) == 2.0
+    fetch = FakeFetch({"hn.algolia": {"nbHits": 999}})
+    svc = pn.PulseService(tmp_path, llm_router=None, fetch=fetch, bsky=pn.BskySession("", ""), clock=lambda: NOW)
+    out = svc.score({"text": "this is really about you and me"})
+    assert out["query"] == "" and out["heat"]["ratio"] is None
+    assert all(not s["ok"] for s in out["heat"]["sources"]) and fetch.calls == []
+
+
+def test_x_first_look_opens_that_persons_profile(tmp_path: Path) -> None:
+    svc = pn.NameDropService(tmp_path, fetch=FakeFetch({}), bsky=pn.BskySession("", ""), clock=lambda: NOW)
+    svc.put_first_look({"people": [{"platform": "x", "address": "@pal_one"}, {"platform": "x", "address": "pal2"}]})
+    out = svc.send_first_look({"text": "hi"})
+    assert [r["open_url"] for r in out["results"]] == ["https://x.com/pal_one", "https://x.com/pal2"]
+    assert out["results"][0]["copy_text"] == "hi"
