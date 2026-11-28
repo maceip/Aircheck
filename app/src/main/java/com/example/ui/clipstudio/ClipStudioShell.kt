@@ -52,7 +52,6 @@ fun ClipStudioShell(
     screen: ClipStudioScreen,
     onScreen: (ClipStudioScreen) -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenOverlayBuilder: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -213,7 +212,6 @@ fun ClipStudioShell(
                         navHistory = navHistory.filterNot { it == ClipStudioScreen.NEWSROOM }
                         onScreen(ClipStudioScreen.CUT)
                     },
-                    onOpenOverlayBuilder = onOpenOverlayBuilder,
                     renderGlobalOverlays = false
                 )
                 ClipStudioScreen.BROLL_STUDIO -> BrollStudioScreen(

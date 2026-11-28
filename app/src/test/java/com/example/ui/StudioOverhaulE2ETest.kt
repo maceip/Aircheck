@@ -275,8 +275,7 @@ class StudioOverhaulE2ETest {
                     studioVm = studioVm,
                     screen = screen,
                     onScreen = { screen = it },
-                    onOpenSettings = {},
-                    onOpenOverlayBuilder = {}
+                    onOpenSettings = {}
                 )
             }
         }
@@ -344,8 +343,7 @@ class StudioOverhaulE2ETest {
                     state = st,
                     vm = studioVm,
                     onBack = {},
-                    onTestOnClip = {},
-                    onOpenOverlayBuilder = {}
+                    onTestOnClip = {}
                 )
             }
         }
@@ -543,8 +541,7 @@ class StudioOverhaulE2ETest {
                     studioVm = studioVm,
                     screen = activeScreen,
                     onScreen = { activeScreen = it },
-                    onOpenSettings = {},
-                    onOpenOverlayBuilder = {}
+                    onOpenSettings = {}
                 )
             }
         }

@@ -326,8 +326,7 @@ class ClipStudioV5ComposeTest {
                     studioVm = studioVm,
                     screen = screen,
                     onScreen = { screen = it },
-                    onOpenSettings = {},
-                    onOpenOverlayBuilder = {}
+                    onOpenSettings = {}
                 )
             }
         }
@@ -565,8 +564,7 @@ class ClipStudioV5ComposeTest {
                     studioVm = studioVm,
                     screen = screen,
                     onScreen = { screen = it },
-                    onOpenSettings = {},
-                    onOpenOverlayBuilder = {}
+                    onOpenSettings = {}
                 )
             }
         }
@@ -717,8 +715,7 @@ class ClipStudioV5ComposeTest {
                     studioVm = studioVm,
                     screen = screen,
                     onScreen = { screen = it },
-                    onOpenSettings = {},
-                    onOpenOverlayBuilder = {}
+                    onOpenSettings = {}
                 )
             }
         }

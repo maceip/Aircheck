@@ -31,7 +31,6 @@ import com.example.ui.clipstudio.ClipStudioScreen
 import com.example.ui.clipstudio.ClipStudioShell
 import com.example.ui.draft.DraftDeckViewModel
 import com.example.ui.screens.ClipReviewScreen
-import com.example.ui.screens.NewsroomStudioScreen
 import com.example.ui.screens.SystemDeckSheet
 import com.example.ui.theme.AircheckTheme
 import com.example.ui.design.AcTokens
@@ -123,8 +122,6 @@ class MainActivity : ComponentActivity() {
  * - Default surface: Clip Studio v4 (`01 SPARK` · `02 SCRIPT` · `03 CUT` + `04 NEWSROOM` looks).
  * - Single canonical video pipeline (Clip Studio: Spark -> Script -> Cut, driven by CoreStageWorker):
  *   `01 TTS -> 02 Iterate Story -> 03 Speech to Talking Head -> 04 Chop into B-Roll -> 05 Final Review`.
- * - Separate optional screens kept outside the main flow:
- *   - `NewsroomStudioScreen` (savable AI-generated Jetpack A2UI overlays for news briefs)
  */
 @Composable
 fun AircheckApp(
@@ -136,7 +133,6 @@ fun AircheckApp(
     val context = LocalContext.current
 
     var showSettingsModal by rememberSaveable { mutableStateOf(false) }
-    var showNewsroomStudioModal by rememberSaveable { mutableStateOf(false) }
     var activeReviewClipId by rememberSaveable { mutableStateOf<String?>(null) }
     var clipStudioScreen by rememberSaveable { mutableStateOf(ClipStudioScreen.SPARK) }
 
@@ -153,7 +149,6 @@ fun AircheckApp(
     LaunchedEffect(studioState.openCorePipelineEvent) {
         if (studioState.openCorePipelineEvent) {
             showSettingsModal = false
-            showNewsroomStudioModal = false
             clipStudioScreen = ClipStudioScreen.CUT
             studioViewModel.consumeOpenCorePipelineEvent()
         }
@@ -169,9 +164,8 @@ fun AircheckApp(
 
     AircheckTheme {
         // Never allow system Back to exit Aircheck while inside Settings, Overlays, or Clip Review.
-        BackHandler(enabled = showNewsroomStudioModal) { showNewsroomStudioModal = false }
-        BackHandler(enabled = !showNewsroomStudioModal && showSettingsModal) { showSettingsModal = false }
-        BackHandler(enabled = !showNewsroomStudioModal && !showSettingsModal && !activeReviewClipId.isNullOrBlank()) {
+        BackHandler(enabled = showSettingsModal) { showSettingsModal = false }
+        BackHandler(enabled = !showSettingsModal && !activeReviewClipId.isNullOrBlank()) {
             activeReviewClipId = null
         }
 
@@ -181,17 +175,6 @@ fun AircheckApp(
                 .background(AcTokens.Chassis)
         ) {
             when {
-                showNewsroomStudioModal -> {
-                    NewsroomStudioScreen(
-                        uiState = studioState,
-                        a2uiController = studioViewModel.a2uiController,
-                        onDeleteSavedOverlay = studioViewModel::deleteSavedNewsroomOverlay,
-                        onSelectBreakingStyle = studioViewModel::setCoreBreakingStyle,
-                        onGenerateOverlaySet = { studioViewModel.generateNewsroomOverlaySet() },
-                        onBack = { showNewsroomStudioModal = false }
-                    )
-                }
-
                 showSettingsModal -> {
                     SystemDeckSheet(
                         uiState = studioState,
@@ -278,8 +261,7 @@ fun AircheckApp(
                         studioVm = studioViewModel,
                         screen = clipStudioScreen,
                         onScreen = { clipStudioScreen = it },
-                        onOpenSettings = { showSettingsModal = true },
-                        onOpenOverlayBuilder = { showNewsroomStudioModal = true }
+                        onOpenSettings = { showSettingsModal = true }
                     )
                 }
             }

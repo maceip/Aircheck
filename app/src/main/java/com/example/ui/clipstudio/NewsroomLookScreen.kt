@@ -116,7 +116,6 @@ fun NewsroomLookScreen(
     vm: StudioViewModel,
     onBack: () -> Unit,
     onTestOnClip: (lookId: String) -> Unit = {},
-    onOpenOverlayBuilder: () -> Unit = {},
     modifier: Modifier = Modifier,
     renderGlobalOverlays: Boolean = true
 ) {
@@ -298,8 +297,7 @@ fun NewsroomLookScreen(
                     1 -> OverlaysManagerTab(
                         state = state,
                         vm = vm,
-                        attachedOverlays = attachedOverlays,
-                        onOpenOverlayBuilder = onOpenOverlayBuilder
+                        attachedOverlays = attachedOverlays
                     )
                     2 -> StudioLookTab(
                         state = state,
@@ -822,8 +820,7 @@ private fun LabelsAndChyronTab(
 private fun OverlaysManagerTab(
     state: StudioUiState,
     vm: StudioViewModel,
-    attachedOverlays: List<SavedNewsroomOverlay>,
-    onOpenOverlayBuilder: () -> Unit
+    attachedOverlays: List<SavedNewsroomOverlay>
 ) {
     val session = state.corePipelineSession
     val allOverlays = state.savedOverlays

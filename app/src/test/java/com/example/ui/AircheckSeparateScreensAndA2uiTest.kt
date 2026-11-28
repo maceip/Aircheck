@@ -34,7 +34,6 @@ import com.example.ui.a2ui.createStockAircheckA2uiCatalog
 import com.example.ui.clipstudio.CutScreen
 import com.example.ui.clipstudio.NewsroomLookScreen
 import com.example.ui.draft.DraftDeckViewModel
-import com.example.ui.screens.NewsroomStudioScreen
 import com.example.ui.theme.AircheckTheme
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
@@ -126,208 +125,6 @@ class AircheckSeparateScreensAndA2uiTest {
     }
 
     @Test
-    fun newsroomOverlayPage_generatesAiOverlay_savesToRoom_andAttachesOptionallyInStage4() = runComposeUiTest {
-        val remotionInstallBodies = CopyOnWriteArrayList<String>()
-        val aiAssistBodies = CopyOnWriteArrayList<String>()
-        val chopBodies = CopyOnWriteArrayList<String>()
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.createContext("/v1/jobs/task_") { serveRigTask(it) }
-        val portPlaceholder = AtomicInteger(0)
-
-        server.createContext("/health") { exchange ->
-            val resp = """{"status":"ok","lora_version":1,"render_bridge_available":true}"""
-                .toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, resp.size.toLong())
-            exchange.responseBody.use { it.write(resp) }
-        }
-
-        server.createContext("/v1/remotion/install") { exchange ->
-            remotionInstallBodies.add(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
-            val resp = """
-                {
-                  "status": "installed",
-                  "remotion_enabled": true,
-                  "remotion_version": "4.0.242",
-                  "package_provider_id": "mac_rig_remotion",
-                  "user_request": "Please install Remotion for live news pop-ups and B-roll",
-                  "enable_broll_popups": true
-                }
-            """.trimIndent().toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, resp.size.toLong())
-            exchange.responseBody.use { it.write(resp) }
-        }
-
-        server.createContext("/v1/ai-assist") { exchange ->
-            aiAssistBodies.add(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
-            val resp = """
-                {
-                  "kind": "STAT_CALLOUT",
-                  "headline": "GRID CAPACITY +42%",
-                  "subline": "ERCOT BATTERY DISPATCH REPORT",
-                  "callout_stat": "+42% MW",
-                  "duration_sec": 4
-                }
-            """.trimIndent().toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, resp.size.toLong())
-            exchange.responseBody.use { it.write(resp) }
-        }
-
-        server.createContext("/v1/core/chop-broll") { exchange ->
-            chopBodies.add(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
-            val p = portPlaceholder.get()
-            val resp = """
-                {
-                  "job_id": "brief_broll_02",
-                  "status": "READY",
-                  "video_url": "http://127.0.0.1:$p/v1/renders/brief_broll_02.mp4",
-                  "duration_ms": 2000,
-                  "broll_cut_count": 1,
-                  "applied_overlay_count": 1
-                }
-            """.trimIndent().toByteArray(Charsets.UTF_8)
-            respondMaybeAsync(exchange, resp)
-        }
-
-        server.createContext("/v1/renders/") { exchange ->
-            val bytes = "MP4_BRIEF_WITH_SAVED_OVERLAY".toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", "video/mp4")
-            exchange.sendResponseHeaders(200, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
-        }
-
-        server.start()
-        httpServer = server
-        val port = server.address.port
-        portPlaceholder.set(port)
-
-        runBlocking {
-            app.container.profileStore.setPhoneOnlyVoiceMode(false)
-            app.container.profileStore.setTailscaleRigUrl("http://127.0.0.1:$port")
-        }
-
-        var studioVmRef: StudioViewModel? = null
-        setContent {
-            val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
-            val state = studioVm.uiState.collectAsStateWithLifecycle().value
-            AircheckTheme {
-                NewsroomStudioScreen(
-                    uiState = state,
-                    a2uiController = studioVm.a2uiController,
-                    onDeleteSavedOverlay = studioVm::deleteSavedNewsroomOverlay,
-                    onBack = {}
-                )
-            }
-        }
-        val studioVm = checkNotNull(studioVmRef)
-
-        // If Remotion was not used yet in this test process, verify install prompt -> transition
-        if (studioVm.uiState.value.isRemotionUnused) {
-            waitUntil(timeoutMillis = 5_000) {
-                Shadows.shadowOf(Looper.getMainLooper()).idle()
-                onAllNodesWithText("Remotion Video Overlays Not Installed Yet")
-                    .fetchSemanticsNodes().isNotEmpty()
-            }
-            val promptInput = onNode(hasSetTextAction())
-            promptInput.performScrollTo()
-            promptInput.performTextClearance()
-            promptInput.performTextInput("Please install Remotion for live news pop-ups and B-roll")
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-
-            onNodeWithText("Ask to Install Remotion")
-                .performScrollTo()
-                .performClick()
-
-            waitUntil(timeoutMillis = 5_000) {
-                Shadows.shadowOf(Looper.getMainLooper()).idle()
-                remotionInstallBodies.isNotEmpty() &&
-                    onAllNodesWithText("Create Savable News Brief Overlay")
-                        .fetchSemanticsNodes().isNotEmpty()
-            }
-        } else {
-            waitUntil(timeoutMillis = 5_000) {
-                Shadows.shadowOf(Looper.getMainLooper()).idle()
-                onAllNodesWithText("Create Savable News Brief Overlay")
-                    .fetchSemanticsNodes().isNotEmpty()
-            }
-        }
-
-        // Generate AI Overlay fields via the stock Jetpack A2UI "Generate AI Overlay" button
-        val topicField = onAllNodes(hasSetTextAction())[0]
-        topicField.performScrollTo()
-        topicField.performTextInput("Texas battery storage dispatched 42% more power during peak evening load")
-        Shadows.shadowOf(Looper.getMainLooper()).idle()
-        onNodeWithText("Generate AI Overlay")
-            .performScrollTo()
-            .performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            aiAssistBodies.isNotEmpty() &&
-                onAllNodesWithText("GRID CAPACITY +42%").fetchSemanticsNodes().isNotEmpty()
-        }
-
-        // Click "Save Overlay for News Briefs" on the stock Jetpack A2UI surface
-        onNodeWithText("Save Overlay for News Briefs")
-            .performScrollTo()
-            .performClick()
-
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            studioVm.uiState.value.savedOverlays.any { it.headline == "GRID CAPACITY +42%" }
-        }
-        val savedOverlay = studioVm.uiState.value.savedOverlays.first { it.headline == "GRID CAPACITY +42%" }
-        assertTrue(savedOverlay.a2uiComponentsJson.contains("\"component\":\"Card\""))
-        assertEquals("ERCOT BATTERY DISPATCH REPORT", savedOverlay.subline)
-
-        // Verify optional attachment in Stage 4 of Core Pipeline
-        val headAsset = runBlocking {
-            app.container.casStore.putBytes("HEAD_MP4_BYTES".toByteArray(Charsets.UTF_8), "mp4")
-        }
-        val seeded = runBlocking {
-            val base = app.container.corePipelineCoordinator.seedSessionFromStory(
-                rawStoryText = "Battery dispatch set an evening record. Grid frequency held steady.",
-                headline = "GRID BRIEF"
-            )
-            val stage4Session = base.copy(
-                stage = CorePipelineStage.CHOP_INTO_BROLL,
-                ttsVoiceSha = "deadbeef12345678",
-                ttsDurationMs = 2_000L,
-                talkingHeadJobId = "head_brief_01",
-                talkingHeadSha = headAsset.sha256,
-                selectedOverlayIds = listOf(savedOverlay.id)
-            )
-            app.container.localRepo.saveCorePipelineSession(stage4Session)
-            stage4Session
-        }
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            studioVm.uiState.value.corePipelineSession.id == seeded.id &&
-                studioVm.uiState.value.corePipelineSession.selectedOverlayIds.contains(savedOverlay.id)
-        }
-
-        studioVm.runCoreStage4ChopBroll()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            chopBodies.isNotEmpty() &&
-                studioVm.uiState.value.corePipelineSession.stage == CorePipelineStage.FINAL_REVIEW
-        }
-        assertTrue(chopBodies.first().contains("GRID CAPACITY +42%"))
-        assertTrue(chopBodies.first().contains("ERCOT BATTERY DISPATCH REPORT"))
-
-        // Verify removing the saved overlay deletes it from Room
-        onNodeWithTag("newsroom_studio_list").performScrollToKey(savedOverlay.id)
-        onNodeWithTag("delete_saved_overlay_${savedOverlay.id}")
-            .performScrollTo()
-            .performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            studioVm.uiState.value.savedOverlays.none { it.id == savedOverlay.id }
-        }
-    }
-
-    @Test
     fun stockA2uiTestController_verifiesBasicCatalogAndDefensiveErrorBoundary() = runComposeUiTest {
         val catalog = createStockAircheckA2uiCatalog(app)
         val controller = A2uiTestController(
@@ -404,47 +201,6 @@ class AircheckSeparateScreensAndA2uiTest {
         )
         controller.waitForIdle()
         onNodeWithText("A2UI boundary caught: RUNTIME_ERROR").assertIsDisplayed()
-    }
-
-    @Test
-    fun newsroomStudioScreen_whenRigOffline_savesRequestHonestlyWithoutFakeSuccess() = runComposeUiTest {
-        val closedPort = ServerSocket(0).use { it.localPort }
-        runBlocking {
-            app.container.profileStore.setTailscaleRigUrl("http://127.0.0.1:$closedPort")
-        }
-
-        val current = runBlocking { app.container.profileStore.current() }
-        if (current.remotionUsedCount == 0 && current.providers.packageProviderId != "mac_rig_remotion") {
-            var studioVmRef: StudioViewModel? = null
-            setContent {
-                val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
-                val state = studioVm.uiState.collectAsStateWithLifecycle().value
-                AircheckTheme {
-                    NewsroomStudioScreen(
-                        uiState = state,
-                        a2uiController = studioVm.a2uiController,
-                        onBack = {}
-                    )
-                }
-            }
-
-            waitUntil(timeoutMillis = 5_000) {
-                Shadows.shadowOf(Looper.getMainLooper()).idle()
-                onAllNodesWithText("Ask to Install Remotion")
-                    .fetchSemanticsNodes().isNotEmpty()
-            }
-            onNodeWithText("Ask to Install Remotion")
-                .performScrollTo()
-                .performClick()
-
-            waitUntil(timeoutMillis = 5_000) {
-                Shadows.shadowOf(Looper.getMainLooper()).idle()
-                studioVmRef?.uiState?.value?.errorMessage?.contains("unreachable") == true
-            }
-            val after = runBlocking { app.container.profileStore.current() }
-            assertTrue(after.remotionInstallRequested)
-            assertEquals(0, after.remotionUsedCount)
-        }
     }
 
     @Test
@@ -541,8 +297,7 @@ class AircheckSeparateScreensAndA2uiTest {
                     state = st,
                     vm = studioVm,
                     onBack = { returnedToCut = true },
-                    onTestOnClip = {},
-                    onOpenOverlayBuilder = {}
+                    onTestOnClip = {}
                 )
             }
         }
@@ -649,8 +404,7 @@ class AircheckSeparateScreensAndA2uiTest {
                     state = st,
                     vm = studioVm,
                     onBack = {},
-                    onTestOnClip = {},
-                    onOpenOverlayBuilder = {}
+                    onTestOnClip = {}
                 )
             }
         }
