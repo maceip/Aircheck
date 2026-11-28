@@ -834,7 +834,8 @@ class ClipStudioV5ViewModelTest {
         assertEquals("full", s.renderOptions.brollFraming)
         assertEquals(oldDefault, s.clauses[2].brollFramingOverride)
 
-        // A free block (not linked to a sentence) is edited directly.
+        // A free block (not linked to a sentence) is edited directly. Let the VM's own saves land first.
+        waitFor { runBlocking { localRepo.getLatestCorePipelineSession() }?.renderOptions?.brollFraming == "full" }
         val free = s.copy(
             brollSegments = s.brollSegments + com.example.data.BrollSegment(id = "seg_free", startMs = 0L, durationMs = 500L)
         )

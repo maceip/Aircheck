@@ -390,53 +390,53 @@ class ClipStudioV5ComposeTest {
             studioVm.uiState.value.savedOverlays.any { it.kind == OverlayObjectKind.QUOTE_BRIEF }
         }
 
-        // 3. 03 CUT -> Newsroom Overlays Editor -> test Labels (bug), Overlays (inline edit), Look (accent/blur), Tweak AI
+        // 3. 03 CUT -> Newsroom: corner bug LED + edit sheet, quote card edit sheet, Backdrop, done
         onNodeWithTag("cs_cut_look").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             onAllNodesWithTag("cs_newsroom_root").fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Tab 0 (`Labels`): toggle Top-Left Corner Bug ON & edit bug text
-        onNodeWithTag("cs_bug_toggle").performScrollTo().performClick()
+        onNodeWithTag("cs_graphic_led_bug").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             studioVm.uiState.value.corePipelineSession.renderOptions.showBrandBug
         }
-        onNodeWithTag("cs_bug_input").performScrollTo().performTextReplacement("RYAN DESK")
+        onNodeWithTag("cs_graphic_card_bug").performScrollTo().performClick()
+        onNodeWithTag("cs_bug_input").performTextReplacement("RYAN DESK")
+        onNodeWithTag("cs_graphic_save").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             studioVm.uiState.value.corePipelineSession.renderOptions.cornerBugText == "RYAN DESK"
         }
 
-        // Tab 1 (`Overlays`): verify attached quote card & edit its headline inline
-        onNodeWithTag("cs_newsroom_tab_1").performClick()
         val firstQuoteId = studioVm.uiState.value.savedOverlays.first { it.kind == OverlayObjectKind.QUOTE_BRIEF }.id
-        onNodeWithTag("cs_overlay_edit_$firstQuoteId").performScrollTo().performClick()
-        onNodeWithTag("cs_card_headline_field_$firstQuoteId").performScrollTo().performTextReplacement("Own silicon once forever")
-        onNodeWithTag("cs_card_save_$firstQuoteId").performScrollTo().performClick()
+        onNodeWithTag("cs_graphic_card_$firstQuoteId").performScrollTo().performClick()
+        onNodeWithTag("cs_overlay_text").performTextReplacement("Own silicon once forever")
+        onNodeWithTag("cs_graphic_save").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             studioVm.uiState.value.savedOverlays.first { it.id == firstQuoteId }.headline == "Own silicon once forever"
         }
 
-        // Tab 2 (`Look`): adjust accent swatch & blur ruler
-        onNodeWithTag("cs_newsroom_tab_2").performClick()
+        // Backdrop: accent swatch & blur ruler edit the default look, Back returns to Newsroom
+        onNodeWithTag("cs_newsroom_backdrop").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("cs_backdrop_root").fetchSemanticsNodes().isNotEmpty()
+        }
         onNodeWithTag("cs_accent_amber").performScrollTo().performClick()
         onNodeWithTag("cs_scrub_blur_inc").performScrollTo().performClick()
-
-        // Tweak AI button -> opens sheet -> sends POST /v1/ai-assist (mode=tweak_video_look) -> updates state
-        onNodeWithTag("cs_tweak_ai_button").performClick()
-        onNodeWithTag("cs_ai_tweak_sheet").assertIsDisplayed()
-        onNodeWithTag("cs_ai_tweak_input").performTextReplacement("Cobalt blue, cool light, TECH DESK logo, split B-roll")
-        onNodeWithTag("cs_ai_tweak_submit").performClick()
-        waitUntil(timeoutMillis = 8_000) {
+        waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            !studioVm.uiState.value.isTweakingLook &&
-                studioVm.uiState.value.corePipelineSession.renderOptions.brollFraming == "split" &&
-                studioVm.uiState.value.corePipelineSession.renderOptions.cornerBugText == "TECH DESK"
+            val def = studioVm.uiState.value.newsroomLooks.firstOrNull { it.isDefault }
+            def != null && def.accentHex.equals(com.example.data.NewsroomLook.ACCENT_AMBER, ignoreCase = true) && def.blurPercent == 5
         }
-        assertTrue(recordedAiAssistBodies.any { it.contains("\"mode\":\"tweak_video_look\"") })
+        onNodeWithTag("cs_backdrop_back").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            onAllNodesWithTag("cs_newsroom_root").fetchSemanticsNodes().isNotEmpty()
+        }
 
         onNodeWithTag("cs_use_look").performClick()
         waitUntil(timeoutMillis = 5_000) {
@@ -448,21 +448,25 @@ class ClipStudioV5ComposeTest {
         onNodeWithTag("cs_toast_ok").performClick()
         assertTrue(onAllNodesWithTag("cs_toast").fetchSemanticsNodes().isEmpty())
 
-        // 4. 03 CUT -> B-Roll & Transition Studio -> switch framing to Full Cutaway & return
-        onNodeWithTag("cs_cut_broll_studio").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_broll_studio_root").fetchSemanticsNodes().isNotEmpty()
-        }
-        onNodeWithTag("cs_broll_framing_full").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            studioVm.uiState.value.corePipelineSession.renderOptions.brollFraming == "full"
-        }
-        onNodeWithTag("cs_broll_studio_back").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_cut_root").fetchSemanticsNodes().isNotEmpty()
+        // 4. 03 CUT -> tap a B-roll block -> framing full -> done. Blocks sit on the voiced timeline;
+        //    before the voice has timing the timeline says so instead.
+        val cutSession = studioVm.uiState.value.corePipelineSession
+        val voicedMs = com.example.data.CutTimeline.timelineDurationMs(com.example.data.CutTimeline.effectiveClips(cutSession))
+        if (voicedMs <= 0L) {
+            onNodeWithText("TIMELINE APPEARS ONCE THE SCRIPT IS VOICED", useUnmergedTree = true).assertExists()
+        } else {
+            val brollSeg = cutSession.brollSegments.first()
+            onNodeWithTag("cs_broll_block_${brollSeg.id}").performScrollTo().performClick()
+            onNodeWithTag("cs_broll_framing_full").performClick()
+            waitUntil(timeoutMillis = 5_000) {
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+                studioVm.uiState.value.corePipelineSession.renderOptions.brollFraming == "full"
+            }
+            onNodeWithTag("cs_broll_sheet_done").performClick()
+            waitUntil(timeoutMillis = 5_000) {
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+                onAllNodesWithTag("cs_broll_sheet").fetchSemanticsNodes().isEmpty()
+            }
         }
     }
 

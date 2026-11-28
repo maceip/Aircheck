@@ -33,6 +33,15 @@ import com.example.data.RenderJobStatus
 import com.example.ui.a2ui.createStockAircheckA2uiCatalog
 import com.example.ui.clipstudio.CutScreen
 import com.example.ui.clipstudio.NewsroomLookScreen
+import com.example.ui.clipstudio.BackdropScreen
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.performTouchInput
 import com.example.ui.draft.DraftDeckViewModel
 import com.example.ui.theme.AircheckTheme
 import com.sun.net.httpserver.HttpServer
@@ -234,110 +243,71 @@ class AircheckSeparateScreensAndA2uiTest {
             studioVm.uiState.value.statusNotice == null
         }
 
-        // Exercise v5 monitor, play key, captions, aspect, punch-in, trim pauses, undo, tap-to-expand clause edit, and b-roll mode
+        // Monitor, flat play key, captions toggle persisted to Room, undo, and the drag grip resizes the player
         onNodeWithTag("cs_cut_monitor").assertIsDisplayed()
         onNodeWithTag("cs_cut_play").assertIsDisplayed()
         onNodeWithTag("cs_cut_captions").performClick()
-        onNodeWithTag("cs_cut_aspect").performClick()
-        onNodeWithTag("cs_cut_punch_in").performClick()
-        onNodeWithTag("cs_cut_strip_silence").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            val saved = runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
-            saved != null && saved.renderOptions.captions && saved.renderOptions.punchIn &&
-                saved.renderOptions.stripSilence && saved.renderOptions.aspect == com.example.data.CoreRenderOptions.ASPECT_HORIZONTAL
+            runBlocking { app.container.localRepo.getLatestCorePipelineSession() }?.renderOptions?.captions == true
         }
-
-        // Undo reverts the last render option toggle (stripSilence)
         onNodeWithTag("cs_cut_undo").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            val saved = runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
-            saved != null && !saved.renderOptions.stripSilence
+            runBlocking { app.container.localRepo.getLatestCorePipelineSession() }?.renderOptions?.captions == false
         }
-
-        // Single tap on clause 0 expands inline actions (`edit words` & `b-roll here`) without long-press
-        onNodeWithTag("cs_clause_0").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_clause_edit_btn_0").fetchSemanticsNodes().isNotEmpty()
-        }
-        onNodeWithTag("cs_clause_edit_btn_0").performClick()
-        onNodeWithTag("cs_clause_editor_0").performTextReplacement("Updated first broadcast line.")
-        onNodeWithTag("cs_clause_apply_0").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            val saved = runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
-            saved?.clauses?.firstOrNull()?.spokenText == "Updated first broadcast line."
-        }
-
-        // Switch to B-roll mode and toggle clause 0 to B-roll cutaway
-        onNodeWithTag("cs_cut_mode_timeline").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_timeline_toggle_0").fetchSemanticsNodes().isNotEmpty()
-        }
-        onNodeWithTag("cs_timeline_toggle_0").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            val saved = runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
-            saved?.clauses?.firstOrNull()?.segmentMode == com.example.data.BrollSegmentMode.BROLL_CUTAWAY
-        }
+        val before = onNodeWithTag("cs_cut_monitor").fetchSemanticsNode().size.height
+        onNodeWithTag("cs_cut_player_grip", useUnmergedTree = true).performTouchInput { swipeDown(startY = centerY, endY = centerY + 300f) }
+        val after = onNodeWithTag("cs_cut_monitor").fetchSemanticsNode().size.height
+        assertTrue("grip drag should grow the player ($before -> $after)", after > before)
     }
 
     @Test
-    fun clipStudioNewsroomLookScreen_exercisesTickRulersPillsSaveDuplicateAndDefault() = runComposeUiTest {
+    fun backdropScreen_looksRulersLight_editTheDefaultLook_andNewsroomDoneSaves() = runComposeUiTest {
         var studioVmRef: StudioViewModel? = null
+        var screen by mutableStateOf("backdrop")
         var returnedToCut = false
         setContent {
             val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
             val st by studioVm.uiState.collectAsStateWithLifecycle()
             AircheckTheme {
-                NewsroomLookScreen(
-                    state = st,
-                    vm = studioVm,
-                    onBack = { returnedToCut = true },
-                    onTestOnClip = {}
-                )
+                if (screen == "backdrop") {
+                    BackdropScreen(state = st, vm = studioVm, onBack = { screen = "newsroom" })
+                } else {
+                    NewsroomLookScreen(state = st, vm = studioVm, onBack = {}, onDone = { returnedToCut = true }, onOpenBackdrop = { screen = "backdrop" })
+                }
             }
         }
         val studioVm = checkNotNull(studioVmRef)
         val initialCount = runBlocking { app.container.localRepo.newsroomLooksOnce().size }
-
-        // Tab 2 (`Look`) hosts look presets, blur/brightness rulers, and lighting controls
-        onNodeWithTag("cs_newsroom_tab_2").performClick()
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_look_new").fetchSemanticsNodes().isNotEmpty()
-        }
+        onNodeWithTag("cs_backdrop_preview").assertExists()
 
         onNodeWithTag("cs_look_new").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.newsroomLooksOnce().size } == initialCount + 1
         }
-
-        // Duplicate look from preset header key
         onNodeWithTag("cs_look_duplicate").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.newsroomLooksOnce().size } == initialCount + 2
         }
 
-        // Adjust BLUR (±5%) + BRIGHTNESS (±0.2 EV) + 3-way LIGHT (`warm`)
+        // BLUR (+5% x2), EXPOSURE (+0.2 EV), light warm: saved straight to the default look
         onNodeWithTag("cs_scrub_blur_inc").performScrollTo().performClick()
         onNodeWithTag("cs_scrub_blur_inc").performClick()
         onNodeWithTag("cs_scrub_ev_inc").performScrollTo().performClick()
         onNodeWithTag("cs_light_warm").performScrollTo().performClick()
-
-        // Switch to `Overlays` tab (`cs_newsroom_tab_1`) and verify custom overlay creator key
-        onNodeWithTag("cs_newsroom_tab_1").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_new_overlay_toggle").fetchSemanticsNodes().isNotEmpty()
+            val def = studioVm.uiState.value.newsroomLooks.firstOrNull { it.isDefault }
+            def != null && def.blurPercent == 10 && def.brightnessEv == 0.2 && def.light == com.example.data.NewsroomLook.LIGHT_WARM
         }
+        // generate set needs a room prompt
+        onNodeWithTag("cs_backdrop_generate").assertIsNotEnabled()
 
-        // Primary dock key saves edits, sets default in Room, posts toast, and navigates back
+        // Back -> Newsroom; done saves the look as default in Room and returns to Cut
+        onNodeWithTag("cs_backdrop_back").performClick()
         onNodeWithTag("cs_use_look").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
@@ -400,12 +370,7 @@ class AircheckSeparateScreensAndA2uiTest {
             val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
             val st by studioVm.uiState.collectAsStateWithLifecycle()
             AircheckTheme {
-                NewsroomLookScreen(
-                    state = st,
-                    vm = studioVm,
-                    onBack = {},
-                    onTestOnClip = {}
-                )
+                NewsroomLookScreen(state = st, vm = studioVm, onBack = {}, onDone = {}, onOpenBackdrop = {})
             }
         }
         val studioVm = checkNotNull(studioVmRef)
@@ -418,29 +383,26 @@ class AircheckSeparateScreensAndA2uiTest {
             studioVm.uiState.value.corePipelineSession.clauses.isNotEmpty()
         }
 
-        // Tab 0 (`Labels`) opens directly with lower-third style chips & AI title polish
-        waitUntil(timeoutMillis = 5_000) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            onAllNodesWithTag("cs_tag_breaking").fetchSemanticsNodes().isNotEmpty()
+        // Kicker styles live in the chyron's edit sheet; save persists to Room and the preview follows.
+        fun pickStyle(tag: String) {
+            onNodeWithTag("cs_graphic_card_chyron").performScrollTo().performClick()
+            onNodeWithTag(tag).performClick()
+            onNodeWithTag("cs_graphic_save").performClick()
         }
-
-        // Cycle TAG ABOVE TITLE pills (`exclusive`, `clean`, `developing`) and assert real Room persistence
-        onNodeWithTag("cs_tag_exclusive").performScrollTo().performClick()
+        pickStyle("cs_tag_exclusive")
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
                 ?.renderOptions?.breakingStyle == com.example.data.BreakingNewsStyle.EXCLUSIVE
         }
-
-        onNodeWithTag("cs_tag_clean").performScrollTo().performClick()
+        pickStyle("cs_tag_clean")
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
                 ?.renderOptions?.breakingStyle == com.example.data.BreakingNewsStyle.CLEAN &&
                 onAllNodesWithTag("cs_canvas_breaking_kicker", useUnmergedTree = true).fetchSemanticsNodes().isEmpty()
         }
-
-        onNodeWithTag("cs_tag_developing").performScrollTo().performClick()
+        pickStyle("cs_tag_developing")
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
@@ -448,7 +410,8 @@ class AircheckSeparateScreensAndA2uiTest {
                 onAllNodesWithTag("cs_canvas_breaking_kicker", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Refresh title with AI (`polish_headline` on Mac rig) and verify Room persistence + live preview
+        // AI polish (`polish_headline` on the rig) from the headline field; Room + preview + sheet follow
+        onNodeWithTag("cs_graphic_card_chyron").performScrollTo().performClick()
         onNodeWithTag("cs_title_refresh").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
@@ -456,11 +419,36 @@ class AircheckSeparateScreensAndA2uiTest {
                 runBlocking { app.container.localRepo.getLatestCorePipelineSession() }
                     ?.renderOptions?.chyronHeadline == "Log video fixes default phone HDR"
         }
-        onNodeWithText("DEVELOPING", useUnmergedTree = true).assertIsDisplayed()
-        assertEquals(
-            2,
-            onAllNodesWithText("Log video fixes default phone HDR", useUnmergedTree = true).fetchSemanticsNodes().size
-        )
+        onNode(hasTestTag("cs_title_input") and hasText("Log video fixes default phone HDR")).assertExists()
+        onNode(hasText("Log video fixes default phone HDR") and hasAnyAncestor(hasTestTag("cs_look_canvas")), useUnmergedTree = true).assertExists()
+        onNodeWithTag("cs_graphic_sheet_close").performClick()
+
+        // AI 3-pack: the generated quote card gets its own card; its LED attaches/detaches it; its sheet edits timing and deletes
+        onNodeWithTag("cs_generate_overlay_set").performScrollTo().performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.savedOverlays.any { it.headline == "Default tone-mapping crushes highlight roll-off." }
+        }
+        val quote = studioVm.uiState.value.savedOverlays.first { it.headline == "Default tone-mapping crushes highlight roll-off." }
+        val wasAttached = quote.id in studioVm.uiState.value.corePipelineSession.selectedOverlayIds
+        onNodeWithTag("cs_graphic_led_${quote.id}").performScrollTo().performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            (quote.id in studioVm.uiState.value.corePipelineSession.selectedOverlayIds) != wasAttached
+        }
+        onNodeWithTag("cs_graphic_card_${quote.id}").performScrollTo().performClick()
+        onNodeWithTag("cs_overlay_secs_8").performClick()
+        onNodeWithTag("cs_graphic_save").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.savedOverlays.first { it.id == quote.id }.durationSec == 8
+        }
+        onNodeWithTag("cs_graphic_card_${quote.id}").performScrollTo().performClick()
+        onNodeWithTag("cs_graphic_delete").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.savedOverlays.none { it.id == quote.id }
+        }
     }
 
     private val rigTasks = java.util.concurrent.ConcurrentHashMap<String, String>()

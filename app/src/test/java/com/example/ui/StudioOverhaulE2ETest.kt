@@ -335,18 +335,13 @@ class StudioOverhaulE2ETest {
     }
 
     @Test
-    fun newsroomOverlaysEditor_createEditToggleChyronUndo_andInvalidatesCutSignature() = runComposeUiTest {
+    fun newsroom_ledsChyronSheetNewGraphicUndo_andInvalidatesCutSignature() = runComposeUiTest {
         var studioVmRef: StudioViewModel? = null
         setContent {
             val studioVm = studioVmRef ?: StudioViewModel(app).also { studioVmRef = it }
             val st by studioVm.uiState.collectAsStateWithLifecycle()
             AircheckTheme {
-                NewsroomLookScreen(
-                    state = st,
-                    vm = studioVm,
-                    onBack = {},
-                    onTestOnClip = {}
-                )
+                NewsroomLookScreen(state = st, vm = studioVm, onBack = {}, onDone = {}, onOpenBackdrop = {})
             }
         }
         val studioVm = checkNotNull(studioVmRef)
@@ -356,33 +351,37 @@ class StudioOverhaulE2ETest {
             studioVm.uiState.value.corePipelineSession.clauses.isNotEmpty()
         }
 
-        // Toggle chyron OFF and back ON, and edit subline on Tab 0 (Labels)
-        onNodeWithTag("cs_chyron_toggle").performScrollTo().performClick()
+        // Chyron LED off and back on; subline edited in the chyron sheet
+        onNodeWithTag("cs_graphic_led_chyron").performScrollTo().performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             !studioVm.uiState.value.corePipelineSession.renderOptions.showLowerThird
         }
-        onNodeWithTag("cs_chyron_toggle").performScrollTo().performClick()
-        onNodeWithTag("cs_subline_input").performScrollTo().performTextReplacement("LIVE FROM AUSTIN")
+        onNodeWithTag("cs_graphic_led_chyron").performScrollTo().performClick()
+        onNodeWithTag("cs_graphic_card_chyron").performScrollTo().performClick()
+        onNodeWithTag("cs_subline_input").performTextReplacement("LIVE FROM AUSTIN")
+        onNodeWithTag("cs_graphic_save").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            studioVm.uiState.value.corePipelineSession.renderOptions.chyronSubline == "LIVE FROM AUSTIN"
+            studioVm.uiState.value.corePipelineSession.renderOptions.showLowerThird &&
+                studioVm.uiState.value.corePipelineSession.renderOptions.chyronSubline == "LIVE FROM AUSTIN"
         }
 
-        // Switch to Tab 1 (`Overlays`), create a brand-new custom stat overlay
-        onNodeWithTag("cs_newsroom_tab_1").performClick()
-        onNodeWithTag("cs_new_overlay_toggle").performScrollTo().performClick()
-        onNodeWithTag("cs_new_ovl_headline").performScrollTo().performTextReplacement("Zero monthly fees")
-        onNodeWithTag("cs_new_ovl_subline").performScrollTo().performTextReplacement("Local phone studio")
-        onNodeWithTag("cs_new_ovl_stat").performScrollTo().performTextReplacement("\$0/MO")
-        onNodeWithTag("cs_new_ovl_create").performScrollTo().performClick()
-
+        // + new: a stat graphic, created and attached to this clip
+        onNodeWithTag("cs_newsroom_new").performScrollTo().performClick()
+        onNodeWithTag("cs_new_ovl_kind_STAT_CALLOUT").performClick()
+        onNodeWithTag("cs_overlay_text").performTextReplacement("Zero monthly fees")
+        onNodeWithTag("cs_overlay_number").performTextReplacement("\$0/MO")
+        onNodeWithTag("cs_graphic_save").performClick()
         waitUntil(timeoutMillis = 5_000) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             studioVm.uiState.value.savedOverlays.any { it.headline == "Zero monthly fees" }
         }
         val created = studioVm.uiState.value.savedOverlays.first { it.headline == "Zero monthly fees" }
+        assertEquals(com.example.data.OverlayObjectKind.STAT_CALLOUT, created.kind)
+        assertEquals("\$0/MO", created.calloutStat)
         assertTrue(created.id in studioVm.uiState.value.corePipelineSession.selectedOverlayIds)
+        onNodeWithTag("cs_graphic_card_${created.id}").assertExists()
 
         // Verify cutSignature changes when overlay content is edited inline!
         val defaultLook = studioVm.uiState.value.newsroomLooks.firstOrNull { it.isDefault } ?: NewsroomLook(name = "LOOK_01")
@@ -394,6 +393,13 @@ class StudioOverhaulE2ETest {
         }
         val sigAfter = studioVm.uiState.value.corePipelineSession.cutSignature(defaultLook, studioVm.uiState.value.savedOverlays)
         assertNotEquals("Editing overlay text MUST invalidate cutSignature", sigBefore, sigAfter)
+
+        // Undo restores the previous state
+        onNodeWithTag("cs_newsroom_undo").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            studioVm.uiState.value.toastMessage?.startsWith("Undid:") == true
+        }
     }
 
     @Test
