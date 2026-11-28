@@ -1,7 +1,11 @@
 package com.example.ui.clipstudio
 
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -235,7 +239,17 @@ fun StudioProgressDisplay(
     tag: String = "cs_busy_box"
 ) {
     val target = (progressFraction ?: 0f).coerceIn(0f, 1f)
-    val animated by animateFloatAsState(target, tween(80, easing = LinearEasing), label = "busy_progress")
+    val animatedState = animateFloatAsState(target, tween(180, easing = LinearEasing), label = "busy_progress")
+    val pulseTransition = rememberInfiniteTransition(label = "busy_rail_pulse")
+    val railScanState = pulseTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1500, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "busy_rail_scan"
+    )
     AcNotice(
         kind = AcNoticeKind.BUSY,
         modifier = modifier
@@ -246,17 +260,27 @@ fun StudioProgressDisplay(
         Box(
             Modifier
                 .fillMaxSize()
-                .then(
-                    if (progressFraction != null) {
-                        Modifier.drawBehind {
-                            val y = size.height - 2.dp.toPx()
-                            drawLine(AcTokens.Hairline, Offset(0f, y), Offset(size.width, y), 1.5.dp.toPx())
-                            drawLine(AcTokens.Red, Offset(0f, y), Offset(size.width * animated, y), 1.5.dp.toPx())
-                        }
-                    } else {
-                        Modifier
+                .drawBehind {
+                    val y = size.height - 2.dp.toPx()
+                    val stroke = 2.dp.toPx()
+                    drawLine(AcTokens.Hairline, Offset(0f, y), Offset(size.width, y), stroke)
+                    val filledW = if (progressFraction != null) size.width * animatedState.value else 0f
+                    if (filledW > 0f) {
+                        drawLine(AcTokens.Red, Offset(0f, y), Offset(filledW, y), stroke)
                     }
-                )
+                    // Subtle live scan cue along the remaining track so long cloud renders visibly show active polling.
+                    val remain = (size.width - filledW).coerceAtLeast(0f)
+                    if (remain > 12.dp.toPx()) {
+                        val pulseW = (remain * 0.28f).coerceIn(18.dp.toPx(), 64.dp.toPx())
+                        val startX = filledW + (remain - pulseW) * railScanState.value
+                        drawLine(
+                            color = AcTokens.Red.copy(alpha = 0.42f),
+                            start = Offset(startX, y),
+                            end = Offset((startX + pulseW).coerceAtMost(size.width), y),
+                            strokeWidth = stroke
+                        )
+                    }
+                }
         ) {
             Row(
                 modifier = Modifier

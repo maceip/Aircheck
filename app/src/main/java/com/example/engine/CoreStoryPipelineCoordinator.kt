@@ -477,7 +477,7 @@ class CoreStoryPipelineCoordinator(
                         val current = poll.getOrThrow()
                         if (!current.status.isTerminal) {
                             onProgress(
-                                current.progressFraction.coerceIn(0.15f, 0.92f),
+                                current.progressFraction.coerceIn(0.15f, 0.94f),
                                 current.stageDetail.ifBlank { "Matching speech to talking head…" }
                             )
                             delay(interval)

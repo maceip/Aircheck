@@ -459,6 +459,35 @@ def _normalize_heygen_resolution(engine: str, raw_resolution: str | None, fallba
     return "720p" if candidate == "720p" else "1080p"
 
 
+def _write_progress_file(
+    progress_file: Path | None,
+    *,
+    progress_fraction: float,
+    stage_detail: str,
+    provider_status: str | None = None,
+    video_id: str | None = None,
+) -> None:
+    """Atomically writes a real substage progress milestone for ota_server.py to stream live."""
+    if progress_file is None:
+        return
+    payload: dict[str, Any] = {
+        "progress_fraction": round(max(0.0, min(1.0, float(progress_fraction))), 4),
+        "stage_detail": str(stage_detail).strip(),
+        "updated_at": round(time.time(), 3),
+    }
+    if provider_status:
+        payload["provider_status"] = str(provider_status).strip()
+    if video_id:
+        payload["video_id"] = str(video_id).strip()
+    try:
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = progress_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, progress_file)
+    except OSError:
+        pass
+
+
 def _invoke_heygen_avatar(
     *,
     master_wav: Path,
@@ -473,6 +502,7 @@ def _invoke_heygen_avatar(
     heygen_resolution: str | None = None,
     heygen_expressiveness: str | None = None,
     heygen_motion_prompt: str | None = None,
+    progress_file: Path | None = None,
 ) -> dict[str, Any]:
     if not HEYGEN_BIN.is_file():
         raise RuntimeError(f"HeyGen CLI not found at {HEYGEN_BIN}")
@@ -492,6 +522,12 @@ def _invoke_heygen_avatar(
         )
     eff_motion = (heygen_motion_prompt or "").strip()[:400]
 
+    _write_progress_file(
+        progress_file,
+        progress_fraction=0.63,
+        stage_detail=f"Uploading voice to HeyGen ({eff_res})",
+        provider_status="uploading",
+    )
     asset = _heygen_json(["asset", "create", "--file", str(master_wav)])["data"]
     if use_custom_photo and avatar_path.is_file():
         img_asset = _heygen_json(["asset", "create", "--file", str(avatar_path)])["data"]
@@ -522,23 +558,64 @@ def _invoke_heygen_avatar(
             body["expressiveness"] = eff_expr
         if eff_motion and eff_engine != "avatar_iii":
             body["motion_prompt"] = eff_motion
+    _write_progress_file(
+        progress_file,
+        progress_fraction=0.66,
+        stage_detail=f"Submitting HeyGen {eff_res} render",
+        provider_status="submitting",
+    )
     created = _heygen_json(["video", "create", "-d", json.dumps(body)])["data"]
     video_id = created.get("video_id") or created.get("id")
     if not video_id:
         raise RuntimeError(f"heygen video create returned no video id: {created}")
+    _write_progress_file(
+        progress_file,
+        progress_fraction=0.68,
+        stage_detail=f"HeyGen {eff_res} queued",
+        provider_status="queued",
+        video_id=str(video_id),
+    )
     deadline = time.time() + timeout_sec
     status = "pending"
     info: dict[str, Any] = {}
     while time.time() < deadline:
         info = _heygen_json(["video", "get", str(video_id)])["data"]
-        status = str(info.get("status") or "")
+        status = str(info.get("status") or "").strip().lower()
         if status == "completed":
             break
         if status == "failed":
             raise RuntimeError(f"HeyGen render failed: {info.get('failure_message') or info.get('error') or info}")
+        raw_prog = info.get("progress")
+        if status in ("pending", "waiting", "queued", ""):
+            poll_frac = 0.68
+            poll_label = f"HeyGen {eff_res} queued"
+        elif status in ("processing", "rendering"):
+            poll_frac = 0.72
+            if isinstance(raw_prog, (int, float)) and not isinstance(raw_prog, bool):
+                p_norm = float(raw_prog) / 100.0 if float(raw_prog) > 1.0 else float(raw_prog)
+                if 0.0 <= p_norm <= 1.0:
+                    poll_frac = round(0.72 + p_norm * 0.12, 4)
+            poll_label = f"HeyGen {eff_res} rendering"
+        else:
+            poll_frac = 0.70
+            poll_label = f"HeyGen {eff_res} ({status})"
+        _write_progress_file(
+            progress_file,
+            progress_fraction=poll_frac,
+            stage_detail=poll_label,
+            provider_status=status or "pending",
+            video_id=str(video_id),
+        )
         time.sleep(HEYGEN_POLL_SEC)
     if status != "completed":
         raise RuntimeError(f"HeyGen render {video_id} still '{status}' after {timeout_sec}s")
+    _write_progress_file(
+        progress_file,
+        progress_fraction=0.85,
+        stage_detail=f"Downloading HeyGen {eff_res} video",
+        provider_status="downloading",
+        video_id=str(video_id),
+    )
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
         [str(HEYGEN_BIN), "video", "download", str(video_id), "--output-path", str(output_mp4), "--force"],
@@ -575,6 +652,7 @@ def generate_talking_head(
     heygen_expressiveness: str | None = None,
     heygen_motion_prompt: str | None = None,
     media_config_path: Path | None = None,
+    progress_file: Path | None = None,
 ) -> dict:
     from media_providers.registry import VALID_VIDEO_BACKENDS, load_config
 
@@ -599,6 +677,12 @@ def generate_talking_head(
     with tempfile.TemporaryDirectory(prefix="aircheck_head_") as tmp_str:
         tmp_dir = Path(tmp_str)
         master_wav = tmp_dir / "master_voice.wav"
+        _write_progress_file(
+            progress_file,
+            progress_fraction=0.61,
+            stage_detail="Preparing master voice",
+            provider_status="preparing",
+        )
         _, total_ms = _prepare_canonical_master_wav(
             voice_input,
             master_wav,
@@ -611,6 +695,12 @@ def generate_talking_head(
                 raise RuntimeError(
                     "MuseTalk video_backend requested without configured musetalk block in --media-config; no hosted fallback attempted."
                 )
+            _write_progress_file(
+                progress_file,
+                progress_fraction=0.65,
+                stage_detail="MuseTalk rendering",
+                provider_status="processing",
+            )
             return render(
                 media_config.musetalk or {}, master_wav=master_wav, avatar=avatar_path,
                 output=output_mp4, width=target_w, height=target_h, duration_ms=total_ms,
@@ -618,6 +708,12 @@ def generate_talking_head(
         if eff_video_backend == "avatarforcing_mlx":
             from media_providers.mlx_avatars import render_avatarforcing
 
+            _write_progress_file(
+                progress_file,
+                progress_fraction=0.65,
+                stage_detail="AvatarForcing MLX rendering",
+                provider_status="processing",
+            )
             return render_avatarforcing(
                 master_wav=master_wav,
                 avatar=avatar_path,
@@ -629,6 +725,12 @@ def generate_talking_head(
         if eff_video_backend == "longcat_avatar_mlx":
             from media_providers.mlx_avatars import render_longcat_avatar
 
+            _write_progress_file(
+                progress_file,
+                progress_fraction=0.65,
+                stage_detail="LongCat 1.6 MLX rendering",
+                provider_status="processing",
+            )
             return render_longcat_avatar(
                 master_wav=master_wav,
                 avatar=avatar_path,
@@ -664,6 +766,7 @@ def generate_talking_head(
             heygen_resolution=heygen_resolution,
             heygen_expressiveness=heygen_expressiveness,
             heygen_motion_prompt=heygen_motion_prompt,
+            progress_file=progress_file,
         )
         qa_target = output_mp4
         result_lambda: dict[str, Any] = {
@@ -691,6 +794,12 @@ def generate_talking_head(
             "output_bytes": output_mp4.stat().st_size,
         }
         if replace_audio_with_input:
+            _write_progress_file(
+                progress_file,
+                progress_fraction=0.90,
+                stage_detail="Muxing exact voice track",
+                provider_status="muxing",
+            )
             orig_audio_mp4 = output_mp4.with_name(f"{output_mp4.stem}_exact_input_voice.mp4")
             # Mux the canonical master voice WAV onto HeyGen's video stream (copy video, no re-encode)
             # so the deliverable carries the exact input voice, not HeyGen's re-encoded audio track.
@@ -724,6 +833,12 @@ def generate_talking_head(
         else:
             qa_w, qa_h = target_w, target_h
 
+        _write_progress_file(
+            progress_file,
+            progress_fraction=0.92,
+            stage_detail="Checking A/V sync",
+            provider_status="verifying",
+        )
         qa = verify_av_sync_ffprobe(
             qa_target,
             expected_audio_ms=total_ms,
@@ -747,6 +862,7 @@ def main() -> int:
     parser.add_argument("--ratio", default="9:16", choices=["9:16", "16:9", "1:1"])
     parser.add_argument("--max-duration", type=int, default=10, help="Max clip duration in seconds (2..120, default 10)")
     parser.add_argument("--media-config", type=Path, default=None, help="Opt-in local provider configuration")
+    parser.add_argument("--progress-file", type=Path, default=None, help="Optional JSON file path for atomic substage progress updates")
     parser.add_argument(
         "--video-backend",
         default=None,
@@ -777,6 +893,7 @@ def main() -> int:
         heygen_expressiveness=args.heygen_expressiveness,
         heygen_motion_prompt=args.heygen_motion_prompt,
         media_config_path=args.media_config,
+        progress_file=args.progress_file,
     )
     print(json.dumps(res, indent=2))
     return 0

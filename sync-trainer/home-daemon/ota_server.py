@@ -112,6 +112,72 @@ from tinker_voice_daemon import (
 
 LOGGER = logging.getLogger("voicestudio.ota_server")
 
+
+def _format_elapsed_mmss(elapsed_sec: float) -> str:
+    secs = max(0, int(elapsed_sec))
+    return f"{secs // 60}:{secs % 60:02d}"
+
+
+def _run_talking_head_with_progress(
+    cmd: Sequence[str],
+    *,
+    progress_file: Path,
+    timeout_sec: int,
+    initial_fraction: float,
+    initial_detail: str,
+    report_progress: Callable[..., None],
+    metrics: dict[str, Any] | None,
+    poll_interval_sec: float = 1.0,
+) -> subprocess.CompletedProcess[str]:
+    """Runs generate_talking_head.py with timeout while streaming real substage milestones + elapsed clock."""
+    stop_watch = threading.Event()
+    started = time.monotonic()
+    cur_frac = float(initial_fraction)
+    cur_base_detail = str(initial_detail).strip() or "Rendering talking head"
+
+    def _watch_progress() -> None:
+        nonlocal cur_frac, cur_base_detail
+        last_reported_detail = ""
+        last_reported_frac = -1.0
+        while not stop_watch.wait(poll_interval_sec):
+            elapsed = time.monotonic() - started
+            if progress_file.is_file():
+                try:
+                    raw_p = json.loads(progress_file.read_text(encoding="utf-8"))
+                    if isinstance(raw_p, dict):
+                        p_val = raw_p.get("progress_fraction")
+                        if isinstance(p_val, (int, float)) and not isinstance(p_val, bool):
+                            cur_frac = max(cur_frac, min(0.94, float(p_val)))
+                        detail_val = str(raw_p.get("stage_detail") or "").strip()
+                        if detail_val:
+                            cur_base_detail = detail_val
+                except (OSError, json.JSONDecodeError):
+                    pass
+            live_detail = f"{cur_base_detail} · {_format_elapsed_mmss(elapsed)}"
+            if live_detail != last_reported_detail or abs(cur_frac - last_reported_frac) >= 0.005:
+                report_progress(
+                    status="LIPSYNC",
+                    progress_fraction=cur_frac,
+                    stage_detail=live_detail,
+                    metrics=metrics,
+                )
+                last_reported_detail = live_detail
+                last_reported_frac = cur_frac
+
+    watcher = threading.Thread(target=_watch_progress, daemon=True)
+    watcher.start()
+    try:
+        return subprocess.run(
+            list(cmd),
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+    finally:
+        stop_watch.set()
+        watcher.join(timeout=2.0)
+
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8443
 STREAM_CHUNK_BYTES = 256 * 1024  # 256 KiB streaming chunks for multi-GB GGUF & MP4 files
@@ -2349,13 +2415,13 @@ class RenderJobManager:
         eff_hg_engine = str(spec.get("heygen_engine") or HEYGEN_ENGINE)
         eff_hg_res = str(spec.get("heygen_resolution") or resolution)
         if eff_video_backend == "musetalk":
-            stage_video_detail = f"Rendering {resolution} talking-head video (MuseTalk)"
+            stage_video_detail = "Starting MuseTalk"
         elif eff_video_backend == "avatarforcing_mlx":
-            stage_video_detail = f"Rendering {resolution} talking-head video (AvatarForcing MLX)"
+            stage_video_detail = "Starting AvatarForcing MLX"
         elif eff_video_backend == "longcat_avatar_mlx":
-            stage_video_detail = f"Rendering {resolution} talking-head video (LongCat 1.6 MLX)"
+            stage_video_detail = "Starting LongCat 1.6 MLX"
         else:
-            stage_video_detail = f"Rendering {eff_hg_res} talking-head video (HeyGen {eff_hg_engine})"
+            stage_video_detail = f"Starting HeyGen {eff_hg_res} render"
         report_progress(
             status="LIPSYNC",
             progress_fraction=0.60,
@@ -2371,6 +2437,7 @@ class RenderJobManager:
                 voice_ms = 0
 
         seg_mp4 = work_dir / "talking_head.mp4"
+        head_progress_file = work_dir / "head_progress.json"
         head_cmd = [
             python_exe,
             str(head_script),
@@ -2388,6 +2455,8 @@ class RenderJobManager:
             str(max_duration),
             "--video-backend",
             eff_video_backend,
+            "--progress-file",
+            str(head_progress_file),
         ]
         if self.media_config_path is not None:
             config_snapshot = work_dir / "media_provider_config.json"
@@ -2454,12 +2523,14 @@ class RenderJobManager:
         elif eff_video_backend == "avatarforcing_mlx":
             head_timeout_sec = max(head_timeout_sec, 900)
         try:
-            head_proc = subprocess.run(
+            head_proc = _run_talking_head_with_progress(
                 head_cmd,
-                capture_output=True,
-                text=True,
-                timeout=head_timeout_sec,
-                check=False,
+                progress_file=head_progress_file,
+                timeout_sec=head_timeout_sec,
+                initial_fraction=0.60,
+                initial_detail=stage_video_detail,
+                report_progress=report_progress,
+                metrics=metrics,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"generate_talking_head.py timed out after {head_timeout_sec}s") from exc
@@ -2469,6 +2540,13 @@ class RenderJobManager:
         # Ensure the concurrent b-roll prefetch finishes before this job is READY, so the chop that
         # follows hits a warm cache (and never races the prefetch writing the same still).
         if broll_prefetch_thread is not None:
+            if broll_prefetch_thread.is_alive():
+                report_progress(
+                    status="LIPSYNC",
+                    progress_fraction=0.94,
+                    stage_detail="Finishing B-roll prefetch…",
+                    metrics=metrics,
+                )
             broll_prefetch_thread.join(timeout=300)
         head_meta: dict[str, Any] = {}
         stdout_text = (head_proc.stdout or "").strip()
