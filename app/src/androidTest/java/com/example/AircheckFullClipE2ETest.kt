@@ -8,7 +8,9 @@ import android.net.Uri
 import android.util.Log
 import android.view.WindowManager
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -270,14 +272,21 @@ class AircheckFullClipE2ETest {
             composeRule.onNodeWithTag("cs_cut_add_broll").scrollIntoView().performClick()
             waitFor("segment added", 5_000L) { persisted().brollSegments.any { it.id !in before } }
             val segId = persisted().brollSegments.first { it.id !in before }.id
-            composeRule.onNodeWithTag("cs_broll_block_$segId").scrollIntoView().performClick()
+            // A new block can sit under an existing line-linked block (run 3: the centre tap opened the
+            // overlapping segment's sheet). Tap its leading edge, where it starts before any overlap.
+            composeRule.onNodeWithTag("cs_broll_block_$segId").scrollIntoView()
+                .performTouchInput { click(Offset(width * 0.08f, centerY)) }
             waitForTag("cs_broll_sheet")
             composeRule.onNodeWithTag("cs_broll_sheet_prompt").performTextReplacement(BROLL_PROMPT)
             Espresso.closeSoftKeyboard()
             composeRule.onNodeWithTag("cs_broll_sheet_generate").performClick()
             waitFor("b-roll generated", 10 * 60_000L) {
-                val seg = persisted().brollSegments.firstOrNull { it.id == segId }
+                val segs = persisted().brollSegments
+                val seg = segs.firstOrNull { it.id == segId }
                 failOnError("b-roll")
+                segs.firstOrNull { it.id != segId && it.prompt == BROLL_PROMPT && !it.mediaId.isNullOrBlank() }?.let {
+                    throw AssertionError("b-roll sheet edited ${it.id}, not the new segment $segId")
+                }
                 seg != null && (!seg.sha.isNullOrBlank() || !seg.mediaId.isNullOrBlank()) &&
                     segId !in studioVm.uiState.value.generatingBrollSegmentIds
             }
